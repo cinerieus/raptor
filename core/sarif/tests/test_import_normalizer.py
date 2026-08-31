@@ -1117,3 +1117,39 @@ class TestScaTaggingInNormalize:
         sca_f = [f for f in result.findings if f["finding_id"] == "sca-1"][0]
         assert "source_type" not in code_f
         assert sca_f["source_type"] == "dependency"
+
+
+class TestUntrustedTreeHardening:
+    """The scanned tree and the imported SARIF are both untrusted —
+    the file index and snippet synthesis must stay bounded."""
+
+    def test_deep_tree_does_not_recurse(self, tmp_path):
+        # ~1200 nesting levels blow a recursive walk's Python stack;
+        # the iterative index must survive and still find the file.
+        # One mkdir per level: pathlib's parents=True is itself
+        # recursive and cannot build a 1200-deep tree in one call.
+        deep = tmp_path
+        for _ in range(1200):
+            deep = deep / "d"
+            deep.mkdir()
+        (deep / "leaf.c").write_text("int x;\n")
+        from core.sarif.import_normalizer import _build_file_index
+        index = _build_file_index(tmp_path)
+        assert "leaf.c" in index
+
+    def test_oversized_source_skips_snippet(self, tmp_path):
+        from core.sarif.import_normalizer import (
+            _SNIPPET_SOURCE_MAX_BYTES,
+            _synthesize_snippet,
+        )
+        big = tmp_path / "big.c"
+        with big.open("wb") as f:
+            f.seek(_SNIPPET_SOURCE_MAX_BYTES)
+            f.write(b"x")
+        assert _synthesize_snippet(tmp_path, "big.c", 1, 1) == ""
+
+    def test_normal_source_still_synthesizes(self, tmp_path):
+        from core.sarif.import_normalizer import _synthesize_snippet
+        (tmp_path / "ok.c").write_text("line1\nline2\nline3\n")
+        snippet = _synthesize_snippet(tmp_path, "ok.c", 2, 2)
+        assert "line2" in snippet

@@ -138,20 +138,25 @@ def _build_file_index(source_root: Path) -> dict[str, list[Path]]:
     """
     index: dict[str, list[Path]] = {}
 
-    def _walk(directory: Path) -> None:
+    # Iterative walk (explicit stack). The tree being indexed is the
+    # UNTRUSTED scanned repo — a recursive walk hits Python's
+    # recursion limit around ~1000 directory levels and a hostile
+    # deep tree would abort the whole import with RecursionError.
+    stack: list[Path] = [source_root]
+    while stack:
+        directory = stack.pop()
         try:
             entries = sorted(directory.iterdir())
         except (OSError, PermissionError):
-            return
+            continue
         for entry in entries:
             if entry.is_dir() and not entry.is_symlink():
                 if entry.name not in _SKIP_DIRS:
-                    _walk(entry)
+                    stack.append(entry)
             elif entry.is_file():
                 rel = entry.relative_to(source_root)
                 index.setdefault(entry.name, []).append(rel)
 
-    _walk(source_root)
     return index
 
 
@@ -223,6 +228,14 @@ def _resolve_uri(
 
 _SNIPPET_CONTEXT_LINES = 3
 
+# Per-finding source reads are bounded: the referenced file lives in
+# the UNTRUSTED scanned tree and the SARIF (also untrusted) picks
+# which file gets read — an unbounded read_text on a multi-GB blob
+# would be repeated once per snippet-less finding. 10 MiB comfortably
+# covers real source files (the sibling SARIF-document cap in
+# parser.load_sarif is 100 MiB for whole result files).
+_SNIPPET_SOURCE_MAX_BYTES = 10 * 1024 * 1024
+
 
 def _synthesize_snippet(
     source_root: Path, rel_path: str,
@@ -232,9 +245,18 @@ def _synthesize_snippet(
 
     The snippet starts at ``start_line`` (no leading context) and
     extends ``_SNIPPET_CONTEXT_LINES`` lines past the finding's end.
+    Files larger than ``_SNIPPET_SOURCE_MAX_BYTES`` are skipped (the
+    finding keeps flowing, just without a synthesized snippet).
     """
     try:
         full = source_root / rel_path
+        if full.stat().st_size > _SNIPPET_SOURCE_MAX_BYTES:
+            logger.warning(
+                "SARIF import: skipping snippet synthesis for oversized "
+                "file (>%d MiB): %s",
+                _SNIPPET_SOURCE_MAX_BYTES // (1024 * 1024), rel_path,
+            )
+            return ""
         lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
         s = max(0, start_line - 1)
         e = min(len(lines), (end_line or start_line) + _SNIPPET_CONTEXT_LINES)
