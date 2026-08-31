@@ -1963,6 +1963,16 @@ class OpenAICompatibleProvider(LLMProvider):
             # payloads.
             try:
                 args = json.loads(tc.function.arguments)
+                if not isinstance(args, dict):
+                    # 'null', '[1,2]', '"str"' all parse cleanly but
+                    # ToolCall.input is a dict — a non-dict would crash
+                    # handler dispatch. Same treatment as a parse
+                    # failure.
+                    msg = (
+                        f"tool arguments JSON is "
+                        f"{type(args).__name__}, expected object"
+                    )
+                    raise ValueError(msg)
             except (TypeError, ValueError) as _arg_exc:
                 _raw = str(getattr(tc.function, "arguments", ""))[:400]
                 _name = getattr(tc.function, "name", "?")
