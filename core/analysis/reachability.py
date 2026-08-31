@@ -137,6 +137,13 @@ _TEST_FILE_PATTERN = re.compile(
 )
 
 
+# Languages whose extractor records ``#include`` headers in the file's
+# imports map (``imports["foo"] = "foo.h"``) rather than name bindings.
+# A header entry never shadows a same-file function definition, so the
+# same-file bare-name fast-path must not treat it as one.
+_HEADER_IMPORT_LANGS = frozenset({"c", "cpp"})
+
+
 # Indirection flags that can mask a static "not called" claim.
 # Python flags first; JS flags second. The resolver doesn't
 # distinguish — any present flag → file is a confounder when it
@@ -238,7 +245,13 @@ class _FunctionCalledIndex:
 # inventory dict reusing the address of a GC'd one doesn't return
 # the wrong index. Capped — matches the ``_INDEX_CACHE`` policy
 # already used by ``callers_of`` / ``callees_of``.
-_FN_CALLED_INDEX_CACHE: dict[int, tuple[dict[str, Any], _FunctionCalledIndex]] = {}
+# OrderedDict + move_to_end-on-hit so eviction drops the least-
+# recently-USED entry (same LRU pattern as ``_INDEX_CACHE``) — a plain
+# dict's ``next(iter())`` eviction always dropped the FIRST-inserted
+# slot regardless of use.
+_FN_CALLED_INDEX_CACHE: OrderedDict[
+    int, tuple[dict[str, Any], _FunctionCalledIndex],
+] = OrderedDict()
 _FN_CALLED_INDEX_CACHE_MAX = 8
 _FN_CALLED_INDEX_CACHE_LOCK = threading.Lock()
 
@@ -248,9 +261,10 @@ _FN_CALLED_INDEX_CACHE_LOCK = threading.Lock()
 # thousands of findings that's 100M file-walks per analysis pass; with
 # the index each call is hash-lookup-fast (adversarial review P1-C-2).
 # Map shape: ``{normalised_path: {name: [item, item, ...]}}``.
-_BO_ITEM_INDEX_CACHE: dict[
+# LRU (OrderedDict + move_to_end), same pattern as ``_INDEX_CACHE``.
+_BO_ITEM_INDEX_CACHE: OrderedDict[
     int, tuple[dict[str, Any], dict[str, dict[str, list[dict[str, Any]]]]],
-] = {}
+] = OrderedDict()
 _BO_ITEM_INDEX_CACHE_MAX = 8
 _BO_ITEM_INDEX_CACHE_LOCK = threading.Lock()
 
@@ -289,15 +303,15 @@ def _get_bo_item_index(
     with _BO_ITEM_INDEX_CACHE_LOCK:
         cached = _BO_ITEM_INDEX_CACHE.get(inv_id)
         if cached is not None and cached[0] is inventory:
+            _BO_ITEM_INDEX_CACHE.move_to_end(inv_id)
             return cached[1]
         if cached is not None:
             _BO_ITEM_INDEX_CACHE.pop(inv_id, None)
     idx = _build_bo_item_index(inventory)
     with _BO_ITEM_INDEX_CACHE_LOCK:
         _BO_ITEM_INDEX_CACHE[inv_id] = (inventory, idx)
-        if len(_BO_ITEM_INDEX_CACHE) > _BO_ITEM_INDEX_CACHE_MAX:
-            oldest = next(iter(_BO_ITEM_INDEX_CACHE))
-            _BO_ITEM_INDEX_CACHE.pop(oldest, None)
+        while len(_BO_ITEM_INDEX_CACHE) > _BO_ITEM_INDEX_CACHE_MAX:
+            _BO_ITEM_INDEX_CACHE.popitem(last=False)
     return idx
 
 
@@ -377,15 +391,15 @@ def _get_function_called_index(
     with _FN_CALLED_INDEX_CACHE_LOCK:
         cached = _FN_CALLED_INDEX_CACHE.get(inv_id)
         if cached is not None and cached[0] is inventory:
+            _FN_CALLED_INDEX_CACHE.move_to_end(inv_id)
             return cached[1]
         if cached is not None:
             _FN_CALLED_INDEX_CACHE.pop(inv_id, None)
     idx = _build_function_called_index(inventory)
     with _FN_CALLED_INDEX_CACHE_LOCK:
         _FN_CALLED_INDEX_CACHE[inv_id] = (inventory, idx)
-        if len(_FN_CALLED_INDEX_CACHE) > _FN_CALLED_INDEX_CACHE_MAX:
-            oldest = next(iter(_FN_CALLED_INDEX_CACHE))
-            _FN_CALLED_INDEX_CACHE.pop(oldest, None)
+        while len(_FN_CALLED_INDEX_CACHE) > _FN_CALLED_INDEX_CACHE_MAX:
+            _FN_CALLED_INDEX_CACHE.popitem(last=False)
     return idx
 
 
@@ -593,11 +607,24 @@ def function_called(
             else:
                 stripped_module = None
             if target_module in (file_module, stripped_module):
+                # The imports-shadowing skip below only applies where
+                # the imports map records NAME BINDINGS (Python / JS-
+                # style: an import binds the bare name, shadowing a
+                # same-file def). The C/C++ extractor records
+                # ``#include "foo.h"`` as ``imports["foo"] = "foo.h"``
+                # — preprocessor text, not a binding — so a static C
+                # function named after an included header (foo.c
+                # includes foo.h and defines foo()) must still match
+                # its same-file calls. Fail toward CALLED.
+                imports_bind_names = (
+                    (file_record.get("language") or "").lower()
+                    not in _HEADER_IMPORT_LANGS
+                )
                 for call in calls:
                     chain = call.get("chain") or []
                     if len(chain) != 1 or chain[0] != target_func:
                         continue
-                    if chain[0] in imports:
+                    if imports_bind_names and chain[0] in imports:
                         continue
                     file_has_evidence = True
                     evidence.append(
@@ -3289,11 +3316,19 @@ def _item_is_entry(item: dict[str, Any], language: str,
     return False
 
 
-_ENTRY_SET_CACHE: dict[int, tuple[dict[str, Any], frozenset]] = {}
+# LRU caches (OrderedDict + move_to_end-on-hit, popitem(last=False)
+# eviction) — same pattern as ``_INDEX_CACHE``; a plain dict's
+# ``next(iter())`` eviction dropped the FIRST-inserted entry even when
+# it was the hottest one.
+_ENTRY_SET_CACHE: OrderedDict[
+    int, tuple[dict[str, Any], frozenset],
+] = OrderedDict()
 _ENTRY_SET_CACHE_MAX = 8
 _ENTRY_SET_CACHE_LOCK = threading.Lock()
 
-_FILES_BY_PATH_CACHE: dict[int, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
+_FILES_BY_PATH_CACHE: OrderedDict[
+    int, tuple[dict[str, Any], dict[str, dict[str, Any]]],
+] = OrderedDict()
 _FILES_BY_PATH_CACHE_MAX = 8
 _FILES_BY_PATH_CACHE_LOCK = threading.Lock()
 
@@ -3317,6 +3352,7 @@ def _files_by_path(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
     with _FILES_BY_PATH_CACHE_LOCK:
         cached = _FILES_BY_PATH_CACHE.get(inv_id)
         if cached is not None and cached[0] is inventory:
+            _FILES_BY_PATH_CACHE.move_to_end(inv_id)
             return cached[1]
     index: dict[str, dict[str, Any]] = {}
     for fr in inventory.get("files", []):
@@ -3325,13 +3361,14 @@ def _files_by_path(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
         path = (fr.get("path") or "").replace("\\", "/")
         if path:
             index[path] = fr
-    # FIFO eviction (matches the sibling ``_ENTRY_SET_CACHE`` pattern):
-    # drop the oldest entry when full, instead of wiping every entry —
-    # keeps the cache useful under multi-inventory pipelines.
+    # LRU eviction (matches the sibling ``_ENTRY_SET_CACHE`` pattern):
+    # drop the least-recently-used entry when full, instead of wiping
+    # every entry — keeps the cache useful under multi-inventory
+    # pipelines.
     with _FILES_BY_PATH_CACHE_LOCK:
-        if len(_FILES_BY_PATH_CACHE) >= _FILES_BY_PATH_CACHE_MAX:
-            _FILES_BY_PATH_CACHE.pop(next(iter(_FILES_BY_PATH_CACHE)))
         _FILES_BY_PATH_CACHE[inv_id] = (inventory, index)
+        while len(_FILES_BY_PATH_CACHE) > _FILES_BY_PATH_CACHE_MAX:
+            _FILES_BY_PATH_CACHE.popitem(last=False)
     return index
 
 
@@ -3342,6 +3379,7 @@ def _entry_functions(inventory: dict[str, Any]) -> frozenset:
     with _ENTRY_SET_CACHE_LOCK:
         cached = _ENTRY_SET_CACHE.get(inv_id)
         if cached is not None and cached[0] is inventory:
+            _ENTRY_SET_CACHE.move_to_end(inv_id)
             return cached[1]
     library_mode = bool(inventory.get("treat_exports_as_entries"))
     header_api_raw = inventory.get("header_api")
@@ -3352,6 +3390,15 @@ def _entry_functions(inventory: dict[str, Any]) -> frozenset:
             continue
         lang = fr.get("language") or ""
         path = fr.get("path") or ""
+        # Test files never seed entries. The framework entry sets below
+        # are built with exclude_test_files=True; without the same
+        # exclusion here a test-file item (a test ``main``, a public
+        # test helper) seeds the entry set, and forward_closure expands
+        # SEED nodes normally (it only blocks traversal INTO test-file
+        # callees) — so production functions called only from tests
+        # read entry-reachable.
+        if _is_test_file(path):
+            continue
         items = fr.get("items", []) or []
         nested_keys = _nested_function_keys(items)
         for item in items:
@@ -3372,13 +3419,16 @@ def _entry_functions(inventory: dict[str, Any]) -> frozenset:
     frozen = frozenset(entries)
     with _ENTRY_SET_CACHE_LOCK:
         _ENTRY_SET_CACHE[inv_id] = (inventory, frozen)
-        if len(_ENTRY_SET_CACHE) > _ENTRY_SET_CACHE_MAX:
-            _ENTRY_SET_CACHE.pop(next(iter(_ENTRY_SET_CACHE)), None)
+        while len(_ENTRY_SET_CACHE) > _ENTRY_SET_CACHE_MAX:
+            _ENTRY_SET_CACHE.popitem(last=False)
     return frozen
 
 
-# (reachable_set, closure_truncated) per inventory.
-_ENTRY_REACHABLE_CACHE: dict[int, tuple[dict[str, Any], frozenset, bool]] = {}
+# (reachable_set, closure_truncated) per inventory. LRU, same pattern
+# as ``_INDEX_CACHE``.
+_ENTRY_REACHABLE_CACHE: OrderedDict[
+    int, tuple[dict[str, Any], frozenset, bool],
+] = OrderedDict()
 # Closure depth for the entry set. Far above any realistic call-chain
 # depth so reachability isn't lost to truncation (a truncated closure
 # would falsely read deep-reachable functions as NO_PATH). It's a single
@@ -3402,6 +3452,7 @@ def _entry_reachable_set(
     with _ENTRY_REACHABLE_CACHE_LOCK:
         cached = _ENTRY_REACHABLE_CACHE.get(inv_id)
         if cached is not None and cached[0] is inventory:
+            _ENTRY_REACHABLE_CACHE.move_to_end(inv_id)
             return cached[1], cached[2]
     entries = _entry_functions(inventory)
     fc = forward_closure(
@@ -3414,10 +3465,8 @@ def _entry_reachable_set(
     frozen = frozenset(reachable)
     with _ENTRY_REACHABLE_CACHE_LOCK:
         _ENTRY_REACHABLE_CACHE[inv_id] = (inventory, frozen, fc.truncated)
-        if len(_ENTRY_REACHABLE_CACHE) > _ENTRY_REACHABLE_CACHE_MAX:
-            _ENTRY_REACHABLE_CACHE.pop(
-                next(iter(_ENTRY_REACHABLE_CACHE)), None,
-            )
+        while len(_ENTRY_REACHABLE_CACHE) > _ENTRY_REACHABLE_CACHE_MAX:
+            _ENTRY_REACHABLE_CACHE.popitem(last=False)
     return frozen, fc.truncated
 
 
@@ -3468,6 +3517,43 @@ def _is_nested_function(
         if ols < target.line and target.line <= ole:
             return True
     return False
+
+
+def _python_internal_signal(
+    inventory: dict[str, Any], fn: InternalFunction,
+) -> bool:
+    """Does a confident "internal, not externally reachable" signal
+    fire for the Python function ``fn``?
+
+    The three orthogonal signals (same set ``entry_reachability``
+    documents for its target): structural nesting, explicit ``__all__``
+    exclusion, or the leading-underscore convention when no ``__all__``
+    is declared. ``False`` means no signal fires — the function could
+    be library API / externally imported / reflection-dispatched, so
+    any dead-code claim resting on it must stay uncertain.
+    """
+    if _is_nested_function(inventory, fn):
+        return True
+    exports = _file_python_exports(inventory, fn.file_path)
+    if exports is not None:
+        return fn.name not in exports
+    return fn.name.startswith("_")
+
+
+def _confident_dead_signals(
+    inventory: dict[str, Any], fn: InternalFunction,
+) -> bool:
+    """Would ``entry_reachability`` treat a not-entry-reachable ``fn``
+    as confidently dead (before the masking walk)? Mirrors the target-
+    side gates: reportable entry-model language, plus the Python
+    internal-signal check for heuristic-tier Python.
+    """
+    lang = _file_language(inventory, fn.file_path)
+    if lang not in _REPORTABLE_ENTRY_LANGS:
+        return False
+    if lang == "python" and not _python_internal_signal(inventory, fn):
+        return False
+    return True
 
 
 def _file_masks_target(
@@ -3601,20 +3687,12 @@ def entry_reachability(
     # NOT_CALLED layer surfaces them instead of an over-confident
     # dead verdict. The witness tier stays HEURISTIC; no suppression
     # is licensed by any signal.
-    if lang == "python":
-        is_nested = _is_nested_function(inventory, target)
-        if not is_nested:
-            exports = _file_python_exports(inventory, target.file_path)
-            if exports is not None:
-                # Explicit ``__all__`` contract. Author declared what's
-                # exported; anything in ``__all__`` may be reached
-                # externally even with no in-project caller.
-                if target.name in exports:
-                    return "uncertain"
-            elif not target.name.startswith("_"):
-                # No ``__all__`` AND public-named AND not nested —
-                # no signal fires; can't claim dead.
-                return "uncertain"
+    if lang == "python" and not _python_internal_signal(inventory, target):
+        # No signal fires (public-named with no ``__all__``, or the
+        # module's ``__all__`` exports the name) — could be library
+        # API, externally-imported, or reflection-dispatched; can't
+        # claim dead.
+        return "uncertain"
     # Call-masking indirection (reflection / func-like macros) in the
     # target's file, or in any function that transitively calls it, could
     # hide an entry edge the static graph didn't capture → don't claim
@@ -3643,10 +3721,24 @@ def entry_reachability(
     if rc.truncated:
         return "uncertain"
     for fn in rc.nodes:
-        if isinstance(fn, InternalFunction) and _file_masks_target(
+        if not isinstance(fn, InternalFunction):
+            continue
+        if _file_masks_target(
             inventory, fn.file_path, target.name,
             target_module=target_module,
         ):
+            return "uncertain"
+        if fn == target:
+            continue
+        # A confident dead claim on the target rests on every
+        # transitive caller being confidently dead too: the target is
+        # unreached only if its callers are. A caller that itself only
+        # reads uncertain by the same gates the target passed (non-
+        # reportable entry-model language; a public Python name with
+        # no ``__all__``; an ``__all__``-exported name) may be live —
+        # and would make the target live through it. Degrade to
+        # uncertain rather than claim a dead island.
+        if not _confident_dead_signals(inventory, fn):
             return "uncertain"
     return "no_path_from_entry"
 

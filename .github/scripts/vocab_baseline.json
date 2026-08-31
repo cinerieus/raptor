@@ -1,4 +1,9 @@
 {
+  "core/analysis/_reach_cache.py::_GRAMMAR_MODULES": {
+    "count": 15,
+    "kind": "literal",
+    "note": "closed toolchain-module taxonomy: the tree-sitter grammar modules the call-graph extractors probe (mirrors the _import_grammar call sites in core/inventory/call_graph.py); availability is folded into the cache fingerprint so extraction-quality changes invalidate cached indices \u2014 infrastructure module names, not a learned name vocabulary"
+  },
   "core/analysis/_reach_cache.py::_MANDATORY_INDEX_FIELDS": {
     "count": 15,
     "kind": "literal",

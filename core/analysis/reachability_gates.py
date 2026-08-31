@@ -30,11 +30,18 @@ logger = logging.getLogger(__name__)
 # (set, regex, guard-query string, unguarded_sinks.sc) that drifted.
 DANGEROUS_LIBC_SINKS: frozenset[str] = frozenset({
     "memcpy", "memmove", "strcpy", "strncpy", "strcat", "strncat",
+    # stpcpy: same unbounded-copy hazard as strcpy (returns the end
+    # pointer instead of the start) — kept in step with the
+    # function-taxonomy sink vocabulary.
+    "stpcpy",
     "sprintf", "snprintf", "vsprintf", "vsnprintf",
     "gets", "fgets",
     "system", "popen", "execve", "execvp", "execl", "execlp",
     # Full exec-family coverage (previously only in the regex copy).
     "execv", "execle", "execvpe", "execlpe",
+    # Process-spawn family beyond exec* — same command-execution class,
+    # kept in step with the function-taxonomy sink vocabulary.
+    "posix_spawn", "posix_spawnp", "fexecve",
     "scanf", "sscanf", "fscanf",
     "sqlite3_exec", "mysql_query",
 })
@@ -254,7 +261,11 @@ def _joern_find_callers(
     """
     if not joern_server.is_alive():
         return None
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", function_name):
+    # fullmatch, not match-with-``$``: ``$`` also matches just before a
+    # trailing newline, so ``name\n`` would pass a ``^...$`` gate and
+    # reach the query-template interpolation below. Same discipline at
+    # every identifier gate in this module.
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", function_name):
         return []
 
     query_path = _QUERIES_DIR / "callers.sc"
@@ -390,7 +401,7 @@ def check_sink_guarded(
     if not joern_server.is_alive():
         return GUARD_UNAVAILABLE
 
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", function_name):
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", function_name):
         return None
 
     query = _GUARD_QUERY_TEMPLATE.replace(
@@ -443,7 +454,7 @@ def query_unguarded_sinks(
     """
     if joern_server is None or not joern_server.is_alive():
         return []
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", function_name):
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", function_name):
         return []
 
     query_path = _QUERIES_DIR / "unguarded_sinks.sc"
@@ -486,9 +497,9 @@ def query_sink_arg_index(
     """
     if joern_server is None or not joern_server.is_alive():
         return []
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", function_name):
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", function_name):
         return []
-    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", sink_name):
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", sink_name):
         return []
 
     query_path = _QUERIES_DIR / "sink_arg_index.sc"
