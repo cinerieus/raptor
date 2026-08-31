@@ -48,6 +48,22 @@ class TestClassifier:
         assert classify_error_text("read timed out") == "timeout"
         assert classify_error_text("deadline exceeded") == "timeout"
 
+    def test_rate_limit_shapes_are_not_schema_errors(self):
+        # The underscored provider error type and 429 statuses are the
+        # same non-schema class as the spaced "rate limit".
+        assert classify_error_text(
+            "Error code: 429 - {'type': 'rate_limit_error'}") == "auth"
+        assert classify_error_text("rate_limit_error") == "auth"
+        assert classify_error_text("429 RESOURCE_EXHAUSTED") == "auth"
+        assert classify_error_text("HTTP 429 Too Many Requests") == "auth"
+
+    def test_unrelated_429_numerics_stay_error(self):
+        # Boundary/context anchoring: a stack-trace line number or an
+        # embedded numeric must not classify as a rate limit.
+        assert classify_error_text(
+            'File "x.py", line 429, in foo') == "error"
+        assert classify_error_text("request id 14290 failed") == "error"
+
     def test_precedence_blocked_over_auth_over_timeout(self):
         assert classify_error_text(
             "content filter triggered after timeout") == "blocked"

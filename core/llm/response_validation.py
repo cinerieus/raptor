@@ -299,9 +299,15 @@ def _get_field_type(field_spec: Any) -> str:
     return "string"
 
 
+# Token-level match: a substring check on "null" also matched words
+# that merely contain it ("nullify", "annulled"), silently marking a
+# field nullable from unrelated description prose.
+_NULLABLE_TOKEN_RE = re.compile(r"\bnull(?:able)?\b", re.IGNORECASE)
+
+
 def _is_nullable(field_spec: Any) -> bool:
     if isinstance(field_spec, str):
-        return "or null" in field_spec.lower() or "null" in field_spec.lower()
+        return bool(_NULLABLE_TOKEN_RE.search(field_spec))
     if isinstance(field_spec, dict):
         t = field_spec.get("type")
         if isinstance(t, list) and "null" in t:

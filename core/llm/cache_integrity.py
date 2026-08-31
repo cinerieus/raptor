@@ -186,21 +186,25 @@ def _load_or_create_key() -> bytes | None:
         # Lost the creation race — re-read the winner's key (an
         # attacker pre-placing a symlink also lands here: O_EXCL
         # refuses to create through one, and the re-read refuses it).
+        # A short or empty read is a TRANSIENT race shape too: the
+        # winner has O_EXCL-created the file but not yet written the
+        # key bytes, so keep polling alongside the vanished-file case
+        # and only report a suspect key once the retries are exhausted.
+        raced: bytes | None = None
         for _ in range(20):
             raced = _read_existing_key(path)
             if raced is _REFUSED:
                 return None
             if raced is not None and len(raced) == _KEY_LEN:
                 return raced
-            if raced is not None:
-                _warn_once_suspect_key(
-                    path,
-                    f"wrong length ({len(raced)} bytes, expected {_KEY_LEN})",
-                    "remove the suspect key and investigate; a fresh key "
-                    "is created on the next stamp",
-                )
-                return None
             time.sleep(0.01)
+        if isinstance(raced, bytes):
+            _warn_once_suspect_key(
+                path,
+                f"wrong length ({len(raced)} bytes, expected {_KEY_LEN})",
+                "remove the suspect key and investigate; a fresh key "
+                "is created on the next stamp",
+            )
         return None
     try:
         os.write(fd, key)

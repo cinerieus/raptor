@@ -93,6 +93,20 @@ TIMEOUT_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Rate-limit shapes AUTH_KEYWORDS_RE misses: the underscored provider
+# error type (``rate_limit_error`` — "rate limit" with a space never
+# matches it) and a 429 status. The 429 arm is boundary-anchored AND
+# context-anchored (status-context word, message-leading position, or
+# the canonical reason phrases) so unrelated numerics like stack-trace
+# "line 429, in foo" don't classify as a limit.
+RATE_LIMIT_KEYWORDS_RE = re.compile(
+    r"rate[_ ]limit(?:_error|ed)?\b"
+    r"|\b(?:http|status|code)\s*:?\s*429\b"
+    r"|^\s*429\b"
+    r"|\b429\s+(?:too many requests|resource_exhausted)\b",
+    re.IGNORECASE,
+)
+
 
 def is_auth_error_text(error_str: str) -> bool:
     """True when an error string indicates an auth/billing failure.
@@ -167,6 +181,11 @@ def classify_error_text(error_str: str) -> str:
         return "blocked"
     if is_auth_error_text(text):
         return "auth"
+    # Underscored/status rate-limit shapes join the same class as the
+    # spaced "rate limit" AUTH_KEYWORDS_RE already accepts — a limit
+    # is never evidence about response shape.
+    if RATE_LIMIT_KEYWORDS_RE.search(text):
+        return "auth"
     if TIMEOUT_KEYWORDS_RE.search(text):
         return "timeout"
     return "error"
@@ -228,6 +247,7 @@ def unwrap_structured_response(
 __all__ = [
     "AUTH_KEYWORDS_RE",
     "BLOCKED_KEYWORDS_RE",
+    "RATE_LIMIT_KEYWORDS_RE",
     "TIMEOUT_KEYWORDS_RE",
     "StructuredCallResult",
     "classify_error_text",
