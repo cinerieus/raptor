@@ -1258,10 +1258,6 @@
     "count": 10,
     "kind": "literal"
   },
-  "core/llm/cc_probe.py::_SIGNATURE_ENV": {
-    "count": 14,
-    "kind": "literal"
-  },
   "core/llm/cc_proxy_hosts.py::_PROVIDER_ENV_KEYS": {
     "count": 10,
     "kind": "literal",
