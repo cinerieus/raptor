@@ -1961,11 +1961,10 @@ def _format_study_answers(study_answers: list[dict]) -> str:
     sourced answer with its receipt and provenance tier — and the
     model is told to re-derive, never substitute.  Answer/assumption
     text is prior-LLM output over attacker-visible source (untrusted)
-    — defanged with ``neutralize_tag_forgery`` before interpolation;
-    receipt quotes are verbatim repo source, framed as quoted data.
+    — defanged with ``_defend_identifier`` (newline flatten +
+    tag/heading neutralise) before interpolation; receipt quotes are
+    verbatim repo source, framed as quoted data.
     """
-    from core.security.prompt_envelope import neutralize_tag_forgery
-
     lines = [
         "\n### Study answers for your prior assumptions",
         ("The study loop investigated assumptions your prior review "
@@ -1979,13 +1978,16 @@ def _format_study_answers(study_answers: list[dict]) -> str:
     for a in study_answers[:8]:
         if not isinstance(a, dict):
             continue
-        question = neutralize_tag_forgery(
-            str(a.get("question", ""))[:200],
-        )
-        assumption = neutralize_tag_forgery(
-            str(a.get("assumption", ""))[:200],
-        )
-        answer = neutralize_tag_forgery(str(a.get("answer", ""))[:300])
+        # _defend_identifier, not bare neutralize_tag_forgery: the
+        # trust structure of this block is LINE-shaped ("  Receipt
+        # (file:line): `quote`" is emitted only when receipt.verified)
+        # and the tag/heading neutralizer preserves newlines — a
+        # crafted study answer embedding a newline + forged receipt
+        # line rendered indistinguishable from a real one. Flattening
+        # newlines keeps each field on its own labelled line.
+        question = _defend_identifier(a.get("question", ""))
+        assumption = _defend_identifier(a.get("assumption", ""))
+        answer = _defend_identifier(a.get("answer", ""), max_length=300)
         # Charset-restricted: tier/status are channel vocabulary, not
         # prose — raw interpolation let a crafted tier smuggle heading
         # text into this trusted block.
@@ -2012,7 +2014,7 @@ def _format_study_answers(study_answers: list[dict]) -> str:
             )
             lines.append(
                 f"  Receipt ({where}): "
-                f"`{neutralize_tag_forgery(quote[:200])}`"
+                f"`{_defend_identifier(quote)}`"
             )
     return "\n".join(lines)
 
