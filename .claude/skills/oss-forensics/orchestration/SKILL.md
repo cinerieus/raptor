@@ -28,10 +28,10 @@ Parse these flags from the user's request if present.
 
 ### Phase 0: Initialize Investigation
 
-**CRITICAL:** Run the init script using Bash (this is a pre-approved Bash command):
+**CRITICAL:** Run the init script using Bash:
 
 ```bash
-source .venv/bin/activate && python .claude/skills/oss-forensics/github-evidence-kit/scripts/init_investigation.py
+python3 .claude/skills/oss-forensics/github-evidence-kit/scripts/init_investigation.py
 ```
 
 The script will:
