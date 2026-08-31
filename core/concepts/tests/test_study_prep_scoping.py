@@ -364,3 +364,55 @@ class TestStrictArgParsing:
         ])
         assert result.returncode != 0
         assert "unrecognized arguments" in result.stderr
+
+
+class TestScopeFromReadingListContainment:
+    """reading-list.json is an LLM-authored artifact: seed
+    ``source_file`` entries must not escape the source root
+    (traversal, absolute path, or symlink) — the same containment
+    ``_resolve_include`` enforces for every chased include."""
+
+    def _write_rl(self, dirpath: Path, seeds: list[str]) -> Path:
+        rl = dirpath / "reading-list.json"
+        rl.write_text(json.dumps(
+            {"items": [{"source_file": s} for s in seeds]}))
+        return rl
+
+    def test_in_root_seed_collected(self, tmp_path) -> None:
+        root = tmp_path / "src"
+        root.mkdir()
+        (root / "a.c").write_text("int main(void) { return 0; }\n")
+        rl = self._write_rl(tmp_path, ["a.c"])
+        scoped = prep._scope_from_reading_list(rl, root, [root])
+        assert scoped == [(root / "a.c").resolve()]
+
+    def test_traversal_seed_excluded(self, tmp_path) -> None:
+        root = tmp_path / "src"
+        root.mkdir()
+        outside = tmp_path / "evil.c"
+        outside.write_text("int evil;\n")
+        (root / "a.c").write_text("int main(void) { return 0; }\n")
+        rl = self._write_rl(tmp_path, ["../evil.c", "a.c"])
+        scoped = prep._scope_from_reading_list(rl, root, [root])
+        assert scoped is not None
+        assert outside.resolve() not in scoped
+        assert (root / "a.c").resolve() in scoped
+
+    def test_absolute_seed_outside_root_excluded(self, tmp_path) -> None:
+        root = tmp_path / "src"
+        root.mkdir()
+        outside = tmp_path / "evil.c"
+        outside.write_text("int evil;\n")
+        rl = self._write_rl(tmp_path, [str(outside)])
+        # No in-root seed survives -> None (full-rglob fallback), the
+        # pre-existing no-usable-seeds contract.
+        assert prep._scope_from_reading_list(rl, root, [root]) is None
+
+    def test_symlink_seed_escaping_root_excluded(self, tmp_path) -> None:
+        root = tmp_path / "src"
+        root.mkdir()
+        outside = tmp_path / "evil.c"
+        outside.write_text("int evil;\n")
+        (root / "link.c").symlink_to(outside)
+        rl = self._write_rl(tmp_path, ["link.c"])
+        assert prep._scope_from_reading_list(rl, root, [root]) is None

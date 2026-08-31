@@ -47,6 +47,7 @@ from dataclasses import asdict  # noqa: E402
 
 from core.concepts.model import StudyItem  # noqa: E402
 from core.json import load_json, loads, save_json  # noqa: E402
+from core.paths import confine  # noqa: E402
 
 # Study artifacts (reading/study lists) are small RAPTOR-written run
 # output.
@@ -1896,8 +1897,14 @@ def _scope_from_reading_list(
     collected: set[Path] = set()
     frontier: set[Path] = set()
     for sf in seed_files:
-        p = (source_root / sf).resolve()
-        if p.is_file():
+        # reading-list.json is an LLM-authored artifact: confine each
+        # seed to the source root (symlink-aware) before it can start
+        # the include walk. _resolve_include already enforces the same
+        # containment for every chased include — an absolute or
+        # ../-traversal source_file must not be the one path that
+        # escapes the target tree.
+        p = confine(source_root, sf)
+        if p is not None and p.is_file():
             frontier.add(p)
 
     for _depth in range(max_depth + 1):
