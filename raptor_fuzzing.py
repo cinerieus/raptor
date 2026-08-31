@@ -46,7 +46,10 @@ from packages.autonomous import (
 )
 from packages.binary_analysis import CrashAnalyser
 from packages.fuzzing import AFLRunner, CrashCollector
-from packages.llm_analysis.crash_agent import CrashAnalysisAgent
+from packages.llm_analysis.crash_agent import (
+    CrashAnalysisAgent,
+    exploit_artifact_path,
+)
 
 logger = get_logger()
 
@@ -142,6 +145,23 @@ def _resolve_dict_path(args: argparse.Namespace, out_dir):
     except Exception as e:  # noqa: BLE001 — discovery is best-effort
         logger.debug("audit dictionary discovery failed: %s", e)
         return None
+
+
+def _load_generated_exploit(agent_out_dir: Path, crash_id: str) -> str | None:
+    """Re-read the exploit PoC the crash agent just generated.
+
+    The path comes from the writer's own canonical helper
+    (``crash_agent.exploit_artifact_path``): the agent sanitises the
+    AFL crash id (raw ids contain ``:`` and ``,``) and writes
+    ``<safe_id>_exploit.cpp`` under ``<agent out_dir>/exploits/``.
+    Joining the raw id with a ``.c`` suffix here named a file the
+    writer never produced, so validate-and-refine silently never ran.
+    Returns the exploit source, or None when no artifact exists.
+    """
+    exploit_file = exploit_artifact_path(agent_out_dir, crash_id)
+    if not exploit_file.exists():
+        return None
+    return exploit_file.read_text(encoding="utf-8")
 
 
 def main() -> None:
@@ -1154,11 +1174,13 @@ Examples:
                     if args.autonomous and exploit_validator and multi_turn:
                         logger.info("Validating and refining exploit...")
 
-                        # Get the generated exploit code
-                        exploit_file = out_dir / "analysis" / "exploits" / f"{crash.crash_id}_exploit.c"
-                        if exploit_file.exists():
-                            exploit_code = exploit_file.read_text(encoding="utf-8")
-
+                        # Get the generated exploit code from the
+                        # writer's canonical location (see
+                        # _load_generated_exploit).
+                        exploit_code = _load_generated_exploit(
+                            out_dir / "analysis", crash.crash_id,
+                        )
+                        if exploit_code is not None:
                             # Validate and iteratively refine
                             success, refined_code, _refined_binary = exploit_validator.validate_and_refine(
                                 exploit_code=exploit_code,
