@@ -1024,3 +1024,65 @@ def test_flows_differing_only_in_severity_get_distinct_ids(tmp_path):
     assert len(ids) == 2 and ids[0] != ids[1]
     threat_ids = [t["id"] for t in model.threats]
     assert len(set(threat_ids)) == len(threat_ids)
+
+
+def test_category_match_never_flips_status(tmp_path):
+    """One unauthenticated disk-staged 'refuted' record must not
+    mass-refute every threat of its CWE category — category matches
+    attach evidence only; status flips require the record to name the
+    exact threat."""
+    project = _project(tmp_path)
+    model = from_context_map(project, {
+        "entry_points": [{"id": "EP-001", "name": "POST /run"}],
+        "sink_details": [
+            {"id": "SINK-001", "type": "subprocess", "file": "a.py"},
+            {"id": "SINK-002", "type": "subprocess", "file": "b.py"},
+        ],
+        "unchecked_flows": [
+            {"entry_point": "EP-001", "sink": "SINK-001",
+             "severity": "critical"},
+            {"entry_point": "EP-001", "sink": "SINK-002",
+             "severity": "critical"},
+        ],
+    })
+    before = [t["status"] for t in model.threats]
+    outcome = VerifiedOutcome(
+        finding_id="UNRELATED-999",
+        oracle=Oracle.SANDBOX,
+        status=OutcomeStatus.REFUTED,
+        reproducible=True,
+        evidence={},
+        cwe_id="CWE-78",
+        file="a.py",
+    )
+    link_verified_outcomes(model, [outcome])
+    # Evidence attached (operator can weigh it) …
+    assert all(t["evidence_ids"] for t in model.threats)
+    # … but no threat's status moved.
+    assert [t["status"] for t in model.threats] == before
+    assert not any(t["status"] == "refuted" for t in model.threats)
+
+
+def test_id_match_still_flips_status_both_directions(tmp_path):
+    project = _project(tmp_path)
+    model = from_context_map(project, {
+        "entry_points": [{"id": "EP-001", "name": "POST /run"}],
+        "sink_details": [
+            {"id": "SINK-001", "type": "subprocess", "file": "a.py"},
+        ],
+        "unchecked_flows": [
+            {"entry_point": "EP-001", "sink": "SINK-001",
+             "severity": "critical"},
+        ],
+    })
+    refute = VerifiedOutcome(
+        finding_id="SINK-001",
+        oracle=Oracle.CODEQL,
+        status=OutcomeStatus.REFUTED,
+        reproducible=True,
+        evidence={},
+        cwe_id="CWE-78",
+        file="a.py",
+    )
+    link_verified_outcomes(model, [refute])
+    assert model.threats[0]["status"] == "refuted"

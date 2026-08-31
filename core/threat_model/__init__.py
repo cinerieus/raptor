@@ -1224,10 +1224,22 @@ def link_verified_outcomes(model: ThreatModel, outcomes: Iterable[Any]) -> Threa
         }
         model.evidence = _merge_records(model.evidence, [ev])
         for threat in model.threats:
-            if _outcome_matches_threat(data, threat):
+            kind = _outcome_match_kind(data, threat)
+            if kind is not None:
                 evidence_ids = set(str(e) for e in threat.get("evidence_ids") or [])
                 evidence_ids.add(evidence_id)
                 threat["evidence_ids"] = sorted(evidence_ids)
+                # Status flips require IDENTITY, not category kinship:
+                # outcome records are unauthenticated disk artifacts
+                # (labeled-attempt pools / witness stores an attacker
+                # can pre-stage), and the CWE->category fallback made
+                # ONE such record mass-refute (or mass-confirm) EVERY
+                # threat of its category in the persisted model.
+                # Category matches attach evidence for the operator to
+                # weigh; only a record naming this exact threat moves
+                # its status.
+                if kind != "id":
+                    continue
                 if data.get("status") == "verified":
                     threat["status"] = "confirmed"
                 elif data.get("status") == "refuted":
@@ -1880,17 +1892,32 @@ def _outcome_summary(data: dict[str, Any]) -> str:
     return " - ".join(bits)
 
 
-def _outcome_matches_threat(data: dict[str, Any], threat: dict[str, Any]) -> bool:
+def _outcome_match_kind(
+    data: dict[str, Any], threat: dict[str, Any],
+) -> str | None:
+    """Match strength between an outcome record and a threat.
+
+    ``"id"`` — the record names this exact threat (finding_id equals
+    the threat / entry-point / sink id).  ``"category"`` — CWE-family
+    fallback only: the record is about the same vulnerability CLASS,
+    not this threat.  ``None`` — no relation.
+    """
     finding_id = str(data.get("finding_id") or "")
     if finding_id and finding_id in {
         str(threat.get("id") or ""),
         str(threat.get("entry_point_id") or ""),
         str(threat.get("sink_id") or ""),
     }:
-        return True
+        return "id"
     cwe_num = _extract_cwe_number(data.get("cwe_id"))
     category = str(threat.get("category") or "").lower()
-    return bool(cwe_num and (cwe_num == "78" and category == "command_execution" or cwe_num == "89" and category == "sql_injection" or cwe_num == "1336" and "template" in category or cwe_num == "22" and category == "path_traversal"))
+    if bool(cwe_num and (cwe_num == "78" and category == "command_execution" or cwe_num == "89" and category == "sql_injection" or cwe_num == "1336" and "template" in category or cwe_num == "22" and category == "path_traversal")):
+        return "category"
+    return None
+
+
+def _outcome_matches_threat(data: dict[str, Any], threat: dict[str, Any]) -> bool:
+    return _outcome_match_kind(data, threat) is not None
 
 
 def _mermaid_id(value: str) -> str:
