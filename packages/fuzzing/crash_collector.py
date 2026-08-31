@@ -71,10 +71,30 @@ class CrashCollector:
         """
         logger.info("Collecting crashes from: %s", self.crashes_dir)
 
-        crash_files = sorted([
+        # The crashes dir is written by the (untrusted, possibly
+        # attacker-built) fuzz target: a planted 'id:'-named symlink
+        # would get host-file content hashed here and then persisted
+        # into the witness store / crash-analysis LLM prompts via
+        # witness_adapter.read_bytes. Reject symlinks outright, same
+        # as the corpus stager. is_file() alone follows the link.
+        candidates = sorted(
             f for f in self.crashes_dir.iterdir()
-            if f.name.startswith("id:") and f.is_file()
-        ])
+            if f.name.startswith("id:")
+        )
+        crash_files = []
+        skipped_symlinks = 0
+        for f in candidates:
+            if f.is_symlink():
+                skipped_symlinks += 1
+                continue
+            if f.is_file():
+                crash_files.append(f)
+        if skipped_symlinks:
+            logger.warning(
+                "Skipped %d symlink(s) in crashes dir %s — symlinks in "
+                "target-writable directories are never followed",
+                skipped_symlinks, self.crashes_dir,
+            )
 
         if not crash_files:
             logger.warning("No crashes found!")

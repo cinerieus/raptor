@@ -57,6 +57,9 @@ class TestCreateDefaultCorpus:
         # under test.
         runner = AFLRunner.__new__(AFLRunner)
         runner.output_dir = output_dir
+        # __init__ assigns seed_profile before resolving the corpus;
+        # mirror that contract here.
+        runner.seed_profile = "default"
         return runner
 
     def test_corpus_anchored_to_output_dir_not_cwd(self, tmp_path):
@@ -103,6 +106,31 @@ class TestCreateDefaultCorpus:
         assert result.is_absolute()
         assert output_dir in result.parents or result.parent == output_dir
 
+    def test_ctor_seed_profile_reaches_default_corpus(self, tmp_path,
+                                                      monkeypatch):
+        # The default-corpus path resolves the corpus during __init__;
+        # seed_profile must be assigned first or a non-default profile
+        # is silently dropped (the old getattr fallback masked it).
+        from packages.fuzzing import afl_runner as mod
+
+        binary = tmp_path / "bin"
+        binary.write_bytes(b"\x7fELF")
+        binary.chmod(0o755)
+        seen = {}
+
+        def fake_prepare(corpus_dir, profile="default"):
+            seen["profile"] = profile
+            return {"seed_count": 1}
+
+        monkeypatch.setattr(mod, "prepare_builtin_seed_corpus",
+                            fake_prepare)
+        AFLRunner(
+            binary_path=binary,
+            output_dir=tmp_path / "out",
+            seed_profile="network",
+        )
+        assert seen["profile"] == "network"
+
     def test_seeds_have_expected_content(self, tmp_path):
         output_dir = tmp_path / "fuzz_run"
         output_dir.mkdir()
@@ -132,6 +160,9 @@ class TestMergeCrashFiles:
     def _make_runner(self, output_dir: Path) -> AFLRunner:
         runner = AFLRunner.__new__(AFLRunner)
         runner.output_dir = output_dir
+        # __init__ assigns seed_profile before resolving the corpus;
+        # mirror that contract here.
+        runner.seed_profile = "default"
         return runner
 
     def _plant_crash(self, output_dir: Path, instance: str, name: str,
@@ -306,6 +337,41 @@ class TestSandboxedCampaign:
         assert len(main_cmds) == 1 and "main" in main_cmds[0]
         assert len(secondary_cmds) == 1 and "secondary1" in secondary_cmds[0]
 
+    def test_secondaries_read_corpus_not_resume_stdin(self, tmp_path,
+                                                      monkeypatch):
+        # AFL++ '-i -' is in-place RESUME of an existing -o dir and
+        # FATALs on a fresh campaign ("Resume attempted but old output
+        # directory not found"), so secondaries launched with '-i -'
+        # died at startup and every --parallel N>1 run silently
+        # degraded to the single main instance. Every instance must
+        # read the real corpus dir.
+        import subprocess as sp
+
+        from packages.fuzzing import afl_runner as mod
+
+        self._instrumented(monkeypatch)
+        calls = []
+
+        def fake_sandbox_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return sp.CompletedProcess(cmd, 0, stdout=b"", stderr=b"")
+
+        monkeypatch.setattr(mod, "_sandbox_run", fake_sandbox_run)
+
+        runner = self._make_runner(tmp_path)
+        runner.run_fuzzing(duration=0, parallel_jobs=3)
+
+        assert len(calls) == 3
+        secondary_cmds = [c for c in calls if "-S" in c]
+        main_cmds = [c for c in calls if "-M" in c]
+        assert len(secondary_cmds) == 2 and len(main_cmds) == 1
+        for cmd in calls:
+            i_idx = cmd.index("-i")
+            # Negative direction: never the startup-aborting resume arg.
+            assert cmd[i_idx + 1] != "-"
+            # Positive direction: the actual corpus dir.
+            assert cmd[i_idx + 1] == str(runner.corpus_dir)
+
     def test_sandbox_setup_error_fails_loud(self, tmp_path, monkeypatch):
         from core.sandbox import SandboxSetupError
         from packages.fuzzing import afl_runner as mod
@@ -324,6 +390,34 @@ class TestSandboxedCampaign:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUntrustedOutputHygiene:
+    """Instance log tails and fuzzer_stats live in target-writable
+    space and are relayed to the operator's terminal — escape
+    sequences must be stripped at the read boundary."""
+
+    def test_tail_file_strips_escapes(self, tmp_path):
+        log = tmp_path / "stderr.log"
+        log.write_bytes(b"\x1b]0;owned\x07PROGRAM ABORT\x1b[2Jhidden")
+        tail = AFLRunner._tail_file(log)
+        assert "\x1b" not in tail
+        assert "PROGRAM ABORT" in tail
+
+    def test_get_stats_strips_escapes(self, tmp_path):
+        runner = AFLRunner.__new__(AFLRunner)
+        runner.output_dir = tmp_path
+        stats_dir = tmp_path / "main"
+        stats_dir.mkdir(parents=True)
+        (stats_dir / "fuzzer_stats").write_text(
+            "execs_done   : 123\nbanner : \x1b[31mowned\x1b[0m\n",
+            encoding="utf-8",
+        )
+        stats = runner.get_stats()
+        # Numeric consumers unaffected...
+        assert stats["execs_done"] == "123"
+        # ...and no escape bytes survive to the log sinks.
+        assert "\x1b" not in stats["banner"]
 
 
 class TestRootfsMode:

@@ -171,6 +171,31 @@ class TestCollectCrashes:
         crashes = collector.collect_crashes()
         assert crashes[0].timestamp is not None
 
+    def test_symlinks_in_crashes_dir_are_rejected(self, tmp_path):
+        # The crashes dir is target-writable: a hostile fuzz target can
+        # plant an 'id:'-named symlink to a host file, which would be
+        # hashed here and persisted into the witness store / LLM
+        # prompts. Symlinks must never be followed.
+        secret = tmp_path / "host-secret"
+        secret.write_bytes(b"private key material")
+        crashes_dir = tmp_path / "crashes"
+        crashes_dir.mkdir()
+        (crashes_dir / "id:000000,sig:11").symlink_to(secret)
+        collector = CrashCollector(crashes_dir)
+        assert collector.collect_crashes() == []
+
+    def test_regular_files_survive_symlink_filter(self, tmp_path):
+        # Direction two: the guard must not eat real crash files that
+        # sit next to a planted symlink.
+        secret = tmp_path / "host-secret"
+        secret.write_bytes(b"private key material")
+        crashes_dir = tmp_path / "crashes"
+        crashes_dir.mkdir()
+        (crashes_dir / "id:000000,sig:11").symlink_to(secret)
+        _make_crash_file(crashes_dir, "id:000001,sig:06", b"real crash")
+        crashes = CrashCollector(crashes_dir).collect_crashes()
+        assert [c.crash_id for c in crashes] == ["000001"]
+
     def test_crash_input_file_is_path(self, tmp_path):
         _make_crash_file(tmp_path, "id:000000,sig:11")
         collector = CrashCollector(tmp_path)

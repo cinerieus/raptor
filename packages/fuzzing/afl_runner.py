@@ -58,6 +58,7 @@ _SHOWMAP_EDGE_RE = re.compile(r"^\d+(?::\d+)?$")
 # Re-exported for callers/tests; implementation shared with the
 # libFuzzer runner and the capability probes.
 from packages.fuzzing.env_hygiene import scrub_identity_env  # noqa: E402
+from packages.fuzzing.output_hygiene import strip_terminal_controls  # noqa: E402
 
 
 class _SandboxedAFLInstance:
@@ -304,7 +305,11 @@ class AFLRunner:
             self.output_dir = (RaptorConfig.get_out_dir()
                                / f"fuzz_{self.binary.stem}").resolve()
         # Resolve corpus AFTER output_dir so the default-corpus
-        # path can anchor under output_dir (rather than CWD).
+        # path can anchor under output_dir (rather than CWD), and
+        # AFTER seed_profile is set — _create_default_corpus selects
+        # builtin seeds by profile, so assigning the profile later
+        # silently dropped a non-default profile on this path.
+        self.seed_profile = seed_profile
         self.corpus_dir = (Path(corpus_dir).resolve() if corpus_dir
                            else self._create_default_corpus())
         self.dict_path = Path(dict_path).resolve() if dict_path else None
@@ -329,7 +334,6 @@ class AFLRunner:
         self.use_laf_intel = use_laf_intel
         self.deterministic = deterministic
         self.custom_mutator = Path(custom_mutator).resolve() if custom_mutator else None
-        self.seed_profile = seed_profile
         if self.custom_mutator and not self.custom_mutator.exists():
             msg = f"Custom mutator not found: {custom_mutator}"
             raise FileNotFoundError(msg)
@@ -452,7 +456,10 @@ class AFLRunner:
         """
         corpus = self.output_dir / "corpus_default"
         corpus.mkdir(parents=True, exist_ok=True)
-        seed_profile = getattr(self, "seed_profile", "default")
+        # No getattr fallback: seed_profile is assigned before corpus
+        # resolution in __init__; a fallback here would silently mask a
+        # regression in that ordering.
+        seed_profile = self.seed_profile
 
         try:
             manifest = prepare_builtin_seed_corpus(corpus, profile=seed_profile)
@@ -1205,7 +1212,11 @@ class AFLRunner:
             data = path.read_bytes()
         except OSError:
             return ""
-        return data[-max_bytes:].decode(errors="replace").strip()
+        # Tails are target/afl output relayed to the operator's
+        # terminal — strip escape-injection vectors at this boundary.
+        return strip_terminal_controls(
+            data[-max_bytes:].decode(errors="replace")
+        ).strip()
 
     @staticmethod
     def _log_common_afl_startup_error(stderr_str: str) -> None:
@@ -1333,11 +1344,15 @@ class AFLRunner:
         """
         cmd = [self.afl_fuzz]
 
-        # Input/output directories
-        if is_main:
-            cmd.extend(["-i", str(self.corpus_dir)])
-        else:
-            cmd.extend(["-i", "-"])  # Secondary instances sync from main
+        # Input/output directories. Every instance (main and secondary)
+        # reads the real corpus: in AFL++ '-i -' means IN-PLACE RESUME
+        # of an existing -o dir and aborts on a fresh campaign ("Resume
+        # attempted but old output directory not found"), so secondaries
+        # launched with '-i -' died at startup and --parallel N>1
+        # silently degraded to the single main instance. Secondaries
+        # seed from the corpus like main does, then sync through the
+        # shared -o dir as usual.
+        cmd.extend(["-i", str(self.corpus_dir)])
 
         cmd.extend(["-o", str(self.output_dir)])
 
@@ -1421,7 +1436,14 @@ class AFLRunner:
                 for line in f:
                     if ":" in line:
                         key, value = line.strip().split(":", 1)
-                        stats[key.strip()] = value.strip()
+                        # fuzzer_stats lives in the target-writable
+                        # output dir and its values are logged to the
+                        # operator's terminal — strip control chars at
+                        # the parse chokepoint (numeric consumers are
+                        # unaffected).
+                        stats[strip_terminal_controls(key.strip())] = (
+                            strip_terminal_controls(value.strip())
+                        )
         except FileNotFoundError:
             pass
         return stats
