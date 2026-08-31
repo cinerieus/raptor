@@ -1267,6 +1267,11 @@
     "count": 10,
     "kind": "literal"
   },
+  "core/llm/coerce.py::_KNOWN_LANG_TAGS": {
+    "count": 38,
+    "kind": "literal",
+    "note": "closed fence-language taxonomy (which leading tokens count as a markdown code-fence language tag when stripping single-line fences), not a learned name vocabulary; same class as core/inventory/extractors.py::_SLASH_COMMENT_LANGS"
+  },
   "core/llm/dispatcher/auth.py::__init__": {
     "count": 19,
     "kind": "literal"
@@ -1274,6 +1279,11 @@
   "core/llm/dispatcher/auth.py::build_rules": {
     "count": 15,
     "kind": "literal"
+  },
+  "core/llm/providers.py::_TRANSPORT_EXC_MODULE_ROOTS": {
+    "count": 10,
+    "kind": "literal",
+    "note": "SDK/transport module-root class: the provider-SDK and HTTP-stack top-level module names whose exceptions may carry API status text (gates quota/rate-limit message sniffing to transport-typed errors so validation errors embedding model output never classify as quota); infrastructure package names, not a learned name vocabulary"
   },
   "core/llm/response_validation.py::_ANALYSIS_WEIGHTS": {
     "count": 16,

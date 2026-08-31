@@ -113,8 +113,43 @@ def _instructor_truncation_stop(exc: Exception) -> str | None:
     return None
 
 
+# Package roots whose exception classes come from an HTTP / SDK
+# transport layer. Used to decide whether an exception MESSAGE is
+# trustworthy evidence about the API's behaviour (status codes,
+# rate-limit vocabulary) — see ``_is_api_transport_exception``.
+_TRANSPORT_EXC_MODULE_ROOTS: frozenset[str] = frozenset({
+    "openai", "anthropic", "google", "httpx", "httpcore",
+    "requests", "urllib3", "aiohttp", "ssl", "socket",
+})
+
+
+def _is_api_transport_exception(exc: Exception) -> bool:
+    """Whether *exc* originates from an HTTP/SDK transport layer.
+
+    Message sniffing for quota / rate-limit / auth vocabulary is only
+    meaningful on transport errors. A validation/shape exception (e.g.
+    pydantic ``ValidationError``) embeds the model's raw output in its
+    message — a ``429`` or ``rate limit`` inside it describes the
+    CONTENT of a completed, recoverable generation, not the API's
+    status, and must not be routed as a quota boundary.
+    """
+    if getattr(exc, "status_code", None) is not None:
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    module_root = (type(exc).__module__ or "").split(".")[0]
+    return module_root in _TRANSPORT_EXC_MODULE_ROOTS
+
+
 _TEMPERATURE_DEPRECATED_FROM = (4, 7)
-_CLAUDE_VERSION_RE = re.compile(r"claude-[a-z]+-(\d+)(?:-(\d+))?")
+# The optional minor group is capped at 7 digits with a trailing
+# digit-boundary so a dated snapshot suffix can never be read as a
+# minor version: ``claude-opus-4-20250514`` is major-only (the 8-digit
+# date is NOT the minor — an unbounded ``(\d+)`` parsed it as
+# (4, 20250514) >= (4, 7) and silently dropped ``temperature`` for a
+# 4.0 model that accepts it), while ``claude-sonnet-4-7-20260115``
+# still parses as (4, 7).
+_CLAUDE_VERSION_RE = re.compile(r"claude-[a-z]+-(\d+)(?:-(\d{1,7})(?!\d))?")
 
 
 def supports_temperature(model_name: str) -> bool:
@@ -760,18 +795,31 @@ class LLMProvider(ABC):
             return "blocked"
         type_name = type(exc).__name__
         lowered = text.lower()
+        # Message sniffing is restricted to transport-layer exception
+        # types. A pydantic ValidationError's message embeds the raw
+        # model output — a "429" or "rate limit" in there is model
+        # CONTENT from a completed generation (a recoverable shape
+        # failure the JSON fallback can fix), not an API status;
+        # routing it as a boundary skipped the fallback entirely.
+        # Type-name and status-code checks stay unconditional — those
+        # attributes only exist on real SDK exceptions.
+        transport = _is_api_transport_exception(exc)
         # Quota before auth: AUTH_KEYWORDS_RE deliberately covers
         # billing vocabulary ("quota", "rate limit"), so the
         # rate-limit check must win for the label to be honest.
         if (
             getattr(exc, "status_code", None) == 429
             or "RateLimitError" in type_name
-            or "429" in text
-            or "rate limit" in lowered
-            or ("quota" in lowered and "exceeded" in lowered)
+            or (transport and (
+                "429" in text
+                or "rate limit" in lowered
+                or ("quota" in lowered and "exceeded" in lowered)
+            ))
         ):
             return "quota"
-        if "AuthenticationError" in type_name or is_auth_error_text(text):
+        if "AuthenticationError" in type_name or (
+            transport and is_auth_error_text(text)
+        ):
             return "auth"
         return "fallback"
 
@@ -816,6 +864,8 @@ class LLMProvider(ABC):
     def _structured_fallback(self, prompt: str, schema: dict[str, Any],
                              pydantic_model, system_prompt: str | None = None,
                              timeout_s: float | None = None,
+                             max_tokens: int | None = None,
+                             temperature: float | None = None,
                              ) -> StructuredResponse:
         """
         Universal fallback: ask for JSON in the prompt, validate
@@ -823,7 +873,13 @@ class LLMProvider(ABC):
         Usage is tracked by self.generate() — no double counting.
         ``timeout_s`` is the caller's per-call ceiling, forwarded to
         ``generate`` (providers without per-request timeout support
-        ignore it there).
+        ignore it there). ``max_tokens`` / ``temperature`` are the
+        caller's sizing parameters — forwarded so the fallback re-send
+        runs at the caller's sizing, not the config defaults (a caller
+        that raised ``max_tokens`` for a long structured response
+        otherwise gets a fallback that truncates at the default).
+        ``None`` means "not overridden" and leaves ``generate``'s own
+        config-default resolution in effect.
         """
         schema_json = dumps_display(schema)
         schema_block = (
@@ -835,7 +891,12 @@ class LLMProvider(ABC):
         augmented_system = (
             (system_prompt or "") + schema_block
         )
-        response = self.generate(prompt, augmented_system, timeout_s=timeout_s)
+        gen_kwargs: dict[str, Any] = {"timeout_s": timeout_s}
+        if max_tokens is not None:
+            gen_kwargs["max_tokens"] = max_tokens
+        if temperature is not None:
+            gen_kwargs["temperature"] = temperature
+        response = self.generate(prompt, augmented_system, **gen_kwargs)
         if response.finish_reason in ("max_tokens", "length"):
             # RuntimeError, not json.JSONDecodeError: the client's
             # retry loop treats JSON decode failures as retryable, but
@@ -1591,8 +1652,11 @@ class OpenAICompatibleProvider(LLMProvider):
                 if details:
                     thinking_tokens = getattr(details, 'reasoning_tokens', 0) or 0
                     # Reasoning tokens are included in completion_tokens — subtract
-                    # to get actual output tokens for display, but bill both as output
-                    output_tokens = output_tokens - thinking_tokens
+                    # to get actual output tokens for display, but bill both as output.
+                    # Clamped at 0: some gateway shims report reasoning_tokens
+                    # WITHOUT including them in completion_tokens, which would
+                    # push this negative.
+                    output_tokens = max(0, output_tokens - thinking_tokens)
                 prompt_details = getattr(response.usage, 'prompt_tokens_details', None)
                 if prompt_details:
                     cache_read_tokens = getattr(prompt_details, 'cached_tokens', 0) or 0
@@ -1694,7 +1758,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     details = getattr(completion.usage, 'completion_tokens_details', None)
                     if details:
                         thinking_tokens = getattr(details, 'reasoning_tokens', 0) or 0
-                        output_tokens = output_tokens - thinking_tokens
+                        # Clamped at 0 — same gateway-shim caveat as generate().
+                        output_tokens = max(0, output_tokens - thinking_tokens)
                     prompt_details = getattr(completion.usage, 'prompt_tokens_details', None)
                     if prompt_details:
                         cache_read_tokens = getattr(prompt_details, 'cached_tokens', 0) or 0
@@ -1743,7 +1808,12 @@ class OpenAICompatibleProvider(LLMProvider):
                 self._note_instructor_failure(e)
 
         # Fallback: JSON-in-prompt
-        return self._structured_fallback(prompt, schema, pydantic_model, system_prompt, timeout_s=kwargs.get("timeout_s"))
+        return self._structured_fallback(
+            prompt, schema, pydantic_model, system_prompt,
+            timeout_s=kwargs.get("timeout_s"),
+            max_tokens=kwargs.get("max_tokens"),
+            temperature=kwargs.get("temperature"),
+        )
 
     # ------------------------------------------------------------------
     # Tool-use turn primitive — OpenAI function-calling shape.
@@ -2969,7 +3039,12 @@ class AnthropicProvider(LLMProvider):
                 self._note_instructor_failure(e)
 
         # Fallback: JSON-in-prompt
-        return self._structured_fallback(prompt, schema, pydantic_model, system_prompt, timeout_s=kwargs.get("timeout_s"))
+        return self._structured_fallback(
+            prompt, schema, pydantic_model, system_prompt,
+            timeout_s=kwargs.get("timeout_s"),
+            max_tokens=kwargs.get("max_tokens"),
+            temperature=kwargs.get("temperature"),
+        )
 
     # ------------------------------------------------------------------
     # Tool-use turn primitive — Anthropic-native.
@@ -3988,7 +4063,14 @@ class GeminiProvider(LLMProvider):
                 "Gemini native structured generation failed (falling back): %s",
                 escape_nonprintable(redact_secrets(str(e)))[:512],
             )
-            return self._structured_fallback(prompt, schema, pydantic_model, system_prompt, timeout_s=kwargs.get("timeout_s"))
+            return self._structured_fallback(
+                prompt, schema, pydantic_model, system_prompt,
+                timeout_s=kwargs.get("timeout_s"),
+                # max_tokens was pop()'d into max_out above (config
+                # default already merged) — forward the resolved value.
+                max_tokens=max_out,
+                temperature=kwargs.get("temperature"),
+            )
         except Exception:
             # Auth, network, quota — don't waste a second call
             raise
