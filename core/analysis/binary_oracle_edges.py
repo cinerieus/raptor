@@ -248,7 +248,17 @@ def _try_graph_store(binary_path: Path) -> BinaryEdgeIndex | None:
         out_dir = raptor_dir / "out"
         if out_dir.is_dir():
             search_dirs.append(out_dir)
-        active = raptor_dir / ".active"
+    # The last-activated project bookmark lives in the projects root
+    # (``core.project.project.PROJECTS_DIR / ".active"``), not under
+    # RAPTOR_DIR — the old RAPTOR_DIR-relative path never existed, so
+    # the project-dir search leg never fired.
+    projects_dir: Path | None
+    try:
+        from core.project.project import PROJECTS_DIR as projects_dir
+    except ImportError:
+        projects_dir = None
+    if projects_dir is not None:
+        active = Path(projects_dir) / ".active"
         if active.is_symlink() or active.exists():
             try:
                 project_dir = active.resolve()
@@ -290,8 +300,14 @@ def _try_graph_store(binary_path: Path) -> BinaryEdgeIndex | None:
                     continue
                 src = e.get("source") or {}
                 tgt = e.get("target") or {}
-                caller = src.get("name", "")
-                callee = tgt.get("name", "")
+                # Graph-store node names come from r2 and carry its
+                # ``sym.`` / ``fcn.`` / … prefixes; the inventory join
+                # downstream is by BARE source-function name, and this
+                # store result SHADOWS fresh r2 extraction (which does
+                # clean), so uncleaned names silently dropped every
+                # join.
+                caller = _clean_r2_function_name(src.get("name", ""))
+                callee = _clean_r2_function_name(tgt.get("name", ""))
                 if caller and callee:
                     edges.append(BinaryCallEdge(
                         caller=caller,

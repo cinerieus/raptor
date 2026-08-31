@@ -125,8 +125,12 @@ def _run_status(argv: list[str], timeout: int = 60,
     from core.sandbox import run as _sandbox_run
     target = str(Path(binary).resolve().parent) if binary else None
     try:
+        # errors="replace": tool output over a malformed/hostile ELF can
+        # carry non-UTF-8 bytes; the default strict decode would raise
+        # UnicodeDecodeError instead of degrading to "no evidence".
         proc = _sandbox_run(argv, block_network=True, target=target,
                             capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
                             timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         logger.debug("binary_oracle: %s failed: %s", argv[0], e)
@@ -183,9 +187,13 @@ def _stream(argv: list[str], timeout: int,
         wrapper = ["bash", "-c", 'exec "$@" > "$RAPTOR_BO_OUT"',
                    "bo-stream"] + list(argv)
         try:
+            # errors="replace" for the (small) captured stderr channel —
+            # same rationale as ``_run_status``; the big stdout stream is
+            # already read back with errors="replace" below.
             proc = _sandbox_run(wrapper, block_network=True, target=target,
                                 output=td, env=env, strict_env=True,
                                 capture_output=True, text=True,
+                                encoding="utf-8", errors="replace",
                                 timeout=timeout)
         except (OSError, subprocess.TimeoutExpired) as e:
             logger.warning("binary_oracle: %s failed/timed out: %s",
@@ -549,10 +557,13 @@ def _demangle_linkage_names(linkage_names: Iterable[str]) -> dict[str, str]:
     # input= routes through the subprocess+preexec sandbox path.
     from core.sandbox import run as _sandbox_run
     try:
+        # errors="replace": mangled names are attacker-derived bytes; a
+        # non-UTF-8 c++filt echo must degrade, not raise mid-classify.
         proc = _sandbox_run(
             ["c++filt"], block_network=True,
             input="\n".join(seen),
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
         return {}
@@ -982,14 +993,31 @@ def classify_binary_evidence(
         if die.has_inline_marker:
             _note_inlined(die)
 
-    # Fold detection: two distinct source names mapping to the same address.
+    # Fold detection: two DISTINCT source functions mapping to the same
+    # address (linker identical-code-folding). Count distinct functions
+    # per address by each DIE's PRIMARY name, not by ``by_qualified``
+    # keys — a single DIE is indexed there under BOTH its DW_AT_name
+    # spelling and the demangled-linkage canonical spelling when they
+    # differ (template-argument spelling drift, e.g. ``long unsigned
+    # int`` vs ``unsigned long``), and two spellings of one DIE are one
+    # function, not a fold. Keying folds on the spellings misread every
+    # such dual-spelled template instantiation as ``folded``.
     by_addr: dict[int, set[str]] = {}
-    for q, dies in by_qualified.items():
-        for die in dies:
-            if die.low_pc is not None:
-                by_addr.setdefault(die.low_pc, set()).add(q)
-    folded_names = {n for names in by_addr.values() if len(names) > 1
-                    for n in names}
+    for die in subs.values():
+        if die.low_pc is None:
+            continue
+        primary = die.qualified_name or die.name
+        if primary:
+            by_addr.setdefault(die.low_pc, set()).add(primary)
+    folded_addrs = {a for a, names in by_addr.items() if len(names) > 1}
+    # Mark EVERY indexed spelling of a genuinely-folded address so a
+    # lookup under the alternate (demangled-canonical) spelling still
+    # reads ``folded``.
+    folded_names = {
+        q for q, dies in by_qualified.items()
+        if any(die.low_pc in folded_addrs for die in dies
+               if die.low_pc is not None)
+    }
 
     if not nm_ok:
         # nm errored / was killed (NOT merely empty output — that
