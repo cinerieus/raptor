@@ -1210,7 +1210,7 @@ class TestShippedRulesIntegration:
                 if (atomic_read(&o->refcnt) == 1)
                     obj_destroy(o);
             }
-            void bug_dec_test_kfree(struct obj *o) {
+            void ok_dec_test_kfree(struct obj *o) {
                 if (atomic_dec_and_test(&o->refcnt)) {
                     kfree(o);
                 }
@@ -1222,7 +1222,10 @@ class TestShippedRulesIntegration:
             allow_scripting=True,
         )
         assert result.returncode == 0
-        assert result.match_count >= 3
+        # Only the two atomic_read shapes are races. The
+        # dec_and_test-guarded free is the canonical atomic refcount
+        # put and must not be counted.
+        assert result.match_count == 2
 
     def test_atomic_check_then_act_clean(self, tmp_path):
         target = tmp_path / "test.c"
