@@ -4151,6 +4151,11 @@ class ClaudeCodeLLMProvider(LLMProvider):
         self._resumable = resumable
         self._session_id: str | None = None
         self._messages_seen: int = 0
+        # Content blocks of the last turn THIS provider emitted in the
+        # current resumable session — used to recognise (and skip) the
+        # loop's echo of our own turn in the unseen message slice; the
+        # CC session already holds that turn server-side.
+        self._last_turn_content: list[TextBlock | ToolCall] | None = None
         # Per-call timeout: prefer explicit kwarg, then ModelConfig.timeout,
         # then a generous default (Claude Code subprocess + tool-use can
         # take several minutes on real workloads).
@@ -4173,6 +4178,7 @@ class ClaudeCodeLLMProvider(LLMProvider):
         """Discard resume state so the next ``turn()`` starts fresh."""
         self._session_id = None
         self._messages_seen = 0
+        self._last_turn_content = None
 
     def context_window(self) -> int:
         return self.config.max_context
@@ -4644,7 +4650,23 @@ class ClaudeCodeLLMProvider(LLMProvider):
             prompt = self._render_history_for_cc(messages)
         else:
             sys_combined = None
-            new_msgs = messages[self._messages_seen :]
+            new_msgs = list(messages[self._messages_seen :])
+            # The tool-use loop appends OUR previous turn back onto the
+            # history as an assistant message, so it always leads the
+            # unseen slice — but the CC session already holds that turn
+            # server-side; re-rendering it into the prompt duplicates
+            # the model's own output every resumed turn (token bloat
+            # linear in turn count). Skip leading assistant messages
+            # whose content matches exactly what this provider emitted
+            # last turn; assistant messages injected by callers carry
+            # different content and are preserved.
+            while (
+                new_msgs
+                and new_msgs[0].role == "assistant"
+                and self._last_turn_content is not None
+                and list(new_msgs[0].content) == self._last_turn_content
+            ):
+                new_msgs = new_msgs[1:]
             prompt = self._render_history_for_cc(new_msgs) if new_msgs else ""
 
         cc_config = CCDispatchConfig(
@@ -4762,13 +4784,17 @@ class ClaudeCodeLLMProvider(LLMProvider):
                     error_message=f"structured parse: {result['error']}",
                 )
 
-        return self._parse_turn_structured_result(
+        turn_resp = self._parse_turn_structured_result(
             result,
             tools,
             cost_usd=sr.cost_usd,
             input_tokens=sr.input_tokens,
             output_tokens=sr.output_tokens,
         )
+        # Remember what this turn emitted so the next resumed turn can
+        # recognise the loop's echo of it (see the unseen-slice skip).
+        self._last_turn_content = list(turn_resp.content)
+        return turn_resp
 
     @staticmethod
     def _parse_stream_content(text: str) -> dict[str, Any]:
