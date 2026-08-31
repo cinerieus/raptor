@@ -58,7 +58,7 @@ Based on targets, build BigQuery queries for relevant event types:
 - `PullRequestEvent` - PRs opened/closed/merged
 - `IssuesEvent` - issues opened/closed
 - `CreateEvent` / `DeleteEvent` - branches/tags created/deleted
-- `WorkflowRunEvent` - GitHub Actions runs
+- `WorkflowRunEvent` - GitHub Actions runs (**caveat**: GH Archive mirrors the public GitHub events feed, which may not carry workflow_run events at all — confirm the type exists in the feed before building conclusions on it; see Section 4)
 
 **Query Priority**:
 1. If investigating deleted content: query for the deletion event
@@ -125,8 +125,10 @@ WHERE repo.name = 'owner/repo'
 ```
 
 **Workflow vs Direct API** (attribution):
-- If PushEvent exists but no WorkflowRunEvent nearby → direct API abuse
+- **Prerequisite**: absence of `WorkflowRunEvent` is only meaningful if the feed carries that type at all. GH Archive mirrors the public GitHub events API, which may not emit workflow_run events — first run a cheap single-day `SELECT DISTINCT type FROM githubarchive.day.YYYYMMDD WHERE repo.name = 'owner/repo'` (or confirm a baseline query returns WorkflowRunEvent rows) before treating absence as evidence.
+- If the type is confirmed present in the feed AND PushEvent exists with no WorkflowRunEvent nearby → consistent with direct API abuse
 - If both exist → legitimate automation
+- If the type never appears in the archive → absence proves nothing; say so in your report rather than attributing "direct API abuse"
 
 **Deleted Tags/Branches**:
 - `CreateEvent` records creation

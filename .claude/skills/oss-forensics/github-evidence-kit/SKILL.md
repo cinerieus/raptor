@@ -255,7 +255,7 @@ All 12 GitHub event types are supported:
 | MemberEvent | Collaborator added/removed |
 | PublicEvent | Repository made public |
 | ReleaseEvent | Release published/created/deleted |
-| WorkflowRunEvent | GitHub Actions run |
+| WorkflowRunEvent | GitHub Actions run (schema-supported for ingest, but GH Archive's public-events source feed may never emit it — confirm the type appears in the archive before reasoning about its absence; see the github-archive skill's availability caveat) |
 
 ### Observations (from GitHub API, Local Git, Wayback, Vendors)
 
