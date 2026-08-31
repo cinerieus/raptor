@@ -3527,16 +3527,81 @@ class AutonomousSecurityAgentV2:
         return report
 
 
+# Validation run-directory naming families. Only the legacy orchestrator
+# default-workdir fallback still mints the exploitability-validation-
+# prefix; live /validate runs go through core.run.output.get_output_dir,
+# which names standalone runs `validate_<target>_<ts>` (under out/) and
+# project runs `validate-<ts>` (under the project's output dir).
+_VALIDATION_RUN_PATTERNS = (
+    "exploitability-validation-*",  # legacy orchestrator layout
+    "validate_*",                   # modern standalone layout (out/)
+    "validate-*",                   # modern project run layout
+)
+
+
+def _validation_search_bases() -> list[Path]:
+    """Output bases that can hold /validate run directories.
+
+    Canonical RAPTOR out/ and the validation pipeline's ``.out``
+    conventions (the same base table as
+    ``packages.exploitation.bootstrap._get_search_bases``), plus
+    per-project output dirs (a project run lands in
+    ``<project.output_dir>/validate-<ts>``, one level below any
+    top-level base, so no top-level glob reaches it). Project-registry
+    read failures must not break discovery for projectless setups.
+    """
+    bases: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(candidate: Path) -> None:
+        if not candidate.is_dir():
+            return
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            bases.append(candidate)
+            seen.add(resolved)
+
+    _add(RaptorConfig.get_out_dir())
+    _add(Path(".out").resolve())  # Lock to absolute path at call time
+    _add(Path.home() / ".out")
+
+    try:
+        from core.project.project import ProjectManager
+        for project in ProjectManager().list_projects():
+            project_out = getattr(project, "output_dir", "") or ""
+            if project_out:
+                _add(Path(project_out))
+    except Exception as e:  # noqa: BLE001 — registry unavailable ≠ fatal
+        logger.debug(
+            "Project registry unavailable for validation-run discovery: %s", e,
+        )
+
+    return bases
+
+
+def _mtime_or_zero(path: Path) -> float:
+    """Recency key for candidate artifacts. A racing cleanup that
+    unlinks a candidate between glob and stat must demote it, not
+    abort artifact discovery."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def find_validation_artifacts(workdir: Path | None = None) -> Path | None:
     """Search for validation artifacts from recent pipeline runs.
 
     Checks:
     - workdir/validation/findings.json (from /agentic)
-    - .out/exploitability-validation-*/findings.json (from /validate)
+    - findings.json inside validation run dirs across every output
+      base (from /validate) — the legacy ``exploitability-validation-*``
+      layout plus both modern run-lifecycle layouts (``validate_*``
+      standalone, ``validate-*`` under project output dirs).
 
     Returns the most recent findings.json path, or None.
     """
-    candidates = []
+    candidates: list[Path] = []
 
     # Check workdir/validation/ (from /agentic pipeline)
     if workdir:
@@ -3544,18 +3609,21 @@ def find_validation_artifacts(workdir: Path | None = None) -> Path | None:
         if agentic_findings.exists():
             candidates.append(agentic_findings)
 
-    # Check .out/exploitability-validation-*/ (from /validate)
-    out_dir = Path(".out").resolve()  # Lock to absolute path at call time
-    if out_dir.exists():
-        for d in sorted(out_dir.glob("exploitability-validation-*"), reverse=True):
-            findings_path = d / "findings.json"
-            if findings_path.exists():
-                candidates.append(findings_path)
-                break  # Most recent only
+    # Validation runs across all bases and naming families. Recency is
+    # decided by mtime below: a directory-name sort only orders
+    # correctly within ONE family (the timestamp sits after different
+    # prefixes), so the old take-first-by-name shortcut mis-picked as
+    # soon as a second family appeared.
+    for base in _validation_search_bases():
+        for pattern in _VALIDATION_RUN_PATTERNS:
+            for run_dir in base.glob(pattern):
+                findings_path = run_dir / "findings.json"
+                if run_dir.is_dir() and findings_path.exists():
+                    candidates.append(findings_path)
 
     if candidates:
         # Return most recently modified
-        return max(candidates, key=lambda p: p.stat().st_mtime)
+        return max(candidates, key=_mtime_or_zero)
     return None
 
 
