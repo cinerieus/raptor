@@ -23,7 +23,7 @@ Each persona serves a distinct moment in the security analysis pipeline:
    prompt for Gemini/Ollama/etc.
 
 2. **Claude Code** — agent definitions reference persona files
-   (e.g. crash-analyzer-agent reads `crash_analyst.md`); operators
+   (e.g. crash-analyzer reads `crash_analyst.md`); operators
    can also request personas explicitly.
 
 ## Adding a persona
