@@ -172,11 +172,20 @@ class EventType:
     # stay the same? ``correct`` = held; ``incorrect`` = flipped.
     # Producer: :mod:`core.llm.scorecard.stability`.
     CROSS_RUN_STABILITY = "cross_run_stability"
-    # Cross-family check: a different model family re-analyses a
-    # finding the primary flagged. ``correct`` = checker agreed;
-    # ``incorrect`` = checker disputed (conservative override applied).
-    # Producer: :mod:`core.llm.scorecard.cross_family`.
+    # Cross-family check adjudicated against ground truth. Reserved:
+    # the live cross-family path is a 1-vs-1 primary/checker pair with
+    # no ground-truth resolution, so nothing currently earns this
+    # correctness-graded slot — mere disagreement records
+    # CROSS_FAMILY_CONSISTENCY below instead.
     CROSS_FAMILY_CHECK = "cross_family_check"
+    # Cross-family agreement/disagreement between the primary and a
+    # checker from a different model family. ``correct`` = checker
+    # agreed; ``incorrect`` = checker disputed. A 1-vs-1 split carries
+    # no majority and no ground truth, so — like CROSS_RUN_STABILITY —
+    # this is a consistency/observability axis, deliberately kept out
+    # of correctness-graded reliability pools (which allowlist event
+    # types). Producer: :mod:`core.llm.scorecard.cross_family`.
+    CROSS_FAMILY_CONSISTENCY = "cross_family_consistency"
     # Self-consistency: Stage F retried a finding (contradictory or
     # low confidence). ``correct`` = verdict held after retry;
     # ``incorrect`` = verdict flipped.
@@ -228,6 +237,7 @@ ALL_EVENT_TYPES: tuple[str, ...] = (
     EventType.SCHEMA_VALID,
     EventType.CROSS_RUN_STABILITY,
     EventType.CROSS_FAMILY_CHECK,
+    EventType.CROSS_FAMILY_CONSISTENCY,
     EventType.SELF_CONSISTENCY,
     EventType.DATAFLOW_VALIDATION,
     EventType.STUDY_QUESTION,
@@ -965,6 +975,13 @@ class ModelScorecard:
                         continue
                     if cutoff_iso is not None:
                         seen = by_dc[dc_key].get("last_seen_at", "")
+                        if not seen:
+                            # No timestamp (e.g. adopted legacy
+                            # history): age is unknown, so an
+                            # age-filtered reset keeps the cell.
+                            # Only a scoped or full reset removes
+                            # timestampless cells.
+                            continue
                         if seen >= cutoff_iso:
                             continue
                     del by_dc[dc_key]

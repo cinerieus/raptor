@@ -1231,3 +1231,42 @@ class TestRecordEventsBatch:
         stats = sc.get_stat("x:y", "m")
         assert stats.disagreement_samples
         assert stats.disagreement_samples[0]["this_reasoning"] == "r1"
+
+
+def test_reset_older_than_keeps_timestampless_cells(tmp_path):
+    """A cell with no ``last_seen_at`` (e.g. adopted legacy history)
+    has unknown age: an age-filtered reset must keep it. Deleting it
+    stays reserved for scoped/full resets."""
+    path = tmp_path / "sc.json"
+    sc = ModelScorecard(path)
+    sc.record_event("legacy", "m", EventType.CHEAP_SHORT_CIRCUIT, "correct")
+    sc.record_event("old", "m", EventType.CHEAP_SHORT_CIRCUIT, "correct")
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    # Strip the legacy cell's timestamp; age the other one out.
+    del on_disk["models"]["m"]["legacy"]["last_seen_at"]
+    long_ago = (
+        datetime.now(timezone.utc) - timedelta(days=200)
+    ).replace(microsecond=0).isoformat()
+    on_disk["models"]["m"]["old"]["last_seen_at"] = long_ago
+    path.write_text(json.dumps(on_disk), encoding="utf-8")
+    integrity.stamp_file(path)
+
+    n = sc.reset(older_than_days=90)
+    assert n == 1
+    remaining = {s.decision_class for s in sc.get_stats()}
+    assert remaining == {"legacy"}
+
+
+def test_reset_full_still_removes_timestampless_cells(tmp_path):
+    """The keep-on-unknown-age rule only applies to the age filter:
+    ``all_=True`` (and scoped resets) still delete such cells."""
+    path = tmp_path / "sc.json"
+    sc = ModelScorecard(path)
+    sc.record_event("legacy", "m", EventType.CHEAP_SHORT_CIRCUIT, "correct")
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    del on_disk["models"]["m"]["legacy"]["last_seen_at"]
+    path.write_text(json.dumps(on_disk), encoding="utf-8")
+    integrity.stamp_file(path)
+
+    assert sc.reset(all_=True) == 1
+    assert sc.get_stats() == []
