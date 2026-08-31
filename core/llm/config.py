@@ -12,7 +12,7 @@ Availability detection (SDK flags, Ollama, Claude Code) lives in detection.py.
 import contextlib
 import os
 import threading as _threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1450,6 +1450,26 @@ class ModelConfig:
     # ``region`` in ``models.json`` or globally via
     # ``RAPTOR_BEDROCK_REGION``.
     aws_region: str | None = None
+
+    def __repr__(self) -> str:
+        """Dataclass-shaped repr with the API key masked.
+
+        Belt-and-braces behind per-call-site redaction: ModelConfig
+        instances travel through debug logs, error messages and
+        exception args, and the auto-generated dataclass repr printed
+        ``api_key`` verbatim — one stray ``%r``/f-string of a config
+        object leaked the credential. Masking at the repr chokepoint
+        keeps every present and future format site leak-free instead
+        of relying on each caller to redact. ``str()`` falls through
+        to this too (dataclasses define no separate ``__str__``).
+        """
+        parts = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.name == "api_key" and value:
+                value = "***"
+            parts.append(f"{f.name}={value!r}")
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 def _shared_prefix_len(a: str, b: str) -> int:
