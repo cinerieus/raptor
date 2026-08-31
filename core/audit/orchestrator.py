@@ -9491,7 +9491,10 @@ def _run_mechanical_detectors(
     try:
         from .dispatch_completeness import find_dispatch_gaps
 
-        for dg in find_dispatch_gaps(call_graphs or {}, source_texts):
+        for dg in find_dispatch_gaps(
+            call_graphs or {}, source_texts,
+            target_root=config.target_path,
+        ):
             _add(
                 dg.table.file,
                 dg.table.function,
@@ -13023,6 +13026,7 @@ def _study_consumer_loop(
             if concept_index_ref is not None:
                 _build_concept_index_from_prep(
                     concept_index_ref, checklist, config.out_dir,
+                    target_path=config.target_path,
                 )
 
         # Multi-language requests: resolve in-process and merge the
@@ -13296,8 +13300,17 @@ def _build_concept_index_from_prep(
     concept_index_ref: list,
     checklist: dict,
     out_dir: Path,
+    target_path: Path | str | None = None,
 ) -> None:
-    """Build ConceptIndex after study-prep, using its type data."""
+    """Build ConceptIndex after study-prep, using its type data.
+
+    ``target_path`` is the RUN's source root (config.target_path).
+    The checklist's own ``target_path`` field is never used as the
+    join root: the checklist is an LLM-writable artifact, so letting
+    it choose the base directory turned every ``files[].path`` read
+    into an arbitrary host-file read.  Without a caller-supplied root
+    the index is built without source bodies.
+    """
     try:
         study_list_path = out_dir / "study-list.json"
         if not study_list_path.is_file():
@@ -13327,8 +13340,9 @@ def _build_concept_index_from_prep(
         if not type_names:
             return
 
-        target_path = checklist.get("target_path", "")
-        enriched = _flatten_checklist_with_source(checklist, target_path)
+        enriched = _flatten_checklist_with_source(
+            checklist, str(target_path or ""),
+        )
         if not enriched:
             return
         idx = ConceptIndex.build({"items": enriched}, type_names)
@@ -13350,8 +13364,17 @@ def _flatten_checklist_with_source(
     checklist: dict,
     target_path: str,
 ) -> list[dict]:
-    """Flatten files[].items[] and read source bodies from disk."""
+    """Flatten files[].items[] and read source bodies from disk.
+
+    ``files[].path`` values are LLM-writable checklist fields, so each
+    join is containment-checked (``core.paths.confine``): an absolute
+    path discards the base under ``/`` semantics and ``../`` segments
+    escape it (CWE-22).  Escaping entries keep their metadata but get
+    no source body.
+    """
     from pathlib import Path as _Path
+
+    from core.paths import confine
 
     base = _Path(target_path) if target_path else None
     result: list[dict] = []
@@ -13371,14 +13394,21 @@ def _flatten_checklist_with_source(
                 le = item.get("line_end")
                 if ls and le:
                     if rel_path not in src_cache:
-                        src_file = base / rel_path
-                        try:
-                            src_cache[rel_path] = (
-                                src_file.read_text(errors="replace")
-                                .splitlines()
+                        src_file = confine(base, rel_path)
+                        if src_file is None:
+                            logger.warning(
+                                "checklist path escapes target root, "
+                                "skipping source read: %r", rel_path,
                             )
-                        except OSError:
                             src_cache[rel_path] = []
+                        else:
+                            try:
+                                src_cache[rel_path] = (
+                                    src_file.read_text(errors="replace")
+                                    .splitlines()
+                                )
+                            except OSError:
+                                src_cache[rel_path] = []
                     lines = src_cache[rel_path]
                     source = "\n".join(lines[ls - 1:le])
             result.append({
@@ -14465,8 +14495,25 @@ def _read_raw_source(
     line_start: int,
     line_end: int | None,
 ) -> str:
-    """Read raw source lines without line-number prefixes."""
-    full_path = target_path / file_path
+    """Read raw source lines without line-number prefixes.
+
+    Shared sink for every raw-source caller: ``file_path`` values come
+    from run artefacts (checklists, gap records, finding fields — all
+    LLM-writable), so the join is containment-checked
+    (``core.paths.confine``): an absolute value discards
+    ``target_path`` entirely under ``/`` semantics and ``../`` values
+    walk out of the root (CWE-22).  Escaping paths degrade to the
+    function's normal empty-string result.
+    """
+    from core.paths import confine
+
+    full_path = confine(target_path, file_path)
+    if full_path is None:
+        logger.warning(
+            "_read_raw_source: refusing path outside target root: %r",
+            file_path,
+        )
+        return ""
     try:
         st = full_path.stat()
     except OSError:

@@ -334,8 +334,23 @@ def _read_source(
     line_start: int | None = None,
     line_end: int | None = None,
 ) -> str | None:
-    """Read function source from the target directory."""
-    full_path = target_path / file_path
+    """Read function source from the target directory.
+
+    ``file_path`` comes from checklist-gap dicts (LLM-writable), so
+    the join is containment-checked (``core.paths.confine``): an
+    absolute value discards ``target_path`` under ``/`` semantics and
+    ``../`` values escape the root (CWE-22) — the whole file would
+    then flow into LLM summary prompts.
+    """
+    from core.paths import confine
+
+    full_path = confine(target_path, file_path)
+    if full_path is None:
+        logger.warning(
+            "_read_source: refusing path outside target root: %r",
+            file_path,
+        )
+        return None
     if not full_path.is_file():
         return None
 
