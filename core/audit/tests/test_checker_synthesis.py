@@ -768,3 +768,75 @@ class TestTriageRuleHitsErrorGuard:
             shared, self._outcome("finding"), {}, self._pf(), lib,
         )
         assert lib.matches == [("lib-rule", True)]
+
+
+class TestSageReplayRuleIdShape(TestSageReplayRule):
+    """Ingestion-time shape check: SAGE is an agent-writable store and
+    a recalled rule_id flows into library filenames — traversal or
+    separator characters mark a planted record, not a slugified id."""
+
+    def test_traversal_rule_id_rejected(self, tmp_path):
+        from core.audit.checker_synthesis import _sage_replay_rule
+        from packages.checker_synthesis import Match
+
+        body = "rules:\n  - id: x\n"
+        rule_file = tmp_path / "x.yaml"
+        rule_file.write_text(body)
+        meta = self._meta(rule_file, body, rule_id="../../evil")
+
+        with patch(
+            "core.sage.recall_verified_proven_rules",
+            return_value=[meta],
+        ), patch(
+            "packages.checker_synthesis.synthesise._run_engine",
+            return_value=(
+                [Match(file="src/other.c", line=7, snippet="q()")], [],
+            ),
+        ):
+            assert _sage_replay_rule(
+                "semgrep", "CWE-89", self._seed(), tmp_path,
+            ) is None
+
+    def test_separator_rule_id_rejected(self, tmp_path):
+        from core.audit.checker_synthesis import _sage_replay_rule
+
+        body = "rules:\n  - id: x\n"
+        rule_file = tmp_path / "x.yaml"
+        rule_file.write_text(body)
+        meta = self._meta(rule_file, body, rule_id="a/b")
+
+        with patch(
+            "core.sage.recall_verified_proven_rules",
+            return_value=[meta],
+        ):
+            assert _sage_replay_rule(
+                "semgrep", "CWE-89", self._seed(), tmp_path,
+            ) is None
+
+    def test_slugified_rule_id_still_replays(self, tmp_path):
+        # Two-direction guard: the mint-time slug alphabet passes
+        # unchanged (covered again by the inherited happy-path test).
+        from core.audit.checker_synthesis import _sage_replay_rule
+        from packages.checker_synthesis import Match
+
+        body = "rules:\n  - id: ok\n"
+        rule_file = tmp_path / "ok.yaml"
+        rule_file.write_text(body)
+        meta = self._meta(
+            rule_file, body, rule_id="src_auth.c.check_pw.CWE-89.1",
+        )
+
+        with patch(
+            "core.sage.recall_verified_proven_rules",
+            return_value=[meta],
+        ), patch(
+            "packages.checker_synthesis.synthesise._run_engine",
+            return_value=(
+                [Match(file="src/other.c", line=7, snippet="q()")], [],
+            ),
+        ):
+            replay = _sage_replay_rule(
+                "semgrep", "CWE-89", self._seed(), tmp_path,
+            )
+        assert replay is not None
+        assert replay[1] == "sage:src_auth.c.check_pw.CWE-89.1"

@@ -589,15 +589,6 @@
     "dead:dead_function:core/audit/callsite_consistency.py:_find_deviations": {
       "note": "superseded by the consistency channel's census adjudicator (consistency_verify); deletion deferred to the next dead-code sweep"
     },
-    "dead:dead_function:core/audit/checker_library.py:checker_from_synthesis": {
-      "note": "zero-reference symbol at baseline cut \u2014 triaged as public-API surface, planned wiring, or deletable-pending-owner-decision"
-    },
-    "dead:dead_function:core/audit/checker_library.py:graduate_checkers": {
-      "note": "zero-reference symbol at baseline cut \u2014 triaged as public-API surface, planned wiring, or deletable-pending-owner-decision"
-    },
-    "dead:dead_function:core/audit/checker_library.py:load_library": {
-      "note": "zero-reference symbol at baseline cut \u2014 triaged as public-API surface, planned wiring, or deletable-pending-owner-decision"
-    },
     "dead:dead_function:core/audit/decompiler_sanitise.py:needs_sanitising": {
       "note": "binary-audit checker entry point landed ahead of its consumer wiring (roadmap phases land checker surface first); remove this entry when the orchestrator/sweep wiring lands or the symbol is excised"
     },
@@ -630,9 +621,6 @@
     },
     "dead:dead_function:packages/exploit_feasibility/schema.py:validate_context_file": {
       "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
-    },
-    "dead:dead_method:core/audit/checker_library.py:CheckerLibrary.active_checkers": {
-      "note": "zero-reference symbol at baseline cut \u2014 triaged as public-API surface, planned wiring, or deletable-pending-owner-decision"
     },
     "dead:dead_method:core/audit/tests/test_return_census.py:TestCpgUsage._fake_server_rows": {
       "note": "test scaffolding kept for the planned CPG-backed census cases; harmless"
