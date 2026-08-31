@@ -687,6 +687,11 @@
     "count": 10,
     "kind": "alternation"
   },
+  "core/audit/precondition_check.py::_NON_CALL_KEYWORDS": {
+    "count": 21,
+    "kind": "literal",
+    "note": "C/Python language-standard keywords and operators that parse as call-shaped tokens (if(, sizeof(, not(...)) \u2014 excluded from the leaf-function test so control flow does not count as a callee; language-standard vocabulary, not a learned name list (libc/POSIX-class allowance)"
+  },
   "core/audit/prefilter.py::_AUTH_KEYWORDS": {
     "count": 14,
     "kind": "literal"

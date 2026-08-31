@@ -428,3 +428,44 @@ class TestPreconditionVerdict:
         ])
         assert v.any_contradicted
         assert "null_check" in v.contradiction_summary
+
+
+class TestReachesSinkAbsenceTransitivity:
+    """expect_absent=True returned a 'supported' absence receipt for
+    wrapper functions whose HELPERS call the sink — the transitivity
+    its own docstring and the mirror branch refuse to conclude on."""
+
+    def _check(self, source):
+        from core.audit.precondition_check import _check_reaches_sink
+
+        return _check_reaches_sink(
+            source, "a.c", "log_input", "", True,
+        )
+
+    def test_wrapper_function_is_inconclusive(self):
+        r = self._check(
+            "void log_input(char *s) {\n"
+            "    copy_string(buf, s);\n"
+            "}\n",
+        )
+        assert r.verdict == "inconclusive"
+        assert "transitive" in r.evidence
+
+    def test_leaf_function_still_supported(self):
+        # Two-direction guard: a function with no calls at all cannot
+        # reach a sink transitively — the absence receipt stands.
+        r = self._check(
+            "int log_input(int a) {\n"
+            "    if (a > 0) { return a + 1; }\n"
+            "    return 0;\n"
+            "}\n",
+        )
+        assert r.verdict == "supported"
+        assert r.grade == "absence"
+
+    def test_direct_sink_still_inconclusive(self):
+        r = self._check(
+            "void log_input(char *s) { strcpy(buf, s); }\n",
+        )
+        assert r.verdict == "inconclusive"
+        assert "DOES reach" in r.evidence

@@ -629,3 +629,27 @@ class TestHelpers:
             "int f(int a, char *b){int v; return v;}",
         )
         assert names == frozenset({"a", "b"})
+
+
+class TestInitDeclaratorSizeReads:
+    def test_vla_size_read_in_initialized_declarator_not_proven(self):
+        # ``int (*rows)[x] = get_rows();`` evaluates x at the
+        # declaration; the init branch only scanned the initializer,
+        # so the prover certified "assigned before every use" over an
+        # uninitialized size read.
+        r = _check(
+            "int f(int a){int x; int (*rows)[x] = get_rows();"
+            " x = a; return x;}",
+            "x",
+        )
+        assert not r.proven
+
+    def test_assigned_size_read_still_proven(self):
+        # Two-direction guard: the same shape with x assigned FIRST
+        # stays provable.
+        r = _check(
+            "int f(int a){int x; x = a;"
+            " int (*rows)[x] = get_rows(); return x;}",
+            "x",
+        )
+        assert r.proven

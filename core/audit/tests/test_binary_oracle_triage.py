@@ -354,3 +354,33 @@ class TestDemoteAbsentPromotionLanes:
         )
         assert n == 0
         assert result.outcomes[0].status == "finding"
+
+
+class TestAbsentSinkUnreachableExemption:
+    def test_sink_with_sink_unreachable_still_exempt(self):
+        # The removed binary_absent+sink_unreachable rule fired
+        # EXACTLY for the sink/trust-boundary residue the exemption
+        # comment protects (every other case already returned above),
+        # silently skipping callback-dispatched sinks.
+        tr = classify_function(
+            file="a.c", function="foo", sloc=40,
+            binary_absent=True, sink_unreachable=True, is_sink=True,
+        )
+        assert tr.bucket != TriageBucket.SKIP
+
+    def test_trust_boundary_with_sink_unreachable_still_exempt(self):
+        tr = classify_function(
+            file="a.c", function="foo", sloc=40,
+            binary_absent=True, sink_unreachable=True,
+            is_trust_boundary=True,
+        )
+        assert tr.bucket != TriageBucket.SKIP
+
+    def test_plain_absent_function_still_skips(self):
+        # Two-direction guard: the non-exempt absent population keeps
+        # its skip through the first rule.
+        tr = classify_function(
+            file="a.c", function="foo", sloc=40,
+            binary_absent=True, sink_unreachable=True,
+        )
+        assert tr.bucket == TriageBucket.SKIP

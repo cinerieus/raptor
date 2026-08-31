@@ -304,11 +304,20 @@ def _invariant_receipt(
     ``None`` — in which case only the ``-unreceipted`` detection
     variant may confirm."""
     norm = re.sub(r"\s+", "", invariant)
+    if not norm:
+        return None
+    # Token-boundary containment, not bare substring: "x <= 10" is
+    # NOT receipted by "max_x <= 100" (the substring match handed the
+    # unrelated entry's provenance chain and receipt grade to a
+    # different variable's invariant).
+    bounded = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(norm)}(?![A-Za-z0-9_.])",
+    )
     for entry in (domain_model or {}).get("invariants") or []:
         if not isinstance(entry, dict):
             continue
         statement = str(entry.get("statement") or "")
-        if norm not in re.sub(r"\s+", "", statement):
+        if not bounded.search(re.sub(r"\s+", "", statement)):
             continue
         provenance = str(entry.get("provenance") or "")
         if provenance in ("", "llm_prior"):

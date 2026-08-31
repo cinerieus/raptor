@@ -694,6 +694,15 @@ _SINK_CALL_PATTERNS = [
     re.compile(r"\bsubprocess\.\w+\s*\("),
 ]
 
+# Call-shaped tokens that are control flow / operators, not callees —
+# for the leaf-function test in _check_reaches_sink (multi-language:
+# the scan runs over C-family and Python sources alike).
+_NON_CALL_KEYWORDS = frozenset({
+    "if", "for", "while", "switch", "return", "sizeof", "defined",
+    "do", "else", "case", "typeof", "alignof", "assert", "elif",
+    "with", "not", "and", "or", "in", "except", "lambda",
+})
+
 
 def _check_reaches_sink(
     source: str, file: str, func: str,
@@ -728,11 +737,32 @@ def _check_reaches_sink(
                     f"doesn't disprove the finding)"
                 ),
             )
+        # Direct-scan absence only certifies a LEAF function: a
+        # wrapper whose helper calls strcpy reaches sinks
+        # transitively — the very case the docstring and the mirror
+        # branch (expect_absent=False, no sink -> inconclusive)
+        # refuse to conclude on. A false "supported" here filled
+        # all_supported and corroborated promotions on a wrong
+        # premise.
+        callees = {
+            m.group(1) for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", view)
+        } - _NON_CALL_KEYWORDS - {func}
+        if callees:
+            return CheckResult(
+                check_type="function_reaches_sink",
+                assumption="",
+                verdict="inconclusive",
+                evidence=(
+                    f"no direct sink calls in {func}, but it calls "
+                    f"{len(callees)} other function(s) — transitive "
+                    f"sink reachability unknown"
+                ),
+            )
         return CheckResult(
             check_type="function_reaches_sink",
             assumption="",
             verdict="supported",
-            evidence=f"no sink calls found in {func}",
+            evidence=f"no sink calls found in {func} (leaf function)",
             grade=GRADE_ABSENCE,
         )
     if has_sink:

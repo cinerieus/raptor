@@ -210,14 +210,12 @@ def classify_function(
             priority_score=priority_score,
         )
 
-    if binary_absent and sink_unreachable and not is_entry_point:
-        reasons.append("binary absent + no sink path")
-        return TriageResult(
-            bucket=TriageBucket.SKIP,
-            reasons=tuple(reasons),
-            token_budget=TOKEN_BUDGETS[TriageBucket.SKIP],
-            priority_score=priority_score,
-        )
+    # (No binary_absent+sink_unreachable rule here: after the rule
+    # above returns, the only remaining binary_absent population is
+    # sinks and trust boundaries — exactly the classes the exemption
+    # comment protects. A rule for that residue silently defeated the
+    # exemption, and without the is_callback_target guard it skipped
+    # callback-dispatched sinks the static graph cannot see.)
 
     # Vendored/generated tier (see core.audit.vendored_detector for
     # the trust model). Boundary-adjacent functions never skip:

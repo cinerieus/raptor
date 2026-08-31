@@ -540,3 +540,38 @@ class TestPrepassInvariants:
         )
         assert out["telemetry"]["invariants_checked"] == 0
         assert out["findings"] == []
+
+
+class TestInvariantReceiptBoundaries:
+    """Substring containment handed an unrelated entry's provenance
+    and receipt grade to a different variable's invariant ('x <= 10'
+    receipted by 'max_x <= 100')."""
+
+    def _dm(self, statement):
+        return {"invariants": [{
+            "statement": statement,
+            "provenance": "study_receipt",
+            "receipt": {"file": "notes.md", "quote": statement},
+        }]}
+
+    def test_embedded_identifier_does_not_receipt(self):
+        from core.audit.protocol_state import _invariant_receipt
+
+        assert _invariant_receipt(self._dm("max_x <= 100"), "x <= 10") \
+            is None
+
+    def test_exact_statement_still_receipts(self):
+        from core.audit.protocol_state import _invariant_receipt
+
+        entry = _invariant_receipt(self._dm("x <= 10"), "x <= 10")
+        assert entry is not None
+
+    def test_bounded_containment_still_receipts(self):
+        # A statement that carries the comparison as its own token
+        # run ("invariant: x <= 10 (from spec)") still matches.
+        from core.audit.protocol_state import _invariant_receipt
+
+        entry = _invariant_receipt(
+            self._dm("invariant: x <= 10 (from spec)"), "x <= 10",
+        )
+        assert entry is not None

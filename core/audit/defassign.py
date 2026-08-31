@@ -1514,6 +1514,27 @@ class _Walker:
                 nm = _declarator_name(c)
                 value = c.child_by_field_name("value")
                 is_var = nm is not None and _node_text(nm) == self.variable
+                # Declarator expressions evaluate at the declaration
+                # even WITH an initializer (pointer-to-VLA:
+                # ``int (*rows)[x] = init;`` reads x) — the non-init
+                # branch scans them but this branch only scanned the
+                # initializer, so such a read was invisible and the
+                # prover could certify "assigned before every use"
+                # over an uninitialized size read (missed reads are
+                # the unsound direction for this prover).
+                decl = c.child_by_field_name("declarator")
+                if decl is not None:
+                    for n in _walk_nodes(decl):
+                        if (
+                            n.type == "identifier"
+                            and (nm is None or n.id != nm.id)
+                            and _node_text(n) == self.variable
+                            and state
+                        ):
+                            self.violations.append(_Violation(
+                                contexts=state,
+                                use_text=_node_text(c)[:80],
+                            ))
                 if is_var:
                     if self.decl_seen:
                         raise ProofRefusal(

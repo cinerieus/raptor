@@ -104,3 +104,34 @@ class TestEndToEnd:
         )
         assert len(findings) == 1
         assert findings[0].field_name == "tag"
+
+
+class TestXrefSeamSeparator:
+    def test_seam_junction_cannot_assemble_a_token(self):
+        # Bare concatenation let a regex token assemble from the
+        # primary's tail + the xref's head — a fabricated match
+        # attributed to the primary function (seam-match start <
+        # primary_len => is_xref=False). The newline separator breaks
+        # the junction.
+        from core.audit.struct_field_checker import _COPY_INTO_OFFSET_RE
+
+        primary = "void f(void) { int x = 1; } memcp"
+        xref = "y(dst + 8, src, n);"
+        # Pre-fix junction: the spanning token matches.
+        assert _COPY_INTO_OFFSET_RE.search(primary + xref)
+        # Separated: it cannot.
+        assert not _COPY_INTO_OFFSET_RE.search(primary + "\n" + xref)
+
+    def test_checker_joins_with_separator(self, monkeypatch):
+        import core.audit.struct_field_checker as sfc
+
+        captured = {}
+        real = sfc._extract_struct_layouts
+
+        def spy(text):
+            captured["text"] = text
+            return real(text)
+
+        monkeypatch.setattr(sfc, "_extract_struct_layouts", spy)
+        sfc.check_struct_field_copy("f", "int a;", xref_source="int b;")
+        assert captured["text"] == "int a;\nint b;"

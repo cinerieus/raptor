@@ -310,7 +310,13 @@ def check_struct_field_copy(
 
     search_source = source
     if xref_source:
-        search_source = source + xref_source
+        # Newline separator: both inputs are decompiler output with no
+        # guaranteed trailing newline, and a bare concatenation let a
+        # regex match SPAN the seam — a token assembled from the
+        # primary's tail plus the xref's head minted a fabricated
+        # finding attributed to the primary function
+        # (seam-match start < primary_len => is_xref=False).
+        search_source = source + "\n" + xref_source
 
     layouts = _extract_struct_layouts(search_source)
     offset_accesses = _extract_offset_accesses(search_source)
