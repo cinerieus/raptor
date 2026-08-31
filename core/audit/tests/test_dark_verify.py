@@ -4813,3 +4813,64 @@ class TestSetupGrammarBacktrackingBudget:
         assert err is not None and "exceeds" in err
         ok_line = "char buf[16];"
         assert ex._validate_setup([ok_line], "c") is None
+
+
+class TestJavaUnicodeEscapeInjection:
+    """javac pre-tokenizes backslash-uXXXX escapes everywhere (JLS
+    3.3): a quoted arg carrying the escape for a double quote passes
+    the Python-literal allowlist yet closes the string in the pasted
+    harness — injected statements could print the verdict JSON and
+    mint "confirmed" against a benign target."""
+
+    _PAYLOAD = '"\\u0022); Runtime.getRuntime().exec(\\u0022id\\u0022);//"'
+
+    def _spec(self, **lc):
+        return DarkWitnessSpec(
+            finding_key="f1", file="A.java", function="parse",
+            language="java",
+            lang_config={"class_name": "A", "return_type": "String", **lc},
+        )
+
+    def test_unicode_escape_in_arg_expression_rejected(self):
+        err = validate_spec(self._spec(
+            arg_expressions=[self._PAYLOAD],
+        ))
+        assert err is not None
+        assert "unicode escape" in err
+
+    def test_unicode_escape_newline_smuggle_rejected(self):
+        err = validate_spec(self._spec(
+            arg_expressions=['"a\\u000ab"'],
+        ))
+        assert err is not None
+        assert "unicode escape" in err
+
+    def test_unicode_escape_in_fallback_args_rejected(self):
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="A.java", function="parse",
+            language="java",
+            lang_config={"class_name": "A", "return_type": "String"},
+            args=[self._PAYLOAD],
+        )
+        err = validate_spec(spec)
+        assert err is not None
+        assert "unicode escape" in err
+
+    def test_plain_java_args_still_pass(self):
+        # Two-direction guard: legitimate literal args stay accepted.
+        assert validate_spec(self._spec(
+            arg_expressions=['"hello"', "42"],
+        )) is None
+
+    def test_c_arg_with_backslash_u_unaffected(self):
+        # C does not pre-tokenize unicode escapes outside literals —
+        # the rejection is Java-scoped.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.c", function="parse",
+            language="c",
+            lang_config={
+                "arg_expressions": ['"caf\\u00e9"'],
+                "return_type": "int",
+            },
+        )
+        assert validate_spec(spec) is None

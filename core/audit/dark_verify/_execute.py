@@ -489,6 +489,25 @@ def validate_spec(
         return f"invalid class_name: {cn!r}"
 
     if lang == "java":
+        # javac translates backslash-uXXXX escapes EVERYWHERE in
+        # phase 1 (JLS 3.3), before tokenization — a string Constant
+        # carrying the escape for a double quote passes the
+        # Python-literal allowlist yet becomes a closing quote in the
+        # pasted harness (and the linefeed escape smuggles a newline
+        # past the newline check), letting an LLM-authored arg inject
+        # statements that print the verdict JSON and mint "confirmed"
+        # against a benign target. Any backslash-u shape is rejected
+        # for the Java harness (JLS allows repeated u markers, so the
+        # two-character prefix is the decisive shape); the lost exotic
+        # legit arg degrades to no-witness, never to a wrong verdict.
+        for expr in (
+            lc.get("arg_expressions") or [str(a) for a in spec.args]
+        ):
+            if "\\u" in str(expr):
+                return (
+                    "code injection risk in arg_expression (java "
+                    f"unicode escape): {str(expr)[:60]!r}"
+                )
         # imports are pasted into `import <x>;` lines — allowlist to a
         # dotted identifier path (an embedded newline used to survive
         # the generator's ';' strip and inject top-level Java code).
