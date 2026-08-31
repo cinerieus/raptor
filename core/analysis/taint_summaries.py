@@ -583,6 +583,46 @@ def _find_assignment_value_at(
     return None
 
 
+def _build_assignment_value_map(
+    fn_ast: ast.AST,
+) -> dict[tuple[int, str], tuple[ast.AST, bool]]:
+    """One-shot ``(lineno, target_name) → (value_expr, is_augmented)``
+    map over the whole function AST.
+
+    Same node shapes and same first-match-in-``ast.walk``-order
+    semantics as :func:`_find_assignment_value_at` (``setdefault``
+    keeps the first hit), but built ONCE — the per-function taint
+    fixed-point queries an assignment per (node, symbol) per
+    iteration, and a full ``ast.walk`` per query made the loop
+    O(iterations × nodes × defs × AST-size).
+    """
+    out: dict[tuple[int, str], tuple[ast.AST, bool]] = {}
+    for node in ast.walk(fn_ast):
+        lineno = getattr(node, "lineno", None)
+        if lineno is None:
+            continue
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    out.setdefault((lineno, tgt.id), (node.value, False))
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                out.setdefault(
+                    (lineno, node.target.id), (node.value, True),
+                )
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                out.setdefault(
+                    (lineno, node.target.id), (node.value, False),
+                )
+        elif (isinstance(node, ast.NamedExpr)
+                and isinstance(node.target, ast.Name)):
+            out.setdefault(
+                (lineno, node.target.id), (node.value, False),
+            )
+    return out
+
+
 def _find_return_value_at(
     fn_ast: ast.AST, lineno: int,
 ) -> ast.AST | None:
@@ -688,6 +728,11 @@ def _compute_one_summary(
     # computed by walking the AST of the defining expression — that
     # gives us positional arg-index accuracy that the CallSite's
     # ``arg_names`` frozenset doesn't preserve.
+    #
+    # The assignment/value map is precomputed ONCE (one AST walk) and
+    # the loop reads it per (node, symbol) — same lineno-map approach
+    # the post-fixed-point collection loop below already uses.
+    _assign_map = _build_assignment_value_map(fn_ast)
     max_inner = 4 * max(1, len(list(cfg.nodes())))
     for _ in range(max_inner):
         changed = False
@@ -695,7 +740,7 @@ def _compute_one_summary(
             if n is cfg.entry_node:
                 continue
             for sym in n.defs:
-                found = _find_assignment_value_at(fn_ast, n.lineno, sym)
+                found = _assign_map.get((n.lineno, sym))
                 if found is not None:
                     value_ast, is_augmented = found
                     new_state = _expr_taint(
