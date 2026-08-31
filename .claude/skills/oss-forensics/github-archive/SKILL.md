@@ -209,6 +209,8 @@ This exceeds typical query cost ($0.10-0.30). Proceed? [y/n]
 - Estimated cost < $0.50 AND query is well-scoped (specific repo + date range)
 - User explicitly requested broad analysis (e.g., "scan all of 2025")
 
+**Non-interactive fallback (dispatched agents, CI, unattended sessions)**: asking is only for interactive sessions — gate any ask with `libexec/raptor-may-ask` per CLAUDE.md INTERACTIVE PROMPTS. The dispatched gh-archive investigator cannot ask at all (no AskUserQuestion tool, Bash hook-restricted). When you cannot ask and a query trips the thresholds above: do NOT run it. Apply the optimization techniques below to bring the estimate under the threshold if possible; otherwise skip the query and report the dry-run estimate, the scan scope, and the narrowed alternatives to the orchestrator/operator, continuing with the queries that fit.
+
 ### Cost Optimization Techniques for GitHub Archive
 
 #### 1. Select Only Required Columns (50-90% cost reduction)

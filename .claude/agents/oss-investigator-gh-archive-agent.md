@@ -95,9 +95,13 @@ libexec/raptor-bq-query --query-file <workdir>/q-pushes.sql --dry-run
 libexec/raptor-bq-query --query-file <workdir>/q-pushes.sql --output <workdir>/rows-pushes.json
 ```
 
-The dry run prints `estimated_cost_usd`; follow the skill's
-ask-the-user thresholds before running anything expensive. Raise
-`--max-bytes-billed` only for deliberately broad scans.
+The dry run prints `estimated_cost_usd`. You are a dispatched
+subagent and cannot ask the user — apply the github-archive skill's
+non-interactive fallback: do not run a query whose estimate trips the
+skill's ask-the-user thresholds; report the estimate and the narrowed
+alternatives to the orchestrator and continue with the queries that
+fit. Raise `--max-bytes-billed` only for deliberately broad scans the
+operator already requested.
 
 **Step 3 — Ingest into the evidence store**:
 

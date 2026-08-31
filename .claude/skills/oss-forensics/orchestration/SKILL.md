@@ -60,10 +60,12 @@ Form a research question specific enough to produce a report with:
 - **Intent**: What was the goal?
 - **Impact**: What was affected?
 
-**If prompt is ambiguous**, use AskUserQuestion to clarify:
+**If prompt is ambiguous**, run `libexec/raptor-may-ask` first; only if it prints `interactive` AND the AskUserQuestion tool is available, use AskUserQuestion to clarify:
 - Missing repo: "Which repository should I investigate?"
 - Missing timeframe: "What date range should I focus on?"
 - Vague scope: "Should I focus on PRs, commits, or all activity?"
+
+**Non-interactive fallback:** do not ask — proceed with the most specific research question the prompt supports and record the assumptions you made in the final report.
 
 ---
 
