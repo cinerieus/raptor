@@ -2111,6 +2111,11 @@
     "kind": "literal",
     "note": "env-build.json provenance record field names (serialization schema, not name vocabulary \u2014 same class as the enforcement-stats field-names entry)"
   },
+  "packages/fuzzing/orchestrator.py::_run_libfuzzer": {
+    "count": 10,
+    "kind": "literal",
+    "note": "libFuzzer campaign result-dict schema keys (mirrors the AFL path's report shape incl. the campaign_failed verdict and leak counts), not a learned name vocabulary"
+  },
   "packages/fuzzing/seed_corpus.py::SENSITIVE_SUBSTRINGS": {
     "count": 11,
     "kind": "literal"
