@@ -14,6 +14,7 @@ Each persona serves a distinct moment in the security analysis pipeline:
 | `binary_exploitation_specialist` | Crash PoC generation | `crash_agent.py` |
 | `patch_engineer` | Remediation guidance | (Claude Code only) |
 | `penetration_tester` | Web payload generation | (Claude Code only) |
+| `web_researcher` | Web endpoint research (smuggling, cache poisoning, SSRF) | (Claude Code only) |
 | `fuzzing_strategist` | Fuzzing strategy decisions | (Claude Code only) |
 
 ## Consumption paths
