@@ -365,19 +365,11 @@ def append_journal_for_outcome(
     # audit-log row, and the tallies that follow all carry the gated
     # status instead of shipping the bypass.
     #
-    # Reused verdicts are exempt: a cross-run import re-asserts the
-    # ORIGIN run's already-gated verdict at $0, with its evidence
-    # deliberately downgraded to ``journal:recall`` provenance until a
-    # live tool re-confirms (verdict_reuse doctrine: the LLM_ONLY tier
-    # cap is the designed penalty). Demoting it here decayed the
-    # journaled status one way — finding → suspicious on every reuse —
-    # and fired the CRITICAL injection alarm on a fully legitimate,
-    # LLM-free import path. ``reused``/``reused_from_run`` are
-    # pipeline-set outcome fields, unreachable from raw model output.
-    if not (
-        getattr(outcome, "reused", False)
-        and getattr(outcome, "reused_from_run", "")
-    ):
+    # Reused verdicts are exempt — single authority with the
+    # findings-export mirror: ``promotion_alarm.is_reuse_exempt``
+    # (see its docstring for the verdict_reuse doctrine).
+    from .promotion_alarm import is_reuse_exempt
+    if not is_reuse_exempt(outcome):
         try:
             from .promotion_alarm import check_and_emit
             check_and_emit(
