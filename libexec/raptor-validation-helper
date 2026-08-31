@@ -236,6 +236,108 @@ def _normalise_finding_ids(container):
     return renamed
 
 
+def _coerce_findings_container(
+    data: object, target_path: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Coerce a ``--findings`` payload into the findings.json container.
+
+    Imports arrive in three shapes:
+
+      * the canonical container ``{"findings": [...]}`` — passed
+        through untouched (extra top-level keys preserved);
+      * a bare list of finding dicts — some exporters emit the list
+        without the container wrapper;
+      * the ``/understand --hunt`` variants.json container
+        (``{"variants": [...], ...}``) — its own skill documents
+        "Pass variants.json to /validate --findings". Variants carry
+        the finding core fields (file/function/line/vuln_type) plus a
+        ``taint_status`` triage; ``false_positive`` variants are
+        retained in variants.json for audit trail only and are
+        documented as excluded from validation scope, so they are
+        dropped at this import chokepoint. ``VAR-*`` ids are foreign
+        and get renamed by :func:`_normalise_finding_ids` downstream
+        (original kept as ``source_id``).
+
+    Returns ``(container, note)`` where ``note`` is a human-readable
+    conversion description (``None`` for the canonical shape), or
+    ``(None, None)`` when the payload has no recognisable findings or
+    variants — the caller decides how loudly to degrade.
+
+    *target_path* seeds the synthesised container's ``target_path``
+    (stage 1's verdict store reads it) — canonical containers keep
+    their own.
+    """
+    if isinstance(data, dict) and isinstance(data.get("findings"), list):
+        return data, None
+    if isinstance(data, list):
+        container = create_empty_findings("A", target_path)
+        container["findings"] = [f for f in data if isinstance(f, dict)]
+        return container, (
+            f"bare finding list wrapped into a container "
+            f"({len(container['findings'])} finding(s))"
+        )
+    if isinstance(data, dict) and isinstance(data.get("variants"), list):
+        findings = []
+        skipped_fp = 0
+        for v in data["variants"]:
+            if not isinstance(v, dict):
+                continue
+            if v.get("taint_status") == "false_positive":
+                skipped_fp += 1
+                continue
+            f = dict(v)
+            # Variants normally carry a schema-valid status
+            # ("not_disproven"); default it when absent so the stage-B
+            # entry gate doesn't drop the import on a missing field.
+            f.setdefault("status", "not_disproven")
+            findings.append(f)
+        container = create_empty_findings("A", target_path)
+        container["findings"] = findings
+        note = (f"variants.json container: {len(findings)} variant(s) "
+                f"imported as findings")
+        if skipped_fp:
+            note += f", {skipped_fp} false_positive variant(s) excluded"
+        return container, note
+    return None, None
+
+
+def _import_findings_file(
+    findings_path: str | Path, dest: Path, target: str | None = None,
+) -> None:
+    """Import a ``--findings`` file as *dest* (findings.json).
+
+    Loads the source file, coerces recognised shapes into the
+    canonical container (see :func:`_coerce_findings_container`),
+    normalises foreign finding ids, and persists via the provenance-
+    stamping artifact writer. An unrecognisable payload preserves the
+    legacy behaviour: the file is copied verbatim (so the operator can
+    inspect exactly what was imported) and the count reports 0.
+    """
+    import shutil
+
+    src = Path(findings_path)
+    container, shape_note = _coerce_findings_container(
+        load_json(src), target_path=target)
+    if container is None:
+        shutil.copy2(src, dest)
+        print(f"  ⚠️  {src.name}: no recognisable findings/variants "
+              f"shape — copied verbatim", file=sys.stderr)
+        print(f"Pre-existing findings: 0 from {src.name}")
+        return
+    if shape_note:
+        print(f"  Import shape: {shape_note}")
+    # Normalise foreign ids at the import chokepoint so the container
+    # satisfies its own schema before any stage prep validates it.
+    renamed = _normalise_finding_ids(container)
+    if renamed:
+        print(f"  Normalised {renamed} foreign finding "
+              f"id(s) to FIND-<n> (originals kept as "
+              f"source_id)")
+    _save_artifact(dest, container)
+    print(f"Pre-existing findings: {len(container['findings'])} "
+          f"from {src.name}")
+
+
 def _findings(workdir):
     return load_json(Path(workdir) / "findings.json")
 
@@ -2605,22 +2707,8 @@ def prepare_0(workdir_unused, target=None, explicit_out=None, no_bridge=False,
         (out_dir / "build").mkdir(exist_ok=True)
 
         if findings_path:
-            import shutil
-            dest = out_dir / "findings.json"
-            shutil.copy2(findings_path, dest)
-            pre_findings = load_json(dest)
-            n = len(pre_findings.get("findings", [])) if pre_findings else 0
-            if pre_findings:
-                # Normalise foreign ids at the import chokepoint so
-                # the container satisfies its own schema before any
-                # stage prep validates it.
-                renamed = _normalise_finding_ids(pre_findings)
-                if renamed:
-                    _save_artifact(dest, pre_findings)
-                    print(f"  Normalised {renamed} foreign finding "
-                          f"id(s) to FIND-<n> (originals kept as "
-                          f"source_id)")
-            print(f"Pre-existing findings: {n} from {Path(findings_path).name}")
+            _import_findings_file(findings_path, out_dir / "findings.json",
+                                  target=target)
 
         if not no_bridge:
             _bridge_understand_output(out_dir, checklist, target,
