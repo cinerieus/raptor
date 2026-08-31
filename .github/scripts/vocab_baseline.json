@@ -2120,6 +2120,11 @@
     "count": 11,
     "kind": "literal"
   },
+  "packages/fuzzing/seed_corpus.py::manifest": {
+    "count": 10,
+    "kind": "literal",
+    "note": "generated-corpus manifest schema keys (persistence format incl. the provenance stamp the destructive-reset gate checks), not a learned name vocabulary"
+  },
   "packages/ghidra/model.py::to_dict": {
     "count": 13,
     "kind": "literal",
