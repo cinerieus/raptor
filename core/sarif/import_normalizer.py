@@ -428,6 +428,77 @@ def format_import_summary(result: ImportResult, sarif_files: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _step_to_threadflow_location(step: dict[str, Any]) -> dict[str, Any]:
+    """Convert one internal dataflow step ({file, line, column, label,
+    snippet}) back to a SARIF threadFlow location object."""
+    region: dict[str, Any] = {}
+    line = step.get("line")
+    if isinstance(line, int) and line > 0:
+        region["startLine"] = line
+    column = step.get("column")
+    if isinstance(column, int) and column > 0:
+        region["startColumn"] = column
+    snippet = step.get("snippet")
+    if isinstance(snippet, str) and snippet:
+        region["snippet"] = {"text": snippet}
+    location: dict[str, Any] = {
+        "physicalLocation": {
+            "artifactLocation": {"uri": step.get("file") or ""},
+            "region": region,
+        }
+    }
+    label = step.get("label")
+    if isinstance(label, str) and label:
+        location["message"] = {"text": label}
+    return {"location": location}
+
+
+def _path_to_codeflow(path: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one internal {source, sink, steps, ...} path dict to a
+    SARIF codeFlow object, or None when the path has fewer than the
+    two locations the parser requires to round-trip."""
+    ordered = [path.get("source"), *(path.get("steps") or []), path.get("sink")]
+    steps = [s for s in ordered if isinstance(s, dict)]
+    if len(steps) < 2:
+        return None
+    return {
+        "threadFlows": [
+            {"locations": [_step_to_threadflow_location(s) for s in steps]}
+        ]
+    }
+
+
+def _dataflow_to_codeflows(dataflow_path: Any) -> list[dict[str, Any]]:
+    """Convert a finding's ``dataflow_path`` to a SARIF ``codeFlows`` array.
+
+    ``parse_sarif_findings`` stores dataflow as an INTERNAL dict
+    ({source, sink, steps, total_steps, alternative_paths}) — emitting
+    that dict verbatim as ``result.codeFlows`` produced schema-invalid
+    SARIF, and ``extract_dataflow_path`` on re-parse iterated its
+    string keys and returned None, silently losing every imported
+    finding's dataflow after the disk hop. Convert the dict back to
+    the spec's array-of-codeFlow shape (one codeFlow for the primary
+    path plus one per alternative path).
+
+    A list value is already SARIF-shaped (hand-built findings that
+    never went through the parser) and passes through unchanged.
+    """
+    if isinstance(dataflow_path, list):
+        return [cf for cf in dataflow_path if isinstance(cf, dict)]
+    if not isinstance(dataflow_path, dict):
+        return []
+    flows: list[dict[str, Any]] = []
+    primary = _path_to_codeflow(dataflow_path)
+    if primary is not None:
+        flows.append(primary)
+    for alt in dataflow_path.get("alternative_paths") or []:
+        if isinstance(alt, dict):
+            cf = _path_to_codeflow(alt)
+            if cf is not None:
+                flows.append(cf)
+    return flows
+
+
 def findings_to_sarif(findings: list[dict[str, Any]]) -> dict[str, Any]:
     """Convert normalized finding dicts back to a valid SARIF 2.1.0 structure.
 
@@ -467,7 +538,9 @@ def findings_to_sarif(findings: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
         if f.get("has_dataflow") and f.get("dataflow_path"):
-            result["codeFlows"] = f["dataflow_path"]
+            code_flows = _dataflow_to_codeflows(f["dataflow_path"])
+            if code_flows:
+                result["codeFlows"] = code_flows
 
         # Same guard as enriched_writer._build_result: a legacy
         # finding whose finding_id is the bare rule_id (the pre-fix
