@@ -556,6 +556,27 @@ class LLMProvider(ABC):
         )
         yield StreamChunk(type="done", stop_reason=response.stop_reason)
 
+    def _convert_stream_failure(self, exc: Exception) -> RuntimeError:
+        """Convert a raw SDK/socket exception from a streaming turn
+        into the ``RuntimeError`` shape the non-streaming paths raise.
+
+        A mid-stream disconnect otherwise escapes the generator as a
+        raw transport exception. The message is sanitised the same way
+        the non-streaming error handlers sanitise theirs (SDK bodies
+        can echo auth headers, the prompt, and the request URL, plus
+        control bytes that forge log/terminal output) and keeps the
+        original text so message-based classifiers (credit exhaustion,
+        rate-limit vocabulary) still see it.
+        """
+        from core.security.log_sanitisation import escape_nonprintable
+        from core.security.redaction import redact_secrets
+        detail = escape_nonprintable(redact_secrets(_redact_endpoint(
+            str(exc), getattr(self.config, "api_base", None),
+        )))[:512]
+        return RuntimeError(
+            f"stream failed mid-turn ({type(exc).__name__}): {detail}"
+        )
+
     def track_usage(self, tokens: int, cost: float,
                     input_tokens: int = 0, output_tokens: int = 0,
                     duration: float = 0.0,
@@ -2126,6 +2147,10 @@ class OpenAICompatibleProvider(LLMProvider):
         # ---- consume stream ----------------------------------------------
         tool_calls_seen: dict[int, str] = {}
         input_tokens = output_tokens = 0
+        # Characters of output received so far — the mid-stream
+        # failure path books an output estimate from this when the
+        # final usage payload never arrived.
+        approx_output_chars = 0
         stop = StopReason.ERROR
 
         try:
@@ -2148,6 +2173,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 delta = choice.delta
 
                 if delta and getattr(delta, "content", None):
+                    approx_output_chars += len(delta.content)
                     yield StreamChunk(
                         type="text_delta", text=delta.content,
                     )
@@ -2168,6 +2194,9 @@ class OpenAICompatibleProvider(LLMProvider):
                             tc.function
                             and getattr(tc.function, "arguments", None)
                         ):
+                            approx_output_chars += len(
+                                tc.function.arguments,
+                            )
                             yield StreamChunk(
                                 type="tool_call_delta",
                                 tool_call_id=tool_calls_seen.get(idx, ""),
@@ -2183,6 +2212,33 @@ class OpenAICompatibleProvider(LLMProvider):
                             type="tool_call_end",
                             tool_call_id=tool_calls_seen[idx],
                         )
+        except Exception as exc:
+            # Mid-stream disconnect: the usage chunk + track_usage
+            # below never run, so tokens the API already billed would
+            # go unbooked. Book what the received chunks reported —
+            # the final usage payload usually never arrived, so fall
+            # back to a 4-chars/token estimate over the delta text
+            # received (same heuristic as ``estimate_tokens``, without
+            # buffering the stream) — then raise the sanitised typed
+            # error the non-streaming paths use.
+            booked_out = output_tokens or approx_output_chars // 4
+            if input_tokens or booked_out:
+                try:
+                    self.track_usage(
+                        tokens=input_tokens + booked_out,
+                        cost=self._calculate_cost_split(
+                            input_tokens, booked_out,
+                        ),
+                        input_tokens=input_tokens,
+                        output_tokens=booked_out,
+                        duration=time.monotonic() - t_start,
+                    )
+                except Exception as book_exc:  # noqa: BLE001 — best-effort booking
+                    logger.debug(
+                        "stream failure usage booking skipped: %s",
+                        book_exc,
+                    )
+            raise self._convert_stream_failure(exc) from exc
         finally:
             resp.close()
 
@@ -3313,69 +3369,110 @@ class AnthropicProvider(LLMProvider):
         t_start = time.monotonic()
         current_tool_id = ""
         input_tokens = output_tokens = cache_read = cache_write = 0
+        # Characters of output received so far — the mid-stream
+        # failure path books an output estimate from this when no
+        # message_delta usage arrived before the disconnect.
+        approx_output_chars = 0
         stop = StopReason.ERROR
 
-        with self.client.messages.stream(**send_kwargs) as stream:
-            for event in stream:
-                event_type = getattr(event, "type", "")
+        try:
+            with self.client.messages.stream(**send_kwargs) as stream:
+                for event in stream:
+                    event_type = getattr(event, "type", "")
 
-                if event_type == "content_block_start":
-                    cb = getattr(event, "content_block", None)
-                    if cb and getattr(cb, "type", "") == "tool_use":
-                        current_tool_id = getattr(cb, "id", "")
+                    if event_type == "content_block_start":
+                        cb = getattr(event, "content_block", None)
+                        if cb and getattr(cb, "type", "") == "tool_use":
+                            current_tool_id = getattr(cb, "id", "")
+                            yield StreamChunk(
+                                type="tool_call_start",
+                                tool_call_id=current_tool_id,
+                                tool_call_name=getattr(cb, "name", ""),
+                            )
+                    elif event_type == "text":
+                        text = getattr(event, "text", "")
+                        approx_output_chars += len(text)
                         yield StreamChunk(
-                            type="tool_call_start",
-                            tool_call_id=current_tool_id,
-                            tool_call_name=getattr(cb, "name", ""),
+                            type="text_delta",
+                            text=text,
                         )
-                elif event_type == "text":
-                    yield StreamChunk(
-                        type="text_delta",
-                        text=getattr(event, "text", ""),
-                    )
-                elif event_type == "input_json":
-                    yield StreamChunk(
-                        type="tool_call_delta",
-                        tool_call_id=current_tool_id,
-                        tool_call_input_delta=getattr(
-                            event, "partial_json", "",
-                        ),
-                    )
-                elif event_type == "content_block_stop":
-                    if current_tool_id:
+                    elif event_type == "input_json":
+                        partial = getattr(event, "partial_json", "")
+                        approx_output_chars += len(partial)
                         yield StreamChunk(
-                            type="tool_call_end",
+                            type="tool_call_delta",
                             tool_call_id=current_tool_id,
+                            tool_call_input_delta=partial,
                         )
-                        current_tool_id = ""
-                elif event_type == "message_start":
-                    msg = getattr(event, "message", None)
-                    if msg:
-                        u = getattr(msg, "usage", None)
+                    elif event_type == "content_block_stop":
+                        if current_tool_id:
+                            yield StreamChunk(
+                                type="tool_call_end",
+                                tool_call_id=current_tool_id,
+                            )
+                            current_tool_id = ""
+                    elif event_type == "message_start":
+                        msg = getattr(event, "message", None)
+                        if msg:
+                            u = getattr(msg, "usage", None)
+                            if u:
+                                input_tokens = (
+                                    getattr(u, "input_tokens", 0) or 0
+                                )
+                                cache_read = (
+                                    getattr(u, "cache_read_input_tokens", 0)
+                                    or 0
+                                )
+                                cache_write = (
+                                    getattr(u, "cache_creation_input_tokens", 0)
+                                    or 0
+                                )
+                    elif event_type == "message_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta:
+                            sr = getattr(delta, "stop_reason", "")
+                            stop = _ANTHROPIC_STOP_REASON_MAP.get(
+                                sr or "", StopReason.ERROR,
+                            )
+                        u = getattr(event, "usage", None)
                         if u:
-                            input_tokens = (
-                                getattr(u, "input_tokens", 0) or 0
+                            output_tokens = (
+                                getattr(u, "output_tokens", 0) or 0
                             )
-                            cache_read = (
-                                getattr(u, "cache_read_input_tokens", 0)
-                                or 0
-                            )
-                            cache_write = (
-                                getattr(u, "cache_creation_input_tokens", 0)
-                                or 0
-                            )
-                elif event_type == "message_delta":
-                    delta = getattr(event, "delta", None)
-                    if delta:
-                        sr = getattr(delta, "stop_reason", "")
-                        stop = _ANTHROPIC_STOP_REASON_MAP.get(
-                            sr or "", StopReason.ERROR,
-                        )
-                    u = getattr(event, "usage", None)
-                    if u:
-                        output_tokens = (
-                            getattr(u, "output_tokens", 0) or 0
-                        )
+        except Exception as exc:
+            # Mid-stream disconnect (or a failure opening the stream):
+            # the usage chunk + track_usage below never run, so tokens
+            # the API already billed would go unbooked. Book what the
+            # received events reported — input/cache from
+            # message_start; output from message_delta when it arrived,
+            # else a 4-chars/token estimate over the delta text
+            # received — then raise the sanitised typed error the
+            # non-streaming paths use.
+            booked_out = output_tokens or approx_output_chars // 4
+            if input_tokens or booked_out or cache_read or cache_write:
+                try:
+                    cost = self.compute_cost(TurnResponse(
+                        content=[], stop_reason=StopReason.ERROR,
+                        input_tokens=input_tokens,
+                        output_tokens=booked_out,
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=cache_write,
+                    ))
+                    self.track_usage(
+                        tokens=input_tokens + booked_out,
+                        cost=cost,
+                        input_tokens=input_tokens,
+                        output_tokens=booked_out,
+                        duration=time.monotonic() - t_start,
+                        cache_read_tokens=cache_read,
+                        cache_write_tokens=cache_write,
+                    )
+                except Exception as book_exc:  # noqa: BLE001 — best-effort booking
+                    logger.debug(
+                        "stream failure usage booking skipped: %s",
+                        book_exc,
+                    )
+            raise self._convert_stream_failure(exc) from exc
 
         duration = time.monotonic() - t_start
 
