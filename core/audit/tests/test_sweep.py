@@ -2192,31 +2192,65 @@ class TestNegativeControlCache:
         )
         self._clear_cache()
 
-    def test_language_in_cache_key(self, monkeypatch):
+    @staticmethod
+    def _rule_file(tmp_path, lang):
+        rule = tmp_path / f"rule-{lang}.yaml"
+        rule.write_text(
+            "rules:\n  - id: hypothesis-check\n"
+            "    pattern-regex: printf\\(\n"
+            f"    languages: [{lang}]\n    severity: WARNING\n"
+            "    message: check\n",
+        )
+        return str(rule)
+
+    def test_language_in_cache_key(self, monkeypatch, tmp_path):
         # A cpp-language rule's verdict against the .c fixture must not
         # be served to a c-language rule (different languages: key
         # separates them, so the second language re-runs the control).
+        # Real generated-shape rule files: the cpp leg re-languages a
+        # copy for the control run instead of scanning vacuously.
         from core.audit.sweep import _rule_matches_negative_control
         self._clear_cache()
         calls = self._install_runner(monkeypatch, [
             self._result(findings=[]),          # cpp rule: no match
             self._result(findings=[{"line": 3}]),  # c rule: matches
         ])
+        cpp_rule = self._rule_file(tmp_path, "cpp")
+        c_rule = self._rule_file(tmp_path, "c")
         assert not _rule_matches_negative_control(
-            "rule.yaml", "format string", "a.cpp",
+            cpp_rule, "format string", "a.cpp",
         )
         assert _rule_matches_negative_control(
-            "rule.yaml", "format string", "a.c",
+            c_rule, "format string", "a.c",
         )
         assert calls["n"] == 2
         # Both verdicts now cached per-language: no further runs.
         assert not _rule_matches_negative_control(
-            "rule.yaml", "format string", "a.cpp",
+            cpp_rule, "format string", "a.cpp",
         )
         assert _rule_matches_negative_control(
-            "rule.yaml", "format string", "a.c",
+            c_rule, "format string", "a.c",
         )
         assert calls["n"] == 2
+        self._clear_cache()
+
+    def test_unrewritable_cpp_rule_skips_without_caching(
+        self, monkeypatch,
+    ):
+        # A cpp rule whose config cannot be re-languaged (missing
+        # file / stock pack) must SKIP the control — a vacuous scan
+        # must never cache matched=False for the keyword.
+        from core.audit import sweep
+        from core.audit.sweep import _rule_matches_negative_control
+        self._clear_cache()
+        calls = self._install_runner(monkeypatch, [
+            self._result(findings=[]),
+        ])
+        assert not _rule_matches_negative_control(
+            "rule.yaml", "format string", "a.cpp",
+        )
+        assert calls["n"] == 0  # never scanned vacuously
+        assert sweep._negative_control_cache == {}
         self._clear_cache()
 
 

@@ -175,3 +175,73 @@ class TestPersistFindings:
         first = (tmp_path / "findings.json").read_text()
         _persist_findings(result, config)
         assert (tmp_path / "findings.json").read_text() == first
+
+
+class TestFindingsRobustness:
+    def test_scalar_findings_json_degrades_to_empty(self, tmp_path):
+        # Wrong-shaped VALID JSON must degrade like corrupt content
+        # (the docstring contract) — it used to raise AttributeError
+        # out of the record CLI.
+        from core.audit.findings import load_findings
+
+        (tmp_path / "findings.json").write_text("5")
+        assert load_findings(tmp_path) == []
+
+    def test_dict_with_non_list_findings_degrades(self, tmp_path):
+        from core.audit.findings import load_findings
+
+        (tmp_path / "findings.json").write_text('{"findings": 7}')
+        assert load_findings(tmp_path) == []
+
+    def test_next_id_survives_external_deletion(self, tmp_path):
+        # len()+1 collided after any deletion; ids now go above every
+        # existing numeric suffix.
+        from core.audit.findings import emit_finding, load_findings
+
+        for n in (1, 2, 3):
+            emit_finding(
+                out_dir=tmp_path, file_path="a.c", function_name="f",
+                line=n, title=f"t{n}", description="d",
+            )
+        rows = load_findings(tmp_path)
+        rows = [r for r in rows if r["id"] != "AUDIT-002"]
+        from core.audit.findings import write_findings
+        write_findings(rows, tmp_path)
+        f4 = emit_finding(
+            out_dir=tmp_path, file_path="a.c", function_name="f",
+            line=4, title="t4", description="d",
+        )
+        assert f4["id"] == "AUDIT-004"
+        ids = [r["id"] for r in load_findings(tmp_path)]
+        assert len(ids) == len(set(ids))
+
+    def test_concurrent_emitters_lose_nothing(self, tmp_path):
+        # Two processes appending under the advisory lock: all
+        # findings land, ids unique (the unlocked read-modify-write
+        # lost one and duplicated the id).
+        import multiprocessing as mp
+
+        from core.audit.findings import load_findings
+
+        procs = [
+            mp.Process(target=_emit_many, args=(tmp_path, tag))
+            for tag in ("a", "b")
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join()
+        rows = load_findings(tmp_path)
+        assert len(rows) == 10
+        ids = [r["id"] for r in rows]
+        assert len(set(ids)) == 10
+
+
+def _emit_many(out_dir, tag):
+    from core.audit.findings import emit_finding
+
+    for i in range(5):
+        emit_finding(
+            out_dir=out_dir, file_path="a.c", function_name=f"{tag}{i}",
+            line=i, title=f"{tag}{i}", description="d",
+        )

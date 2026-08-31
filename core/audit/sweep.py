@@ -975,6 +975,39 @@ def negative_control_fixture(keyword: str, file_path: str) -> Path | None:
     return None
 
 
+def _relanguage_rule_config(
+    rule_config: str, rule_lang: str, fixture_lang: str,
+) -> str | None:
+    """Copy a generated dynamic rule with its ``languages:`` key
+    rewritten to *fixture_lang*, for the control run only.
+
+    Returns the temp-file path of the rewritten copy, or None when
+    *rule_config* is not a readable generated rule of the expected
+    shape (stock rule pack, unexpected YAML) — the caller then skips
+    the control check rather than scanning vacuously.
+    """
+    import tempfile
+
+    try:
+        path = Path(rule_config)
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    needle = f"languages: [{rule_lang}]"
+    if needle not in text:
+        return None
+    rewritten = text.replace(
+        needle, f"languages: [{fixture_lang}]", 1,
+    )
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".yaml", delete=False, encoding="utf-8",
+    ) as fh:
+        fh.write(rewritten)
+        return fh.name
+
+
 def _rule_matches_negative_control(
     rule_config: str, keyword: str, file_path: str,
 ) -> bool:
@@ -989,15 +1022,48 @@ def _rule_matches_negative_control(
         return False
     from .hypothesis_mapping import semgrep_language_for
 
-    cache_key = (keyword, semgrep_language_for(file_path), fixture.suffix)
+    rule_lang = semgrep_language_for(file_path)
+    cache_key = (keyword, rule_lang, fixture.suffix)
     if cache_key in _negative_control_cache:
         return _negative_control_cache[cache_key]
+
+    control_config = rule_config
+    relanged: str | None = None
+    fixture_lang = semgrep_language_for(str(fixture))
+    # ``generic``-language rules scan any file handed to them — only a
+    # real language mismatch (cpp rule vs .c fixture) is vacuous.
+    if rule_lang != "generic" and fixture_lang != rule_lang:
+        # A cpp-language rule handed the .c fixture scans NOTHING
+        # (semgrep's cpp key does not select .c files): the control
+        # run reported zero findings on zero scanned files and the
+        # presence-detector cap was vacuous on every C++ target.
+        # Re-language a copy of the generated rule to the fixture's
+        # language for the control run only — the dynamic patterns
+        # are plain pattern-regex, valid under both C-family keys.
+        relanged = _relanguage_rule_config(
+            rule_config, rule_lang, fixture_lang,
+        )
+        if relanged is None:
+            # Cannot rewrite (stock rule pack / unexpected shape): a
+            # vacuous scan must not cache False — skip the control
+            # check loudly instead of silently disarming the cap.
+            logger.warning(
+                "negative control for %r skipped: %s-language rule "
+                "cannot scan the %s fixture and re-languaging failed",
+                keyword, rule_lang, fixture.suffix,
+            )
+            return False
+        control_config = relanged
     try:
         from packages.semgrep.runner import run_rule
 
-        result = run_rule(fixture, rule_config, timeout=60)
+        result = run_rule(fixture, control_config, timeout=60)
     except Exception:  # noqa: BLE001
         return False
+    finally:
+        if relanged is not None:
+            with contextlib.suppress(OSError):
+                Path(relanged).unlink()
     if getattr(result, "errors", None) or getattr(
         result, "returncode", 0,
     ) not in (0, 1):

@@ -964,12 +964,6 @@ def _is_content_filter_error(exc: Exception) -> bool:
     return is_content_filter_error(exc)
 
 
-_LLM_ONLY_EVIDENCE = frozenset({
-    "manual", "manual code review", "manual review", "code review",
-    "llm", "llm review", "none", "n/a", "",
-})
-
-
 def _normalize_evidence_tool(raw: str) -> str:
     from .evidence_grade import sanitize_llm_evidence_tool
     return sanitize_llm_evidence_tool(raw)
@@ -1426,11 +1420,16 @@ def call_llm_for_rule_refinement(
             task_type="audit",
             call_class="rule_refinement",
         )
-        if hasattr(response, "text"):
-            return response.text
-        if isinstance(response, str):
-            return response
-        return str(response)
+        # The production client returns LLMResponse, whose payload is
+        # ``.content`` — ``str(response)`` is the dataclass repr, which
+        # never parses as YAML, so the refinement leg silently produced
+        # nothing.  ``.text`` kept for other client shapes.
+        text = getattr(response, "content", None)
+        if not isinstance(text, str):
+            text = getattr(response, "text", None)
+        if not isinstance(text, str):
+            text = response if isinstance(response, str) else str(response)
+        return text
     except Exception:
         logger.debug("rule refinement LLM call failed", exc_info=True)
         return None
