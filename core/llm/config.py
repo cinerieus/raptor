@@ -655,6 +655,25 @@ def _build_claudecode_resumable_config() -> Optional['ModelConfig']:
     return replace(base, provider="claudecode-resumable")
 
 
+def _build_agent_cli_config(agent: str) -> Optional['ModelConfig']:
+    """Selected coding-agent subscription as the inference transport."""
+    import shutil
+    from core.llm.agent_cli_adapter import selected_agent
+    if selected_agent() != agent:
+        return None
+    if not shutil.which(agent):
+        return None
+    return ModelConfig(
+        provider=f"{agent}cli",
+        model_name="session-default",
+        api_key=None,
+        max_tokens=32000,
+        max_context=1000000,
+        temperature=0.7,
+        timeout=600,
+    )
+
+
 _PROVIDER_BUILDERS = {
     "anthropic":  _build_anthropic_config,
     "openai":     lambda: _build_openai_compat_config("openai"),
@@ -664,6 +683,8 @@ _PROVIDER_BUILDERS = {
     "ollama":     _build_ollama_config,
     "claudecode": _build_claudecode_config,
     "claudecode-resumable": _build_claudecode_resumable_config,
+    "codexcli": lambda: _build_agent_cli_config("codex"),
+    "opencodecli": lambda: _build_agent_cli_config("opencode"),
 }
 
 # Providers whose availability detection itself performs a network
@@ -794,6 +815,16 @@ def _get_default_primary_model(
     except when that primary could only ever be a live Ollama
     endpoint.
     """
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected == "claude":
+        bound = _build_claudecode_config()
+        if bound is not None:
+            return bound
+    if selected in ("codex", "opencode"):
+        bound = _build_agent_cli_config(selected)
+        if bound is not None:
+            return bound
     if _operator_primary_override is not None:
         return _operator_primary_override
     if isinstance(prefer, str):
@@ -1157,6 +1188,12 @@ def _get_default_fallback_models() -> list['ModelConfig']:
     Returns ALL available models; client.py filters to same tier as primary.
     """
     from core.config import RaptorConfig
+
+    from core.llm.agent_cli_adapter import selected_agent
+    if selected_agent() in (
+        "claude", "codex", "opencode",
+    ):
+        return []
 
     availability = detect_llm_availability()
     if not availability.external_llm:
@@ -1874,4 +1911,3 @@ class LLMConfig:
             if model.enabled:
                 return model
         return self.primary_model
-

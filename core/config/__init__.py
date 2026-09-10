@@ -540,7 +540,7 @@ class RaptorConfig:
         # Both are validated by get_out_dir() (refuses system paths)
         # so an attacker setting them gains nothing beyond what they
         # already had with same-UID write access to ~/raptor-out.
-        "RAPTOR_OUT_DIR", "RAPTOR_DIR",
+        "RAPTOR_OUT_DIR", "RAPTOR_DIR", "RAPTOR_AGENT",
         #   RAPTOR_TARGET_KIND  operator's target-classification override
         #                    (auto|library|hybrid|application). Must survive
         #                    the subprocess boundary so an inventory rebuilt in
@@ -590,6 +590,7 @@ class RaptorConfig:
         # on the keep-trust dispatch arm, which retains the full set
         # by contract.
         "RAPTOR_DIR", "RAPTOR_OUT_DIR", "RAPTOR_TARGET_KIND",
+        "RAPTOR_AGENT",
     })
 
     # CI markers ride the allowlist: RAPTOR's own interactivity gate
