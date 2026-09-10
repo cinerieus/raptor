@@ -1,7 +1,11 @@
 # Command Reference
 
-RAPTOR exposes its capabilities through slash commands in the Claude Code
-session.  Run `/commands` at any time for the live list.  Commands dispatch to
+RAPTOR exposes its capabilities through agent commands. Claude Code and
+OpenCode expose `/commands`, `/scan`, `/agentic`, and the other names as slash
+commands. Codex exposes the same repository commands as skills named
+`$commands`, `$scan`, `$agentic`, and so on because its project extension
+surface is skill-based. OpenCode wrappers live in `.opencode/commands/`.
+`.claude/commands/` remains the canonical definition used by every wrapper. Commands dispatch to
 either a Python entry point (`raptor.py`), a shell script under `libexec/`, or
 a multi-step skill.  The [Python CLI](python-cli.md) documents the `raptor.py`
 modes directly; this page covers the slash-command surface.
