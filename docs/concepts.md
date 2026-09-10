@@ -24,15 +24,16 @@ does the mechanical work: running Semgrep and CodeQL, managing subprocesses,
 parsing SARIF, deduplicating findings, dispatching LLM API calls, tracking
 costs, writing output files.  It does not make judgement calls.
 
-The **Claude Code decision layer** (`.claude/`, `tiers/`, `CLAUDE.md`) makes
+The **agent decision layer** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `tiers/`) makes
 the calls: which findings to prioritise, how to interpret results, what the
-attack scenario is, whether the exploit is realistic.  Implemented as Claude
-Code skills, commands, and agents that load progressively -- the context window
+attack scenario is, whether the exploit is realistic. Agent instructions,
+commands, and specialists load progressively, so the context window
 only carries the expertise the current step needs.
 
 ```
-Claude Code session
-├── CLAUDE.md              bootstrap, routing, security rules (always loaded)
+Agent session
+├── AGENTS.md              provider-neutral bootstrap and state contract
+├── CLAUDE.md              shared routing, security, and lifecycle rules
 ├── .claude/commands/      slash commands (/agentic, /scan, /validate, ...)
 ├── .claude/skills/        methodology detail (loaded on demand)
 ├── tiers/                 adversarial thinking, recovery, expert personas
@@ -48,7 +49,7 @@ Python layer
 
 The split means you can run the Python layer from a CI pipeline
 (`python3 raptor.py scan --repo ...`) and get structured SARIF output without
-Claude Code, or run it interactively with the full agentic workflow.  See
+a coding agent, or run it interactively with the full agentic workflow. See
 [Python CLI](python-cli.md).
 
 
@@ -57,36 +58,29 @@ Claude Code, or run it interactively with the full agentic workflow.  See
 RAPTOR uses LLMs in two distinct roles -- it is worth knowing both before
 changing the configuration.
 
-The **orchestration model** is always Claude Code.  The skills, commands, and
-decision logic all execute inside a Claude Code session.  Change it with Claude
-Code's `--model` flag or the `/model` command.
+The **orchestration model** runs in Claude Code, Codex, or OpenCode. Select the
+host with `raptor --agent <name>` and pass its model through `--model`.
 
-The **analysis dispatch model** is the LLM that analyses individual
-vulnerability findings (Stages A--F).  This is a separate call path and can be
-any [supported provider](llm.md): Anthropic, OpenAI, Gemini, Mistral, Bedrock,
-Ollama, or Claude Code itself as a fallback.  Configure it in
-`~/.config/raptor/models.json` or via environment variables.
-
-When no external provider is configured, Claude Code handles both roles.  When
-an external provider is configured, it takes priority for analysis dispatch and
-Claude Code becomes the fallback.
+The **analysis dispatch model** analyses individual vulnerability findings
+(Stages A--F). Its selection is independent of the orchestration host. Explicit
+analysis `--model` flags win, followed by usable entries in
+`~/.config/raptor/models.json`, then API-key/environment detection. If none of
+those selects an analysis model, a host-bound run reuses the selected Claude
+Code, Codex, or OpenCode subscription. See [supported providers](llm.md).
 
 
 ## Cost model
 
 RAPTOR has two separate cost surfaces:
 
-**Orchestration (Claude Code subscription).** The Claude Code session that runs
-RAPTOR uses your subscription (Max, Pro, Team, or Enterprise) or an Anthropic
-API key.  This covers all interactive reasoning: reading code, interpreting
-results, deciding what to do next.
+**Orchestration (selected agent subscription).** The Claude Code, Codex, or
+OpenCode session covers interactive reasoning: reading code, interpreting
+results, and deciding what to do next.
 
-**Analysis dispatch (per-token API calls).** When `/agentic` or `/codeql
---analyze` dispatches findings to an external LLM, those calls are billed per
-token to the configured provider.  If you only use Claude Code as the analysis
-model (the default), there is no extra cost beyond your subscription.  If you
-configure external models (OpenAI, Gemini, etc.), those API calls are billed to
-those providers.
+**Analysis dispatch.** A configured direct provider is billed under that
+provider account. When no analysis configuration takes precedence, a
+host-bound run falls back to the selected CLI subscription with no separate
+model API charge.
 
 A per-run budget cap (`--max-cost-usd`, default $10) prevents runaway spend on
 the dispatch layer.  The cap is enforced atomically -- concurrent analysis
@@ -96,9 +90,10 @@ end.
 | Scenario | Orchestration cost | Dispatch cost |
 |----------|--------------------|---------------|
 | `/scan` (no LLM) | Subscription | None |
-| `/agentic` with Claude Code as analyser | Subscription | Subscription (same) |
-| `/agentic --model gemini-2.5-pro` | Subscription | Gemini API |
-| `/agentic` with Ollama | Subscription | Free (local) |
+| `/agentic` with configured direct analysis | Subscription | Selected API provider |
+| `/agentic` with subscription fallback | Subscription | Subscription (same host) |
+| Standalone `/agentic --model gemini-2.5-pro` | None | Gemini API |
+| Standalone `/agentic` with Ollama | None | Free (local) |
 
 See [LLM providers](llm.md) for token pricing, budget configuration, and
 credential isolation.
@@ -328,7 +323,7 @@ RAPTOR's capabilities degrade gracefully without network access:
 | Analysis dispatch (Ollama) | not needed | works (free, local) |
 | Analysis dispatch (cloud LLM) | works | unavailable |
 | SCA advisory matching | fetches from OSV/KEV | unavailable |
-| Claude Code orchestration | requires connection | unavailable |
+| Coding-agent orchestration | requires the selected host's connection | unavailable |
 
 For airgapped environments, pre-cache the Semgrep registry packs on a
 connected machine:
@@ -342,7 +337,7 @@ python3 engine/semgrep/tools/cache-packs.py import semgrep-cache-2026-07-16.zip
 Once cached, the scanner resolves pack IDs locally.  Without the cache, RAPTOR
 drops uncached packs and runs with custom rules only.
 
-Note that Claude Code itself requires a network connection -- fully airgapped
+The supported coding-agent hosts require a model connection. Fully airgapped
 use means running through the Python CLI (`python3 raptor.py scan --repo ...`)
 with a local Ollama model for analysis dispatch.
 

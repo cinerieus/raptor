@@ -62,7 +62,7 @@ the code.
 - **Python 3.10+** and **Node.js 18+**.
 - **Semgrep** (`pip install semgrep`) for static analysis. CodeQL is optional but recommended.
 
-For the analysis dispatch layer (the LLM that analyses individual findings), Claude Code itself handles everything by default -- no extra API keys needed. If you want multi-model analysis (e.g. Claude + GPT + Gemini), you will need API keys for each provider. See [Using a different LLM](#using-a-different-llm) below.
+For the analysis dispatch layer, a session launched with `--agent` reuses that agent's authenticated CLI. No model API key is required. Direct APIs and multi-model API dispatch remain available for explicitly configured standalone runs.
 
 ## Quick Start
 
@@ -166,7 +166,7 @@ To add LLM-powered validation:
 
 This runs the full pipeline: scan, deduplicate, then send each finding through the validation stages (A-F). On a medium-sized codebase with ~50 findings, expect 10-30 minutes and $2-8 in analysis-layer LLM costs (depending on the model). The default cost cap is $10 per run; adjust with `--max-cost-usd`.
 
-**Cost note:** The Claude Code orchestration layer uses your Claude subscription. The analysis dispatch layer makes separate LLM API calls that are billed per token. If you only use Claude Code as the analysis model (the default), there is no extra cost beyond your subscription. If you configure external models (OpenAI, Gemini, etc.), those API calls are billed to those providers.
+**Cost note:** Host-bound sessions use the selected agent's authenticated account for orchestration and analysis. Ambient model API keys do not override that route. Direct API calls are billed separately only when explicitly selected outside a host-bound session. Codex and OpenCode analysis calls are tool-disabled and capped at 100 calls per RAPTOR process because their CLIs do not expose a monetary cost signal. `RAPTOR_AGENT_CLI_MAX_CALLS` sets an explicit alternative limit.
 
 ---
 
@@ -388,7 +388,7 @@ RAPTOR has two separate model layers, and it is worth knowing how both work befo
 
 The **orchestration layer** can be Claude Code, Codex, or OpenCode. Select it with `raptor --agent <name>` or `RAPTOR_AGENT`. `AGENTS.md` is the host-neutral bootstrap, `CLAUDE.md` retains the shared contract, and `.claude/commands/` is the canonical command registry.
 
-The **analysis dispatch layer** is the LLM that analyses individual vulnerability findings. This is separate from the orchestration layer and can be any supported provider. Configure it in `~/.config/raptor/models.json`:
+The **analysis dispatch layer** analyses individual findings. In a host-bound session it uses the selected Claude Code, Codex, or OpenCode CLI. For standalone direct-API or multi-model runs, configure providers in `~/.config/raptor/models.json`:
 
 ```json
 {
