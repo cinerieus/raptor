@@ -23,6 +23,35 @@ from core.llm.tool_use.types import (
 from cve_env.agent.tools import ALL_TOOLS, TOOL_NAMES
 from cve_env.models import CveRecord, HostInfo, Outcome
 
+
+@pytest.mark.parametrize(
+    "agent,provider", [
+        ("claude", "claudecode"),
+        ("codex", "codexcli"),
+        ("opencode", "opencodecli"),
+    ],
+)
+def test_resolve_provider_uses_selected_agent(
+    monkeypatch, agent, provider,
+) -> None:
+    from cve_env.agent import core_loop
+
+    captured = {}
+    monkeypatch.setenv("RAPTOR_AGENT", agent)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-win")
+    monkeypatch.setattr(
+        core_loop,
+        "create_provider",
+        lambda config: captured.setdefault("config", config),
+    )
+    monkeypatch.setattr(
+        "core.llm.dispatcher.lifecycle.ensure_route_for_model_configs",
+        lambda *args, **kwargs: None,
+    )
+    result = core_loop._resolve_provider("claude-opus-4-7")
+    assert result.provider == provider
+    assert result.model_name == "session-default"
+
 # ── tool conversion ───────────────────────────────────────────────────
 
 

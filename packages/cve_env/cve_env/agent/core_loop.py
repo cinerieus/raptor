@@ -133,9 +133,19 @@ def _resolve_provider(model: str):
     parent (the raptor-llm-ask precedent)."""
     from core.security.llm_family import provider_of
 
-    provider_name = provider_of(model) or "anthropic"
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected in ("claude", "codex", "opencode"):
+        provider_name = (
+            "claudecode" if selected == "claude" else f"{selected}cli"
+        )
+        model = "session-default"
+    else:
+        provider_name = provider_of(model) or "anthropic"
     via_dispatcher = bool(os.environ.get("RAPTOR_LLM_SOCKET"))
     if (
+        selected not in ("claude", "codex", "opencode")
+        and
         provider_name == "anthropic"
         and not via_dispatcher
         and not os.environ.get("ANTHROPIC_API_KEY")
