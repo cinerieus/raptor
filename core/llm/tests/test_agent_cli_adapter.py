@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from core.llm.agent_cli_adapter import run_agent_cli, selected_agent
+from core.llm.agent_cli_adapter import (
+    run_agent_cli,
+    run_agent_skill_cli,
+    selected_agent,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -177,6 +181,58 @@ def test_opencode_command_uses_run_and_stored_auth(monkeypatch) -> None:
     assert str(config_home / "opencode") in captured["kwargs"][
         "readable_paths"
     ]
+
+
+@pytest.mark.parametrize("agent", ["codex", "opencode"])
+def test_skill_command_enables_tools_inside_raptor_sandbox(
+    monkeypatch, tmp_path, agent,
+) -> None:
+    captured = {}
+    target = tmp_path / "target"
+    output = tmp_path / "output"
+    context = tmp_path / "context"
+    for path in (target, output, context):
+        path.mkdir()
+    monkeypatch.setattr("core.llm.agent_cli_adapter._check_auth", lambda *a: None)
+    monkeypatch.setattr(
+        "core.llm.agent_cli_adapter.resolve_agent_cli",
+        lambda selected: f"/usr/bin/{selected}",
+    )
+    if agent == "codex":
+        source_home = tmp_path / "codex-source"
+        source_home.mkdir()
+        (source_home / "auth.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(source_home))
+
+    def fake_run(cmd, **kwargs):
+        captured.update(cmd=cmd, kwargs=kwargs)
+        if agent == "codex":
+            final = Path(cmd[cmd.index("--output-last-message") + 1])
+            final.write_text("done", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "done", "")
+
+    monkeypatch.setattr("core.sandbox.run_untrusted_networked", fake_run)
+    result = run_agent_skill_cli(
+        agent, "perform map", target=target, output=output,
+        context_dirs=(context,), caller_label="agentic-understand",
+    )
+    assert result.returncode == 0
+    assert result.stdout == "done"
+    assert captured["kwargs"]["target"] == str(target)
+    assert captured["kwargs"]["output"] == str(output)
+    assert str(context) in captured["kwargs"]["readable_paths"]
+    assert str(target) not in captured["kwargs"]["writable_paths"]
+    assert str(output) in captured["kwargs"]["writable_paths"]
+    if agent == "codex":
+        assert "--dangerously-bypass-approvals-and-sandbox" in captured["cmd"]
+        assert captured["cmd"][captured["cmd"].index("-C") + 1] == str(output)
+        assert "--ignore-rules" in captured["cmd"]
+    else:
+        config = captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"]
+        assert '"bash": "allow"' in config
+        assert '"read": "allow"' in config
+        assert '"plugin": []' in config
+        assert "--auto" in captured["cmd"]
 
 
 def test_target_path_in_prompt_never_becomes_cli_workspace(

@@ -2267,18 +2267,24 @@ class WebScanner:
         )
         logger.info("Phase 7a: Validating %d needs_review findings", len(needs_review))
         try:
-            import shutil
-
             findings_for_validate = [
                 self._web_finding_to_agentic_result(f) for f in needs_review
             ]
             findings_input = self.out_dir / "web_findings_for_validation.json"
             self._save_artifact(findings_input, {"results": findings_for_validate})
 
-            claude_bin = shutil.which("claude")
-            if not claude_bin:
-                logger.info("Phase 7a: claude not on PATH -- skipping /validate")
-                return findings
+            from core.llm.agent_cli_adapter import selected_agent
+            active_agent = selected_agent()
+            claude_bin = None
+            if active_agent in (None, "claude"):
+                import shutil
+                claude_bin = shutil.which("claude")
+                if not claude_bin:
+                    logger.info(
+                        "Phase 7a: no selected agent and claude not on PATH "
+                        "-- skipping /validate"
+                    )
+                    return findings
 
             from core.orchestration.agentic_passes import run_validate_postpass
             result = run_validate_postpass(

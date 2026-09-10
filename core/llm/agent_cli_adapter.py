@@ -57,6 +57,55 @@ _OPENCODE_INFERENCE_CONFIG = json.dumps({
         },
     },
 })
+_OPENCODE_SKILL_CONFIG = json.dumps({
+    "permission": {
+        "*": "deny",
+        "bash": "allow",
+        "edit": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "read": "allow",
+        "write": "allow",
+    },
+    "tools": {
+        "*": False,
+        "bash": True,
+        "edit": True,
+        "glob": True,
+        "grep": True,
+        "read": True,
+        "write": True,
+    },
+    "mcp": {},
+    "plugin": [],
+    "instructions": [],
+    "default_agent": "raptor-skill",
+    "agent": {
+        "raptor-skill": {
+            "description": "Sandboxed RAPTOR skill runner",
+            "mode": "primary",
+            "prompt": "Follow only the supplied RAPTOR workflow request.",
+            "permission": {
+                "*": "deny",
+                "bash": "allow",
+                "edit": "allow",
+                "glob": "allow",
+                "grep": "allow",
+                "read": "allow",
+                "write": "allow",
+            },
+            "tools": {
+                "*": False,
+                "bash": True,
+                "edit": True,
+                "glob": True,
+                "grep": True,
+                "read": True,
+                "write": True,
+            },
+        },
+    },
+})
 _HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
@@ -440,3 +489,115 @@ def run_agent_cli(
             text = result.stdout
         structured = _parse_json_text(text) if schema is not None else None
         return text.strip(), structured, time.monotonic() - started
+
+
+def run_agent_skill_cli(
+    agent: str,
+    prompt: str,
+    *,
+    target: Path,
+    output: Path,
+    context_dirs: tuple[Path, ...] = (),
+    timeout_s: int = 900,
+    caller_label: str = "agent-skill",
+) -> subprocess.CompletedProcess[str]:
+    """Run a tool-enabled skill through the selected CLI.
+
+    The coding agent's own sandbox is disabled because RAPTOR wraps the whole
+    process in its namespace, Landlock, seccomp, and egress sandbox.  The
+    target and RAPTOR installation are read-only; only the lifecycle output
+    and the private staged CLI state are writable.
+    """
+    if agent not in SUPPORTED_AGENT_CLIS:
+        raise ValueError(f"unsupported agent skill CLI: {agent}")
+    binary = resolve_agent_cli(agent)
+    effective_model = _resolve_agent_model(agent, None)
+    target = Path(target).resolve()
+    output = Path(output).resolve()
+    contexts = tuple(Path(path).resolve() for path in context_dirs)
+
+    with scratch_dir(f"raptor-{agent}-skill-") as work:
+        work_path = Path(work)
+        if agent == "codex":
+            output_path = work_path / "last-message.txt"
+            cmd = [
+                binary, "exec", "--strict-config", "--ignore-rules",
+                "--ephemeral", "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--color", "never", "--output-last-message",
+                str(output_path), "-C", str(output),
+            ]
+            for override in (
+                "project_doc_max_bytes=0", "project_doc_fallback_filenames=[]",
+                "project_root_markers=[]", 'web_search="disabled"',
+                "tools.web_search=false", "mcp_servers={}",
+            ):
+                cmd.extend(["--config", override])
+            for feature in _CODEX_DISABLED_FEATURES:
+                if feature not in {"shell_tool", "unified_exec"}:
+                    cmd.extend(["--disable", feature])
+            if effective_model:
+                cmd.extend(["--model", effective_model])
+            cmd.append("-")
+        else:
+            cmd = [
+                binary, "run", "--pure", "--agent", "raptor-skill",
+                "--dir", str(output), "--auto",
+            ]
+            if effective_model:
+                cmd.extend(["--model", effective_model])
+
+        from core.config import RaptorConfig
+
+        child_env = RaptorConfig.get_safe_env()
+        if agent == "codex":
+            child_env["CODEX_HOME"] = str(_stage_codex_home(work_path))
+        else:
+            child_env["XDG_DATA_HOME"] = str(_stage_opencode_data(work_path))
+            child_env["XDG_CONFIG_HOME"] = os.environ.get(
+                "XDG_CONFIG_HOME", str(Path.home() / ".config")
+            )
+            child_env["OPENCODE_CONFIG_CONTENT"] = _OPENCODE_SKILL_CONFIG
+        for name in (
+            "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+            "MISTRAL_API_KEY", "AWS_BEARER_TOKEN_BEDROCK",
+        ):
+            child_env.pop(name, None)
+        child_env["OTEL_SDK_DISABLED"] = "true"
+        _check_auth(agent, binary, child_env)
+        _claim_call(agent)
+
+        readable = [
+            str(Path(binary).parent),
+            str(Path(__file__).resolve().parents[2]),
+            *(str(path) for path in contexts),
+            *(p for p in _auth_paths(agent, child_env) if Path(p).exists()),
+        ]
+        if agent == "opencode":
+            config_dir = Path(child_env["XDG_CONFIG_HOME"]) / "opencode"
+            if config_dir.exists():
+                readable.append(str(config_dir))
+
+        from core.sandbox import run_untrusted_networked
+
+        result = run_untrusted_networked(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=str(work_path),
+            env=child_env,
+            target=str(target),
+            output=str(output),
+            readable_paths=readable,
+            writable_paths=[str(work_path), str(output)],
+            proxy_hosts=_proxy_hosts(agent),
+            caller_label=caller_label,
+        )
+        if agent == "codex" and result.returncode == 0:
+            final_text = output_path.read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(
+                result.args, result.returncode, final_text, result.stderr,
+            )
+        return result

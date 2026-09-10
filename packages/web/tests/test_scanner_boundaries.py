@@ -65,6 +65,25 @@ def _discovery_mock():
     return discovery
 
 
+def test_validate_phase_uses_selected_agent(tmp_path, monkeypatch):
+    scanner = _make_scanner(str(tmp_path))
+    finding = _oracle_finding()
+    monkeypatch.setenv("RAPTOR_AGENT", "opencode")
+    monkeypatch.setattr(
+        "core.security.rule_of_two.is_interactive", lambda: True,
+    )
+    scanner._maybe_rank = lambda values, *args, **kwargs: values
+    result = SimpleNamespace(ran=True)
+    with patch(
+        "core.orchestration.agentic_passes.run_validate_postpass",
+        return_value=result,
+    ) as validate:
+        returned = scanner._phase_validate([finding])
+    assert returned == [finding]
+    assert validate.call_args.kwargs["claude_bin"] is None
+    assert "validate" in scanner._phases_completed
+
+
 class TestCheckFailureSurfacing(unittest.TestCase):
     """A crashed or transport-degraded check must never read as clean."""
 

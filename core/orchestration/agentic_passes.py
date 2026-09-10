@@ -1,7 +1,7 @@
 """Pre-scan and post-scan enrichment passes for /agentic.
 
 When the user passes ``--understand`` or ``--validate``, these functions
-dispatch ``claude -p`` subprocesses with the relevant skill loaded. Both
+dispatch the selected coding-agent CLI with the relevant skill loaded. Both
 passes are first-class run dirs created via libexec/raptor-run-lifecycle,
 so the resulting artefacts are project-aware and discoverable by the
 existing /understand → /validate bridge:
@@ -9,7 +9,7 @@ existing /understand → /validate bridge:
   --understand: creates a proper command_type=understand run dir as a
                 sibling of the agentic run dir (project sibling in
                 project mode, global out/ otherwise). Builds checklist,
-                runs the /understand --map workflow via claude -p, and
+                runs the /understand --map workflow via the selected host, and
                 produces context-map.json. The artefact is reusable by
                 later /validate runs against the same target via the
                 bridge tier-2/3 lookup.
@@ -19,7 +19,7 @@ existing /understand → /validate bridge:
                 is_exploitable == True or confidence == "high",
                 persists them to a file (defending against finding_id
                 prompt injection), then runs the /validate skill via
-                claude -p. The bridge tier-2 lookup finds the
+                the selected host. The bridge tier-2 lookup finds the
                 understand sibling automatically — no copying.
 
 Both passes degrade gracefully:

@@ -1,15 +1,15 @@
-"""Shared skill-dispatch runner for lifecycle-managed ``claude -p`` passes.
+"""Shared runner for lifecycle-managed coding-agent skill passes.
 
 Both /agentic's enrichment passes (``core/orchestration/agentic_passes``)
 and /audit's post-audit validation handoff (``core/audit/validate``)
-dispatch a Claude Code subprocess with a skill loaded, wrapped in the
+dispatch the selected Claude Code, Codex, or OpenCode host with a skill loaded, wrapped in the
 same run-lifecycle bookkeeping. The audit copy was written second and
 had already drifted behind the agentic one (head-truncation instead of
 signal-sorted truncation, no ``OSError`` launch handling, and — the
 security-relevant one — no cc-trust ``block_cc_dispatch`` gate). This
 module is the single implementation of the MECHANICS:
 
-- the gate chain: cc-trust block → rule-of-two → claude on PATH →
+- the gate chain: repository trust block → rule-of-two → selected host →
   caller preflight;
 - lifecycle start/complete/fail via ``libexec/raptor-run-lifecycle``
   (with ``get_safe_env()`` so an untrusted target's ambient env never
@@ -522,23 +522,30 @@ def run_skill_dispatch(
     except NonInteractiveError as e:
         return SkillDispatchResult(ran=False, skipped_reason=str(e))
 
-    # Administrative transport kill switch — this lane is a billed
-    # `claude -p` spawn that does not pass run_cc_streaming, so it
-    # honours the switch itself, joining the gate chain with the same
-    # skip shape as the other gates.
-    from core.llm.cc_adapter import cc_transport_disabled, resolve_claude_cli
-    if cc_transport_disabled():
-        return SkillDispatchResult(
-            ran=False,
-            skipped_reason="claude CLI transport disabled "
-            "(RAPTOR_CC_TRANSPORT_DISABLED is set)")
+    from core.llm.agent_cli_adapter import selected_agent
+    active_agent = selected_agent() or "claude"
+    if active_agent == "claude":
+        # Administrative transport kill switch. This lane is a billed
+        # `claude -p` spawn that does not pass run_cc_streaming.
+        from core.llm.cc_adapter import (
+            cc_transport_disabled,
+            resolve_claude_cli,
+        )
+        if cc_transport_disabled():
+            return SkillDispatchResult(
+                ran=False,
+                skipped_reason="claude CLI transport disabled "
+                "(RAPTOR_CC_TRANSPORT_DISABLED is set)")
 
-    # Realpath at the resolution seam: symlinked installs otherwise
-    # fail the mount-ns visibility check and silently downgrade the
-    # dispatch to Landlock-only (see resolve_claude_cli).
-    claude_bin = resolve_claude_cli(claude_bin)
-    if not claude_bin:
-        return SkillDispatchResult(ran=False, skipped_reason="claude not on PATH")
+        # Realpath at the resolution seam: symlinked installs otherwise
+        # fail the mount-ns visibility check.
+        claude_bin = resolve_claude_cli(claude_bin)
+        if not claude_bin:
+            return SkillDispatchResult(
+                ran=False, skipped_reason="claude not on PATH")
+    elif active_agent not in {"codex", "opencode"}:
+        return SkillDispatchResult(
+            ran=False, skipped_reason=f"unsupported agent host: {active_agent}")
 
     if preflight is not None:
         reason = preflight()
@@ -579,6 +586,65 @@ def run_skill_dispatch(
                     duration_s=time.monotonic() - t0)
 
         prompt = build_prompt(run_dir)
+
+        if active_agent != "claude":
+            from core.llm.agent_cli_adapter import run_agent_skill_cli
+            try:
+                proc = run_agent_skill_cli(
+                    active_agent,
+                    prompt,
+                    target=target,
+                    output=run_dir,
+                    context_dirs=tuple(context_dirs),
+                    timeout_s=timeout_s,
+                    caller_label=caller_label,
+                )
+            except subprocess.TimeoutExpired:
+                lifecycle_settled = True
+                fail_lifecycle(run_dir, f"timeout after {timeout_s}s")
+                return SkillDispatchResult(
+                    ran=False, skipped_reason=f"timeout after {timeout_s}s",
+                    run_dir=run_dir, duration_s=time.monotonic() - t0)
+            except _SandboxSetupError as e:
+                lifecycle_settled = True
+                fail_lifecycle(run_dir, f"sandbox setup failed: {e}")
+                return SkillDispatchResult(
+                    ran=False, skipped_reason=f"sandbox setup failed: {e}",
+                    run_dir=run_dir, duration_s=time.monotonic() - t0)
+            except (OSError, RuntimeError) as e:
+                lifecycle_settled = True
+                reason = f"{active_agent} launch failed: {e}"
+                fail_lifecycle(run_dir, reason)
+                return SkillDispatchResult(
+                    ran=False, skipped_reason=reason, run_dir=run_dir,
+                    duration_s=time.monotonic() - t0)
+
+            if proc.returncode != 0:
+                lifecycle_settled = True
+                fail_lifecycle(run_dir, f"subprocess returned {proc.returncode}")
+                logger.warning(
+                    "%s returned %d: %s", log_label, proc.returncode,
+                    (proc.stderr or "")[:500],
+                )
+                return SkillDispatchResult(
+                    ran=False,
+                    skipped_reason=f"subprocess returned {proc.returncode}",
+                    run_dir=run_dir, duration_s=time.monotonic() - t0)
+
+            if validate_outputs is not None:
+                error = validate_outputs(run_dir)
+                if error is not None:
+                    lifecycle_settled = True
+                    fail_lifecycle(run_dir, error)
+                    return SkillDispatchResult(
+                        ran=False, skipped_reason=error, run_dir=run_dir,
+                        duration_s=time.monotonic() - t0)
+            complete_lifecycle(run_dir)
+            lifecycle_settled = True
+            return SkillDispatchResult(
+                ran=True, run_dir=run_dir,
+                duration_s=time.monotonic() - t0,
+            )
 
         # Credential posture (see _CC_CREDENTIAL_MODE_ENV). Proxy-mode
         # setup failures FAIL the pass with a clear reason — never a

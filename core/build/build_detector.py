@@ -1533,10 +1533,14 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
         - CC cannot modify the build script or execute commands
         - Invalid/malicious flags are silently rejected
         """
-        import shutil as _shutil
-        claude_bin = _shutil.which("claude")
-        if not claude_bin:
-            return None
+        from core.llm.agent_cli_adapter import selected_agent
+        active_agent = selected_agent()
+        claude_bin = None
+        if active_agent not in {"codex", "opencode"}:
+            import shutil as _shutil
+            claude_bin = _shutil.which("claude")
+            if not claude_bin:
+                return None
         # Path allowlist for the resolved claude binary. `which` walks
         # PATH, which an untrusted target repo could influence —
         # `direnv`-style `.envrc`, a `pyproject.toml` build hook, or
@@ -1546,7 +1550,7 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
         # `claude` shim in the target repo doesn't get executed under
         # CC's allowlisted-tool model.
         try:
-            real_claude = os.path.realpath(claude_bin)
+            real_claude = os.path.realpath(claude_bin) if claude_bin else None
         except OSError:
             return None
         allowed_prefixes = (
@@ -1559,7 +1563,8 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             "/home/linuxbrew/.linuxbrew/bin/",
             "/opt/homebrew/bin/",
         )
-        if not any(real_claude.startswith(p) for p in allowed_prefixes):
+        if (real_claude is not None
+                and not any(real_claude.startswith(p) for p in allowed_prefixes)):
             logger.info(
                 "  Skipping CC flag inference — `claude` resolves to %r which is outside the install-location allowlist. If this is a legitimate location, add it to _cc_suggest_flags' `allowed_prefixes`.", real_claude
             )
@@ -1609,6 +1614,52 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
             logger.info("  Skipping CC flag inference — target repo has dangerous "
                         "Claude Code config (see earlier warning). "
                         "Pass --trust-repo to override.")
+            return None
+
+        if active_agent in {"codex", "opencode"}:
+            try:
+                from core.llm.agent_cli_adapter import run_agent_skill_cli
+                from core.llm.cc_adapter import strip_json_fences
+                from core.run.scratch import scratch_dir
+
+                logger.info(
+                    "  Asking %s for additional compiler flags...",
+                    active_agent,
+                )
+                with scratch_dir("raptor-build-flags-") as skill_out:
+                    result = run_agent_skill_cli(
+                        active_agent,
+                        prompt,
+                        target=self.repo_path,
+                        output=Path(skill_out),
+                        timeout_s=180,
+                        caller_label="codeql-build-detect",
+                    )
+                if result.returncode != 0 or not result.stdout.strip():
+                    return None
+                stdout = result.stdout.strip()
+                if len(stdout) > 100 * 1024:
+                    return None
+                content = strip_json_fences(stdout)
+                import json
+                data = None
+                for idx in [i for i, char in enumerate(content) if char == "{"][:16]:
+                    try:
+                        data = json.loads(content[idx:])
+                        break
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+                if not isinstance(data, dict):
+                    return None
+                includes = self._validate_flags(data.get("includes") or [])
+                defines = self._validate_flags(data.get("defines") or [])
+                if includes or defines:
+                    return {"includes": includes, "defines": defines}
+                return None
+            except subprocess.TimeoutExpired:
+                logger.info("  %s flag suggestion timed out (180s)", active_agent)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("%s flag suggestion failed: %s", active_agent, e)
             return None
 
         try:

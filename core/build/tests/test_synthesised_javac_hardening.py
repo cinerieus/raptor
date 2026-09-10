@@ -129,3 +129,26 @@ def test_cc_suggest_flags_passes_read_confinement(tmp_path, monkeypatch):
 
     assert captured.get("restrict_reads") is True
     assert captured.get("readable_paths") == ["/opt/cc-floor"]
+
+
+def test_flag_inference_uses_selected_agent(tmp_path, monkeypatch):
+    import core.llm.agent_cli_adapter as agent_adapter
+    import core.security.cc_trust as cc_trust
+
+    captured = {}
+    monkeypatch.setenv("RAPTOR_AGENT", "codex")
+    monkeypatch.setattr(cc_trust, "check_repo_claude_trust", lambda p: False)
+
+    def fake_agent(agent, prompt, **kwargs):
+        captured.update(agent=agent, kwargs=kwargs)
+        return subprocess.CompletedProcess(
+            ["codex"], 0, '{"includes":["-Iinclude"],"defines":[]}', "",
+        )
+
+    monkeypatch.setattr(agent_adapter, "run_agent_skill_cli", fake_agent)
+    result = BuildDetector(tmp_path)._cc_suggest_flags(
+        [{"file": "a.c", "error": "missing header"}], "cpp",
+    )
+    assert result == {"includes": ["-Iinclude"], "defines": []}
+    assert captured["agent"] == "codex"
+    assert captured["kwargs"]["target"] == tmp_path
