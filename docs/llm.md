@@ -83,6 +83,13 @@ Python runs or explicit provider configuration when `RAPTOR_AGENT` is unset.
 Existing `models.json` role splits, API credentials, local providers,
 consensus, judge, aggregate, and fallback routing are unchanged.
 
+RAPTOR skips the false-positive prefilter when its fast tier resolves to the
+same model as full analysis; every finding still receives full analysis. A
+distinct configured fast model keeps the prefilter path. Successful envelope
+probes for explicit Codex/OpenCode models are cached for 24 hours by exact CLI
+binary/version, model, and defense profile. `session-default` is always probed
+because its exact model is not known before dispatch.
+
 RAPTOR uses large language models for vulnerability analysis, exploit generation, dataflow
 validation, and autonomous decision-making. This guide covers provider configuration,
 model selection, multi-model workflows, and cost management.
