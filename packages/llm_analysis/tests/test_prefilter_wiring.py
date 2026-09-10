@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -433,6 +434,29 @@ def test_record_outcomes_never_raises_without_scorecard(llm):
 
 # ---------------------------------------------------------------------------
 # Memoized dispatch hook (make_prefilter_fn)
+
+
+def test_prefilter_disabled_when_fast_tier_is_primary(llm):
+    from packages.llm_analysis.prefilter import should_enable_prefilter
+
+    client = MagicMock()
+    client.config.primary_model.model_name = "session-default"
+    client.config.specialized_models = {}
+
+    assert should_enable_prefilter(client) is False
+
+
+def test_prefilter_retained_for_distinct_split_model(llm):
+    from packages.llm_analysis.prefilter import should_enable_prefilter
+
+    client = MagicMock()
+    client.config.primary_model.model_name = "gpt-analysis"
+    fast = MagicMock()
+    fast.enabled = True
+    fast.model_name = "gpt-fast"
+    client.config.specialized_models = {TaskType.VERDICT_BINARY: fast}
+
+    assert should_enable_prefilter(client) is True
 # ---------------------------------------------------------------------------
 
 
