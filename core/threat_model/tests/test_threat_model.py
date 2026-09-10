@@ -148,7 +148,10 @@ def test_verified_outcomes_update_matching_threat_status(tmp_path):
         oracle=Oracle.SANDBOX,
         status=OutcomeStatus.VERIFIED,
         reproducible=True,
-        evidence={"signal": "SIGABRT"},
+        # provenance_verified: what collect_outcomes sets after the
+        # record's witness-provenance MAC verified — status flips
+        # require it on top of the id match.
+        evidence={"signal": "SIGABRT", "provenance_verified": True},
         cwe_id="CWE-78",
         file="hello.py",
     )
@@ -1080,9 +1083,56 @@ def test_id_match_still_flips_status_both_directions(tmp_path):
         oracle=Oracle.CODEQL,
         status=OutcomeStatus.REFUTED,
         reproducible=True,
-        evidence={},
+        evidence={"provenance_verified": True},
         cwe_id="CWE-78",
         file="a.py",
     )
     link_verified_outcomes(model, [refute])
     assert model.threats[0]["status"] == "refuted"
+
+
+def test_id_match_without_mechanical_provenance_never_flips(tmp_path):
+    """Two-direction guard for the flip gate: threat ids are
+    content-derived and predictable, so an id-matched record without
+    the collect_outcomes-minted ``provenance_verified`` flag (a
+    disk-staged artifact, a legacy unstamped record) attaches
+    evidence for the operator but must not move status — in either
+    direction."""
+    project = _project(tmp_path)
+    model = from_context_map(project, {
+        "entry_points": [{"id": "EP-001", "name": "POST /run"}],
+        "sink_details": [
+            {"id": "SINK-001", "type": "subprocess", "file": "a.py"},
+        ],
+        "unchecked_flows": [
+            {"entry_point": "EP-001", "sink": "SINK-001",
+             "severity": "critical"},
+        ],
+    })
+    before = [t["status"] for t in model.threats]
+    staged = [
+        VerifiedOutcome(
+            finding_id="SINK-001",
+            oracle=Oracle.CODEQL,
+            status=OutcomeStatus.REFUTED,
+            reproducible=True,
+            evidence={},  # unstamped / unverified
+            cwe_id="CWE-78",
+            file="a.py",
+        ),
+        VerifiedOutcome(
+            finding_id="SINK-001",
+            oracle=Oracle.SANDBOX,
+            status=OutcomeStatus.VERIFIED,
+            reproducible=True,
+            # A non-True value must not satisfy the gate either.
+            evidence={"provenance_verified": "yes"},
+            cwe_id="CWE-78",
+            file="a.py",
+        ),
+    ]
+    link_verified_outcomes(model, staged)
+    # Evidence attached for the operator to weigh …
+    assert model.threats[0]["evidence_ids"]
+    # … but no status moved.
+    assert [t["status"] for t in model.threats] == before

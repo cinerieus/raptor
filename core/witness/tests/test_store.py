@@ -613,3 +613,82 @@ def test_identical_replay_writes_no_history(tmp_path):
     store.put(_make_witness(data), data)
     history = tmp_path / "manifests" / f"{w.bytes_hash}.history.jsonl"
     assert not history.exists()
+
+
+# ----------------------------------------------------------------------
+# Manifest provenance MAC — reader-side annotation
+# ----------------------------------------------------------------------
+
+
+def test_put_then_read_carries_mechanical_provenance(tmp_path):
+    """A manifest this store wrote verifies on read — both the direct
+    get and the enumeration set the reader-side annotation."""
+    store = WitnessStore(tmp_path)
+    data = b"stamped payload"
+    store.put(_make_witness(data), data)
+
+    got = store.get_witness(compute_bytes_hash(data))
+    assert got.provenance_verified is True
+    listed = list(store.list_witnesses())
+    assert listed and all(w.provenance_verified for w in listed)
+
+
+def test_planted_manifest_reads_without_provenance(tmp_path):
+    """Two-direction guard: a hand-staged manifest (no token, or a
+    forged one) still enumerates — evidence weight is preserved — but
+    never carries mechanical provenance."""
+    store = WitnessStore(tmp_path)
+    data = b"planted payload"
+    w = _make_witness(data)
+    store.put(w, data)  # ensures dirs exist
+
+    planted = b"attacker bytes"
+    planted_hash = compute_bytes_hash(planted)
+    manifest = {
+        "bytes_hash": planted_hash,
+        "bytes_len": len(planted),
+        "source": "fuzz",
+        "observed_outcome": "exit_signal",
+        "outcome_detail": {"finding_id": "THR-target"},
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }
+    (tmp_path / "manifests" / f"{planted_hash}.json").write_text(
+        json.dumps(manifest),
+    )
+    got = store.get_witness(planted_hash)
+    assert got.provenance_verified is False
+
+    forged = dict(manifest, provenance="0" * 64)
+    (tmp_path / "manifests" / f"{planted_hash}.json").write_text(
+        json.dumps(forged),
+    )
+    assert store.get_witness(planted_hash).provenance_verified is False
+    by_hash = {w.bytes_hash: w for w in store.list_witnesses()}
+    assert by_hash[planted_hash].provenance_verified is False
+    # The store's own record still verifies alongside.
+    assert by_hash[compute_bytes_hash(data)].provenance_verified is True
+
+
+def test_provenance_annotation_never_serialized(tmp_path):
+    """to_dict excludes the reader-side annotation, so a re-put of a
+    loaded witness cannot launder the flag into the manifest schema."""
+    store = WitnessStore(tmp_path)
+    data = b"round trip"
+    store.put(_make_witness(data), data)
+    got = store.get_witness(compute_bytes_hash(data))
+    assert got.provenance_verified is True
+    assert "provenance_verified" not in got.to_dict()
+
+
+def test_refresh_put_does_not_write_history_row(tmp_path):
+    """The provenance token is content-derived and re-minted on every
+    put; a pure refresh (same record, new clock/token) must stay an
+    idempotent overwrite, not a supersession history row."""
+    store = WitnessStore(tmp_path)
+    data = b"refresh me"
+    store.put(_make_witness(data), data)
+    store.put(_make_witness(data), data)
+    history = tmp_path / "manifests" / (
+        f"{compute_bytes_hash(data)}.history.jsonl"
+    )
+    assert not history.exists()

@@ -398,6 +398,13 @@ def from_witness(witness: Witness) -> VerifiedOutcome:
             evidence[k] = detail[k]
     if witness.target_binary_hash:
         evidence["target_binary_hash"] = witness.target_binary_hash
+    # Mechanical-provenance flag: set ONLY from the store's MAC
+    # verification of the manifest (never copied from
+    # ``outcome_detail``, which the record's author controls).
+    # Threat-status flips gate on it — see
+    # ``core.threat_model.link_verified_outcomes``.
+    if getattr(witness, "provenance_verified", False):
+        evidence["provenance_verified"] = True
     return VerifiedOutcome(
         finding_id=str(detail.get("finding_id") or ""),
         oracle=_witness_oracle(witness.source),
@@ -578,12 +585,19 @@ def collect_outcomes(
             if not isinstance(rec, dict):
                 continue
             try:
-                outcomes.append(VerifiedOutcome.from_dict(rec))
+                vo = VerifiedOutcome.from_dict(rec)
             except Exception:
                 _log.debug(
                     "skipping malformed verified-outcome record in %s",
                     path, exc_info=True,
                 )
+                continue
+            # The mechanical-provenance flag is minted by the witness
+            # path above from MAC verification; a run-local JSONL line
+            # is an unauthenticated disk artifact and must not be able
+            # to assert it into the threat model's flip gate.
+            vo.evidence.pop("provenance_verified", None)
+            outcomes.append(vo)
 
     return outcomes
 

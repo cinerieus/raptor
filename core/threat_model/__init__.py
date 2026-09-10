@@ -65,6 +65,11 @@ _EVIDENCE_RAW_KEY_ALLOWLIST = frozenset({
     "stdout_excerpt", "stderr_excerpt",
     "url", "path", "line", "duration_ms",
     "sandbox_outcome", "sanitizer", "rule_id",
+    # Mechanical-provenance tier of the record (set by
+    # collect_outcomes from MAC verification; gates status flips) —
+    # persisted so operators reading the model can weigh the
+    # evidence row accordingly.
+    "provenance_verified",
 })
 
 
@@ -1239,6 +1244,21 @@ def link_verified_outcomes(model: ThreatModel, outcomes: Iterable[Any]) -> Threa
                 # weigh; only a record naming this exact threat moves
                 # its status.
                 if kind != "id":
+                    continue
+                # Identity alone is still forgeable: threat ids are
+                # content-derived and attacker-predictable, so a
+                # disk-staged record can name an exact threat. Flips
+                # additionally require mechanical provenance —
+                # ``collect_outcomes`` sets
+                # ``evidence["provenance_verified"]`` only when the
+                # record's witness-provenance MAC verified under this
+                # install's key (and strips the key from substrates it
+                # cannot vouch for). Unverified id matches keep
+                # attaching evidence above for the operator to weigh;
+                # they just cannot move status.
+                ev_map = data.get("evidence")
+                if not (isinstance(ev_map, dict)
+                        and ev_map.get("provenance_verified") is True):
                     continue
                 if data.get("status") == "verified":
                     threat["status"] = "confirmed"

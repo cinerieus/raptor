@@ -371,3 +371,47 @@ def test_truncated_key_file_reads_exact_length(tmp_path, monkeypatch) -> None:
     got = prov._read_existing_key(key_file)
     assert isinstance(got, bytes)
     assert len(got) == 10
+
+
+class TestWitnessManifestMAC:
+    """Content-MAC for WitnessStore manifests — the substrate
+    collect_outcomes projects into threat-status flips."""
+
+    def _manifest(self):
+        return {
+            "bytes_hash": "ab" * 32,
+            "bytes_len": 4,
+            "source": "fuzz",
+            "observed_outcome": "exit_signal",
+            "outcome_detail": {"finding_id": "THR-0001"},
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+
+    def test_stamp_verify_round_trip(self, tmp_path):
+        manifest = self._manifest()
+        prov.stamp_witness_manifest(manifest)
+        assert manifest.get(prov.PROVENANCE_KEY)
+        assert prov.verify_witness_manifest(manifest)
+
+    def test_any_content_tamper_fails(self, tmp_path):
+        # Whole-record coverage: rewriting ANY field under a surviving
+        # token must fail — including the threat-naming finding_id.
+        manifest = self._manifest()
+        prov.stamp_witness_manifest(manifest)
+        tampered = dict(manifest)
+        tampered["outcome_detail"] = {"finding_id": "THR-0002"}
+        assert not prov.verify_witness_manifest(tampered)
+
+    def test_unstamped_manifest_is_unverified(self, tmp_path):
+        # Two-direction guard: legacy / attacker-staged manifests
+        # without a token demote, never error.
+        assert not prov.verify_witness_manifest(self._manifest())
+
+    def test_foreign_key_token_fails(self, tmp_path, monkeypatch):
+        # A record minted under ANOTHER install's key (or a guessed
+        # token) must not verify here.
+        manifest = self._manifest()
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "other-xdg"))
+        prov.stamp_witness_manifest(manifest)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "this-xdg"))
+        assert not prov.verify_witness_manifest(manifest)

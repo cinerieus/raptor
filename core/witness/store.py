@@ -31,6 +31,13 @@ from pathlib import Path
 
 from core.atomic_fs import write_bytes_atomically, write_text_atomically
 from core.json import append_jsonl, load_json
+from core.witness.provenance import (
+    PROVENANCE_KEY as _PROVENANCE_TOKEN_KEY,
+)
+from core.witness.provenance import (
+    stamp_witness_manifest,
+    verify_witness_manifest,
+)
 from core.witness.types import Witness, compute_bytes_hash
 from typing import TYPE_CHECKING
 
@@ -169,6 +176,13 @@ class WitnessStore:
         # evidence persisted but permanently unreadable). The fix at
         # the call site is to stringify / sanitise.
         manifest_dict = witness.to_dict()
+        # Witness-provenance stamp: manifests live inside run output
+        # trees a disk-staging attacker can pre-populate, and their
+        # projections feed threat-status flips via collect_outcomes.
+        # Consumers that grant mechanical weight verify this content
+        # MAC on read; no usable key → unstamped (records demote to
+        # evidence-only weight downstream, never an error here).
+        stamp_witness_manifest(manifest_dict)
         try:
             manifest_text = (
                 json.dumps(manifest_dict, indent=2, allow_nan=False) + "\n"
@@ -212,11 +226,16 @@ class WitnessStore:
             prior = load_json(manifest_path, max_bytes=_MAX_MANIFEST_BYTES)
             # Timestamp-insensitive compare: a pure refresh (same
             # provenance, new clock reading) is an idempotent
-            # overwrite, not a supersession worth a history row.
+            # overwrite, not a supersession worth a history row. The
+            # provenance token is excluded for the same reason — it is
+            # derived from the content (timestamp included), so a pure
+            # refresh re-mints a different token without any
+            # provenance-worthy change underneath.
+            _volatile = ("timestamp", _PROVENANCE_TOKEN_KEY)
             if isinstance(prior, dict) and (
-                {k: v for k, v in prior.items() if k != "timestamp"}
+                {k: v for k, v in prior.items() if k not in _volatile}
                 != {k: v for k, v in manifest_dict.items()
-                    if k != "timestamp"}
+                    if k not in _volatile}
             ):
                 history_path = (
                     self._manifests_dir / f"{witness.bytes_hash}.history.jsonl"
@@ -344,6 +363,11 @@ class WitnessStore:
                 f"{witness.bytes_hash[:16]!r}... — inconsistent with "
                 f"its address; refusing the record"
             )
+        # Mechanical-provenance annotation (never a refusal): consumers
+        # that grant provenance weight — threat-status flips via
+        # collect_outcomes — read this; everyone else keeps the record
+        # at evidence weight regardless.
+        witness.provenance_verified = verify_witness_manifest(data)
         return witness
 
     def list_witnesses(self) -> Iterator[Witness]:
@@ -403,6 +427,10 @@ class WitnessStore:
                     manifest, witness.bytes_hash[:16],
                 )
                 continue
+            # Same annotation as get_witness: unverified records still
+            # enumerate (evidence weight), they just carry no
+            # mechanical provenance.
+            witness.provenance_verified = verify_witness_manifest(data)
             yield witness
 
     def blob_path(self, bytes_hash: str) -> Path | None:
