@@ -84,6 +84,19 @@ def _fast_tier_model_name(client) -> str:
     return ""
 
 
+def should_enable_prefilter(client) -> bool:
+    """Return whether the fast tier is a distinct model.
+
+    Running the conservative prefilter through the same model as the full
+    analysis only adds a model call during learning and fall-through. A
+    configured split fast tier keeps the existing prefilter behaviour.
+    """
+    fast_model = _fast_tier_model_name(client)
+    primary = getattr(client.config, "primary_model", None)
+    primary_model = getattr(primary, "model_name", "")
+    return bool(fast_model and primary_model and fast_model != primary_model)
+
+
 def _cheap_fp_check(
     client, item: dict[str, Any],
 ) -> tuple[str, str] | None:
@@ -356,6 +369,7 @@ __all__ = [
     "FP_PREFILTER_SCHEMA",
     "agentic_fp_analysis",
     "make_prefilter_fn",
+    "should_enable_prefilter",
     "prefilter_for_finding",
     "record_prefilter_outcomes",
 ]
