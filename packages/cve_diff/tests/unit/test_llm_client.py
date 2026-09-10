@@ -149,6 +149,26 @@ def test_provider_for_model_falls_back_to_claudecode(monkeypatch):
     assert config.provider == "claudecode"
 
 
+@pytest.mark.parametrize(
+    "agent,provider", [
+        ("claude", "claudecode"),
+        ("codex", "codexcli"),
+        ("opencode", "opencodecli"),
+    ],
+)
+def test_provider_for_model_uses_selected_cli_session_model(
+    monkeypatch, agent, provider,
+):
+    monkeypatch.setenv("RAPTOR_AGENT", agent)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-win")
+    with patch("cve_diff.llm.client.create_provider") as cp:
+        cp.return_value = _mock_provider()
+        _provider_for_model("claude-opus-4-7", 120.0)
+    config = cp.call_args[0][0]
+    assert config.provider == provider
+    assert config.model_name == "session-default"
+
+
 # ── retry classification ──────────────────────────────────────────────
 # The retry loop must distinguish transient failures (retry with
 # backoff) from hard failures (401/403, billing caps, validation) that

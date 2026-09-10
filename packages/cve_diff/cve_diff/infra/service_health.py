@@ -92,6 +92,14 @@ def probe_anthropic() -> HealthResult:
     and no Anthropic auth, the agent loop's resolver picks Gemini
     cleanly; this health probe is informational, not gating.
     """
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected in ("claude", "codex", "opencode"):
+        return HealthResult(
+            "Model transport", True, 0,
+            detail=f"selected {selected} CLI is exercised at first pipeline call",
+        )
+
     # When the operator's configured primary model routes to another
     # provider entirely (models.json / env autodetect — see
     # cve_diff.llm.auth.default_model_id), Anthropic is NOT on this

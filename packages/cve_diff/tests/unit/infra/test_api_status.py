@@ -1,6 +1,8 @@
 """Tests for cve_diff/infra/api_status.py — rate-limit + key tracking + cache stats."""
 from __future__ import annotations
 
+import pytest
+
 from cve_diff.infra import api_status
 
 
@@ -121,6 +123,19 @@ def test_llm_auth_status_reflects_central_env_var_list(monkeypatch) -> None:
     monkeypatch.setenv("RAPTOR_LLM_SOCKET", "./fake.sock")
     _, _, via_dispatcher = api_status.llm_auth_status()
     assert via_dispatcher is True
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
+def test_banner_reports_selected_cli_without_requiring_key(
+    monkeypatch, agent,
+) -> None:
+    monkeypatch.setenv("RAPTOR_AGENT", agent)
+    for name in api_status._llm_provider_env_vars():
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("RAPTOR_LLM_SOCKET", raising=False)
+    banner = api_status.render_startup_banner()
+    assert f"{agent} CLI subscription selected" in banner
+    assert "will fall back to Claude Code OAuth" not in banner
 
 
 def test_banner_does_not_leak_provider_env_var_names(monkeypatch) -> None:

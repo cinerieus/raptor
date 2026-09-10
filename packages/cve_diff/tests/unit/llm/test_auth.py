@@ -56,6 +56,24 @@ def test_anthropic_models_fall_back_to_claudecode_without_auth(
 
 
 @pytest.mark.parametrize(
+    "agent,provider", [
+        ("claude", "claudecode"),
+        ("codex", "codexcli"),
+        ("opencode", "opencodecli"),
+    ],
+)
+def test_selected_agent_beats_model_family_and_api_keys(
+    monkeypatch, agent, provider,
+):
+    monkeypatch.setenv("RAPTOR_AGENT", agent)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-win")
+    decision = resolve_auth("claude-opus-4-7")
+    assert decision.provider == provider
+    assert decision.model_id == "session-default"
+    assert decision.api_key is None
+
+
+@pytest.mark.parametrize(
     "model_id,expected_provider",
     [
         ("claude-opus-4-7",      "anthropic"),
