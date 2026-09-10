@@ -521,12 +521,19 @@ struct pool *ctx_pool(struct ctx *h) {
 """
 
 
+@requires_ts
 class TestInvalidationHolderConstraint:
     """The same-function null-write receipt must hit the ALIAS-HOLDING
     base: an unconstrained `\\w+->field = NULL` match let the post-free
     hygiene write on the freed SOURCE refute a real stale alias on a
     different holder (the census arm has always required
-    ``w.owner == edge.holder``)."""
+    ``w.owner == edge.holder``).
+
+    Gated like the other census-exercising classes: without the
+    tree-sitter C grammar the census is regex-tier and
+    ``run_ptr_lifecycle_check`` refuses to adjudicate (inconclusive,
+    census-degraded) — both directions of this contract need the
+    full-tier census to bind."""
 
     def test_source_field_null_write_does_not_refute(self):
         res = run_ptr_lifecycle_check(
