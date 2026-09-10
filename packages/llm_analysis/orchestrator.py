@@ -616,14 +616,15 @@ def orchestrate(
 
     Called from raptor_agentic.py Phase 4. Dispatches findings for parallel
     analysis, runs structural grouping, and optionally runs consensus and
-    group analysis.
+    dependency-aware attack-chain analysis.
 
     Dispatch routing:
     - llm_config provided (external LLM) -> parallel generate_structured()
     - llm_config None + claude on PATH -> claude -p sub-agents
     - Neither -> return None
 
-    If external LLM dispatch fails entirely, falls back to CC dispatch.
+    If a direct-API external LLM fails entirely, falls back to CC dispatch.
+    A host-bound subscription transport fails visibly without changing hosts.
 
     Args:
         prep_report_path: Path to autonomous_analysis_report.json from Phase 3.
@@ -750,6 +751,23 @@ def orchestrate(
         prepare_flow_context(
             repo_path, checklist=checklist, run_dir=out_dir,
         )
+        from packages.llm_analysis.flow_context_inject import (
+            prepared_context_map,
+        )
+        from packages.llm_analysis.investigation import (
+            invariant_candidates_from_context_map,
+        )
+        invariant_seeds = invariant_candidates_from_context_map(
+            prepared_context_map(repo_path), repo_path, findings,
+        )
+        for seed in invariant_seeds:
+            seed.setdefault("repo_path", str(repo_path))
+        findings.extend(invariant_seeds)
+        if invariant_seeds:
+            logger.info(
+                "invariant-first discovery added %d source-verified leads",
+                len(invariant_seeds),
+            )
     except Exception as e:  # noqa: BLE001
         logger.debug("flow-context pre-seed failed (%s); continuing", e)
 
@@ -831,6 +849,17 @@ def orchestrate(
         extras.append(f"{n_aggregate} aggregate")
     extra_str = f" ({', '.join(extras)})" if extras else ""
     print(f"\n  {n} finding{'s' if n != 1 else ''} → {model_label}{extra_str}")
+    _subscription_agent = None
+    if analysis_model and analysis_model.provider in ("codexcli", "opencodecli"):
+        _subscription_agent = analysis_model.provider.removesuffix("cli")
+        from core.llm.agent_cli_adapter import DEFAULT_MAX_CALLS
+        _call_cap = os.environ.get(
+            "RAPTOR_AGENT_CLI_MAX_CALLS", str(DEFAULT_MAX_CALLS),
+        )
+        print(
+            f"  {_subscription_agent} subscription transport: monetary cost "
+            f"unknown; hard call cap {_call_cap}",
+        )
 
     # Best-effort ETA line — estimate_from_scorecard returns None on
     # every internal failure (missing/corrupt scorecard, too little
@@ -856,10 +885,10 @@ def orchestrate(
     from packages.llm_analysis.tasks import (
         AggregationTask,
         AnalysisTask,
+        ChainAnalysisTask,
         ConsensusTask,
         CrossFamilyCheckTask,
         ExploitTask,
-        GroupAnalysisTask,
         JudgeTask,
         PatchTask,
         RetryTask,
@@ -980,6 +1009,10 @@ def orchestrate(
     _probe_failed = False
     if dispatch_fn and _models_to_probe:
         from core.security.envelope_probe import probe_envelope_compatibility
+        from core.security.envelope_probe_cache import (
+            has_cached_success,
+            store_success,
+        )
         # Per-model profile collection. Pre-fix the outer `profile`
         # was set ONCE to the primary's profile and used unchanged
         # for all models; with `--analysis-models claude-opus,gpt-4`
@@ -1028,6 +1061,10 @@ def orchestrate(
         for _probe_model in _models_to_probe:
             _pname = _probe_model.model_name if hasattr(_probe_model, "model_name") else str(_probe_model)
             _pprofile = get_profile_for(_pname)
+            if has_cached_success(_probe_model, _pprofile):
+                defense_telemetry.set_probe_result(_pname, True)
+                _probed_profiles.append(_pprofile)
+                continue
             try:
                 probe_result = probe_envelope_compatibility(
                     _probe_model, _pprofile, dispatch_fn, strict=True,
@@ -1044,6 +1081,7 @@ def orchestrate(
                 # Continue probing remaining models so each gets
                 # its own telemetry record.
                 continue
+            store_success(_probe_model, _pprofile)
             _probed_profiles.append(_pprofile)
         # Intersect profiles for multi-model — AND every boolean
         # so any model that lacks a defence layer disables it
@@ -1108,10 +1146,19 @@ def orchestrate(
         # Memoized per finding: dispatch fans out (model x finding)
         # work items, but the cheap FP check is model-independent —
         # see make_prefilter_fn for the dedupe contract.
-        from packages.llm_analysis.prefilter import make_prefilter_fn
-        prefilter_fn = make_prefilter_fn(
-            client, pending_claims=pending_fp_claims,
+        from packages.llm_analysis.prefilter import (
+            make_prefilter_fn,
+            should_enable_prefilter,
         )
+        if should_enable_prefilter(client):
+            prefilter_fn = make_prefilter_fn(
+                client, pending_claims=pending_fp_claims,
+            )
+        else:
+            logger.debug(
+                "fast-tier prefilter disabled because it resolves to the "
+                "primary analysis model"
+            )
 
     analysis_results = dispatch_task(
         AnalysisTask(profile=profile, allow_unreachable=allow_unreachable),
@@ -1137,6 +1184,7 @@ def orchestrate(
 
     # Fallback: if external LLM failed entirely, try CC
     if (dispatch_mode == "external_llm"
+            and _subscription_agent is None
             and analysis_results
             and all("error" in r for r in analysis_results)):
         from core.llm.cc_adapter import resolve_claude_cli
@@ -1175,6 +1223,20 @@ def orchestrate(
             # detection) must see the single-contributor reality of
             # the fallback, not the external panel that never ran.
             role_resolution = cc_role_resolution
+
+    if (_subscription_agent is not None
+            and analysis_results
+            and all("error" in r for r in analysis_results)):
+        recovery = (
+            "codex login" if _subscription_agent == "codex"
+            else "opencode auth login"
+        )
+        print(
+            f"\n  All {_subscription_agent} subscription calls failed; "
+            f"run `{recovery}` and inspect the first analysis error. "
+            "No cross-host fallback was attempted.",
+            file=sys.stderr,
+        )
 
     # Index results for downstream tasks
     # Multi-model: multiple results per finding — pick best as primary,
@@ -1282,8 +1344,9 @@ def orchestrate(
     # CrossFamilyCheckTask  → Re-check suspicious responses via different family
     # RetryTask             → Stage F: self-contradiction check + retry
     # ConsensusTask         → Second model votes (if configured)
-    # ExploitTask/PatchTask → Generate code (only for final-verdict exploitable)
-    # GroupAnalysisTask     → Cross-finding patterns
+    # Evidence graph        → Invariants, primitives, and attack chains
+    # ChainAnalysisTask     → Review viable cross-finding chains
+    # ExploitTask/PatchTask → Generate code (only after reconciliation)
 
     # Multi-model correlation (pure Python, no LLM) — precompute
     # FIRST so downstream stages (cross-family check, retry,
@@ -1621,64 +1684,14 @@ def orchestrate(
                     _drop_hallucinated_finding_ids(aggregation, results_by_id)
                     break
 
-    # Exploit/patch generation — after final verdict
-    # CC analysis may produce exploits/patches inline via schema. ExploitTask/PatchTask
-    # only select findings that are exploitable AND missing exploit_code/patch_code,
-    # so this is a no-op when CC already generated them.
-    if not no_exploits:
-        dispatch_task(
-            ExploitTask(profile=profile), findings, dispatch_fn, role_resolution,
-            results_by_id, cost_tracker, max_parallel,
-        )
-
-    # checkers_dir lets the patch gate replay synthesized checkers
-    # saved by checker synthesis into the run dir (best-effort —
-    # absent dir just degrades detector resolution). Shared with the
-    # merge step's inline-patch gate below.
-    _checkers_dir = (out_dir / "checkers") if out_dir is not None else None
-    # Finding ids whose patch was gated by PatchTask.finalize — the
-    # merge step trusts those records' stored gate annotations and
-    # gates everything else (inline CC-schema patches).
-    _pre_gated_ids: set[str] = set()
-    if not no_patches:
-        _patch_task = PatchTask(profile=profile, checkers_dir=_checkers_dir)
-        dispatch_task(
-            _patch_task,
-            findings, dispatch_fn, role_resolution,
-            results_by_id, cost_tracker, max_parallel,
-        )
-        _pre_gated_ids = _patch_task.gated_ids
-
-    elapsed = time.monotonic() - start_time
-
     # --- Structural grouping (pure Python, no LLM) ---
     groups = _structural_grouping(findings)
     if groups:
         n = len(groups)
         print(f"\n  Structural grouping: {n} group{'s' if n != 1 else ''} found")
 
-    # --- Group analysis ---
-    # Pass `findings` so GroupAnalysisTask can call
-    # evidence_blocks_for_finding per group member — surfaces shared-
-    # hazard patterns to the cross-finding analysis (e.g. "all 3
-    # group members hit strcpy in different functions"). Without
-    # `findings`, only analysis results are available, which lack
-    # repo_path + metadata.name needed by the SI cache lookup.
-    group_task = GroupAnalysisTask(
-        results_by_id=results_by_id, findings=findings, profile=profile,
-    )
-    group_results = dispatch_task(
-        group_task, groups, dispatch_fn, role_resolution,
-        results_by_id, cost_tracker, max_parallel,
-    )
-    group_analyses = {}
-    for r in group_results:
-        gid = r.get("finding_id")  # group_id comes through as finding_id
-        if gid and "error" not in r:
-            group_analyses[gid] = r
-
     # --- Reconcile dataflow validation ---
-    # All analysis-stage tasks (consensus, judge, retry, group) have run.
+    # All per-finding analysis stages (consensus, judge, retry) have run.
     # Apply downgrades from the validation pass that were deferred to
     # avoid biasing those tasks. Re-scoring CVSS happens inside
     # reconcile_dataflow_validation so the downgrade is consistent
@@ -1699,6 +1712,67 @@ def orchestrate(
                 f"after consensus/judge"
             )
 
+    # Build a compact, deterministic investigation graph. Unlike the old
+    # same-file/same-rule group prompts, LLM work is restricted to explicit
+    # capability chains whose component findings survived reconciliation.
+    from packages.llm_analysis.investigation import build_investigation_graph
+    investigation = build_investigation_graph(findings, results_by_id)
+    packs_by_id = {
+        pack["id"]: pack for pack in investigation["evidence_packs"]
+    }
+    primitives_by_id = {
+        primitive["id"]: primitive
+        for primitive in investigation["primitives"]
+    }
+    chain_items = []
+    for chain in investigation["attack_chains"]:
+        pack_ids = [
+            primitives_by_id[primitive_id]["evidence_pack"]
+            for primitive_id in chain["primitive_ids"]
+            if primitive_id in primitives_by_id
+        ]
+        chain_items.append({
+            **chain,
+            "evidence_packs": [packs_by_id[pack_id] for pack_id in pack_ids],
+        })
+    chain_results_by_id: dict[str, Any] = {}
+    chain_results = dispatch_task(
+        ChainAnalysisTask(profile=profile), chain_items, dispatch_fn,
+        role_resolution, chain_results_by_id, cost_tracker, max_parallel,
+    )
+    chain_analyses = {
+        result.get("finding_id"): {
+            key: value for key, value in result.items()
+            if key != "finding_id" and not key.startswith("_")
+        }
+        for result in chain_results
+        if result.get("finding_id") and "error" not in result
+    }
+
+    # Generate artifacts only after mechanical dataflow reconciliation has
+    # applied its final verdict. This avoids spending calls on findings that
+    # the evidence layer has already refuted.
+    if not no_exploits:
+        dispatch_task(
+            ExploitTask(profile=profile), findings, dispatch_fn, role_resolution,
+            results_by_id, cost_tracker, max_parallel,
+        )
+
+    # checkers_dir lets the patch gate replay synthesized checkers saved by
+    # checker synthesis into the run directory.
+    _checkers_dir = (out_dir / "checkers") if out_dir is not None else None
+    _pre_gated_ids: set[str] = set()
+    if not no_patches:
+        _patch_task = PatchTask(profile=profile, checkers_dir=_checkers_dir)
+        dispatch_task(
+            _patch_task,
+            findings, dispatch_fn, role_resolution,
+            results_by_id, cost_tracker, max_parallel,
+        )
+        _pre_gated_ids = _patch_task.gated_ids
+
+    elapsed = time.monotonic() - start_time
+
     # --- Merge and write ---
     per_finding_results = list(results_by_id.values())
     merged = _merge_results(report, per_finding_results,
@@ -1706,14 +1780,17 @@ def orchestrate(
                             checkers_dir=_checkers_dir,
                             pre_gated_ids=_pre_gated_ids)
     merged["cross_finding_groups"] = groups
+    merged["invariants"] = investigation["invariants"]
+    merged["primitives"] = investigation["primitives"]
+    merged["attack_chains"] = investigation["attack_chains"]
+    if chain_analyses:
+        merged["chain_analyses"] = chain_analyses
     if dataflow_validation_enabled:
         merged["dataflow_validation"] = {
             **(validation_metrics or {}),
             "n_applied_downgrades": n_applied_downgrades,
             "n_soft_downgrades": n_soft_downgrades,
         }
-    if group_analyses:
-        merged["group_analyses"] = group_analyses
     if correlation:
         merged["correlation"] = correlation
     if aggregation:
@@ -1769,7 +1846,8 @@ def orchestrate(
         "cross_family_disputes": cross_family_disputes,
         "low_confidence_retries": retries,
         "low_confidence_remaining": low_confidence,
-        "group_analyses": len(group_analyses),
+        "group_analyses": 0,
+        "chain_analyses": len(chain_analyses),
         "correlation": correlation.get("summary") if correlation else None,
         "elapsed_seconds": round(elapsed, 1),
         "max_parallel": max_parallel,
@@ -1801,6 +1879,10 @@ def orchestrate(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     from core.json import save_json
+    save_json(out_dir / "evidence-packs.json", investigation["evidence_packs"])
+    save_json(out_dir / "invariants.json", investigation["invariants"])
+    save_json(out_dir / "primitives.json", investigation["primitives"])
+    save_json(out_dir / "attack-chains.json", investigation["attack_chains"])
     if correlation:
         save_json(out_dir / "correlation.json", correlation)
     if aggregation:

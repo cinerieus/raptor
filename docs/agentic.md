@@ -83,14 +83,19 @@ marked *(flag)* only fire when explicitly requested:
    matrix and confidence signals.
 6. **Aggregation** *(`--aggregate`)* -- LLM synthesis into `aggregation.json`,
    consumed by the final report.
-7. **Exploit PoCs** -- for findings with a final exploitable verdict (skip:
+7. **Mechanical reconciliation** -- applies dataflow refutations and confidence
+   downgrades before spending calls on generated artifacts.
+8. **Investigation graph** -- writes compact evidence packs, invariants,
+   capability primitives, and candidate attack chains. High-confidence rejected
+   primitives prune dependent chains; uncertain primitives never do.
+9. **Chain review** -- reviews at most ten highest-priority unpruned chains.
+10. **Exploit PoCs** -- for findings with a reconciled exploitable verdict (skip:
    `--no-exploits`).
-8. **Patches** -- secure fixes for exploitable findings (skip: `--no-patches`).
-9. **Cross-finding analysis** -- structural grouping, shared root causes, attack
-   chaining.
-10. **Gap audit** *(`--gap-audit`)* -- audits the coverage residual as a
-    sibling `/audit` run (see [Enrichment flags](#enrichment-flags)).
-11. **Validation** *(`--validate`)* -- validates exploitable findings
+11. **Patches** -- secure fixes for reconciled exploitable findings (skip:
+   `--no-patches`).
+12. **Gap audit** *(`--gap-audit`)* -- audits the coverage residual as a
+   sibling `/audit` run (see [Enrichment flags](#enrichment-flags)).
+13. **Validation** *(`--validate`)* -- validates exploitable findings
     (merged with the gap-audit findings when both flags are set).
 
 Cost is tracked in real time with an adaptive budget cutoff (default $10;
@@ -114,7 +119,7 @@ flags add architectural context, a coverage audit, and a validation post-pass:
 
 | Flag | What it does |
 |------|--------------|
-| `--understand` | Runs `/understand --map` **before** scanning, producing `context-map.json` (entry points, trust boundaries, sinks).  Per-finding prompts carry the architectural role so the analyst knows whether a function is an entry point, a sink, or interior code. |
+| `--understand` | Runs `/understand --map` **before** scanning, producing `context-map.json` (entry points, trust boundaries, sinks). Per-finding prompts carry the architectural role. Source-verified mapped source-to-sink paths not already reported become invariant-first leads and pass through normal analysis and validation. |
 | `--gap-audit` | **After** analysis, runs the [/audit](audit.md) orchestrator over the coverage residual -- functions no phase reviewed -- as a sibling audit run.  See below. |
 | `--validate` | **After** the pipeline completes, runs the full [validation pipeline](validation.md) on findings flagged exploitable or high-confidence.  Creates a sibling validate run that auto-discovers the `--understand` map. |
 
@@ -152,9 +157,9 @@ Notes on the moving parts:
   audit's adversarial reviewer; `--gap-audit-no-adversarial` suppresses
   the auto-enable.  The decision is recorded in the report's phase block
   (`adversarial`, plus `adversarial_opted_out` when suppressed).
-- **LLM transport** -- an explicit `--model` or a configured external LLM
-  carries the audit; otherwise Claude Code on PATH runs it via the
-  claudecode transport, gated on the target-repo trust check.  Only a
+- **LLM transport** -- a host-bound session uses its selected Claude Code,
+  Codex, or OpenCode CLI. Standalone runs use an explicit `--model`, a
+  configured provider, or the legacy Claude Code fallback. Only a
   blocked repo or a truly LLM-less environment skips the pass (with a
   reason).
 - **Map dependency** -- with no `--understand` and no context map (even a
@@ -190,13 +195,13 @@ kill the run.  Existing project threat models are preserved unless
 
 ## LLM dispatch
 
-Findings are dispatched for analysis one of two ways:
+Findings are dispatched for analysis in two contexts:
 
-- **Claude Code on PATH** -- spawns `claude -p` sub-agents in separate
-  processes (parallel by default; `--sequential` forces one at a time).
-- **External LLM configured** -- dispatches via API calls using the provider
-  configured in `models.json` or environment variables.  When both are
-  available, the external LLM is preferred; Claude Code is the fallback.
+- **Host-bound session** -- spawns the selected Claude Code, Codex, or
+  OpenCode CLI in separate processes. The selected host is authoritative.
+- **Standalone run** -- dispatches through the provider configured in
+  `models.json` or environment variables, with Claude Code as the legacy
+  no-key fallback.
 
 If **neither** is available, the pipeline produces prep-only output (scan,
 dedup, prep, dataflow -- no analysis).  In that mode the findings sit in
@@ -299,6 +304,10 @@ or this session's project directory).
 | File | Contents |
 |------|----------|
 | `agentic-report.md` | Human-readable summary |
+| `evidence-packs.json` | Compact per-finding evidence used for chain review and resumable inspection |
+| `invariants.json` | Security properties derived from discovered capabilities |
+| `primitives.json` | Finding-backed attacker capabilities and viability state |
+| `attack-chains.json` | Candidate and dependency-pruned multi-finding exploit chains |
 | `autonomous_analysis_report.json` | Structured data -- all findings with analysis, verdicts, and metadata |
 | `suppressions.jsonl` | Pre-LLM suppression audit trail (binary oracle, guard dominance, fail-open channel, SAGE prior verdicts) |
 
@@ -306,7 +315,7 @@ The report carries one of three modes:
 
 - **`prep_only`** -- no LLM ran; findings have `code`, `surrounding_context`,
   `dataflow`, and `feasibility` attached for manual review.
-- **`full`** -- sequential LLM analysis (`--sequential`, or no Claude Code).
+- **`full`** -- sequential LLM analysis (`--sequential`, or no parallel host transport).
 - **`orchestrated`** -- parallel analysis; findings carry `analysed_by`,
   `cost_usd`, `duration_seconds`, plus `cross_finding_groups` and any
   `consensus`/`judge` metadata.

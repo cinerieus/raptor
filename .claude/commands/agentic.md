@@ -100,9 +100,11 @@ The dispatch pipeline runs these tasks in sequence:
 6. **JudgeTask** — non-blind review of primary reasoning (if `--judge`)
 7. **Correlation** — multi-model agreement matrix + confidence signals (if 2+ `--model`)
 8. **AggregationTask** — final synthesis into `aggregation.json`, consumed by `agentic-report.md` (if `--aggregate`)
-9. **ExploitTask** — PoCs for final-verdict exploitable findings
-10. **PatchTask** — secure fixes for exploitable findings
-11. **GroupAnalysisTask** — cross-finding patterns (shared root cause, attack chaining)
+9. **Mechanical reconciliation** — apply dataflow refutations before artifact generation
+10. **Investigation graph** — evidence packs, invariants, primitives, and attack chains
+11. **ChainAnalysisTask** — review up to ten viable, high-priority chains
+12. **ExploitTask** — PoCs for reconciled exploitable findings
+13. **PatchTask** — secure fixes for reconciled exploitable findings
 
 Cost tracking is real-time with adaptive budget cutoff.
 
