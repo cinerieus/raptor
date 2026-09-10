@@ -146,12 +146,89 @@ def test_init_inventory_worker_resets_sigterm() -> None:
     disposition — inherited parent handlers must never run inside an
     extractor worker."""
     prior = signal.getsignal(signal.SIGTERM)
+    # The initializer also detaches fd 1/2 — running it IN-PROCESS
+    # would point the test runner's own stdio at /dev/null and
+    # swallow everything pytest prints afterwards (including failure
+    # reports under -s). Save and restore the real descriptors.
+    saved_out, saved_err = os.dup(1), os.dup(2)
     try:
         signal.signal(signal.SIGTERM, _blocking_handler)
         _init_inventory_worker(*_INIT_ARGS)
         assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
     finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
         signal.signal(signal.SIGTERM, prior)
+
+
+def _write_to_inherited_stdio() -> None:
+    os.write(1, b"WORKER-STDOUT-LEAK")
+    os.write(2, b"WORKER-STDERR-LEAK")
+
+
+def test_worker_stdio_detached_from_parent(capfd) -> None:
+    """Initialized workers must not hold (or write to) the parent's
+    stdout/stderr: a worker that never holds the pipe cannot keep a
+    CI step's stream open no matter how it dies."""
+    ctx = multiprocessing.get_context("fork")
+    pool = ProcessPoolExecutor(
+        max_workers=1, mp_context=ctx,
+        initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+    )
+    try:
+        pool.submit(_write_to_inherited_stdio).result(timeout=60)
+    finally:
+        # The bounded teardown, not shutdown(wait=True): a fork
+        # worker can wedge on a fork-frozen lock even AFTER its task
+        # completed (pytest runs threads too), and an unbounded join
+        # then hangs the whole test session.
+        _shutdown_pool_nowait(pool)
+    out, err = capfd.readouterr()
+    assert "WORKER-STDOUT-LEAK" not in out
+    assert "WORKER-STDERR-LEAK" not in err
+
+
+def _fake_processing_error(fp: Path) -> dict:
+    return {"path": str(fp), "_excluded": True,
+            "_reason": "processing_error", "_pattern": "FakeError"}
+
+
+def test_processing_error_is_revoiced_by_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog,
+) -> None:
+    """With worker stdio detached, the worker's own failure WARNING
+    dies in /dev/null and the future succeeds — the parent must log
+    the processing_error record or the failure is visible only in
+    the artifact."""
+    import logging
+
+    from core.inventory import builder as builder_mod
+
+    src = tmp_path / "proj"
+    src.mkdir()
+    for i in range(12):  # >10 files engages the parallel path
+        (src / f"m_{i:02d}.py").write_text("def f():\n    return 1\n")
+    # Fork context so the pool's children inherit the monkeypatch
+    # (forkserver children are spawned from a pre-patch template).
+    monkeypatch.setattr(
+        builder_mod, "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    monkeypatch.setattr(
+        builder_mod, "_process_file_in_worker", _fake_processing_error,
+    )
+    with caplog.at_level(logging.WARNING, logger=builder_mod.logger.name):
+        inv = builder_mod.build_inventory(
+            str(src), output_dir=str(tmp_path / "out"),
+        )
+    assert any(
+        "recorded as processing_error" in r.getMessage()
+        for r in caplog.records
+    )
+    reasons = {e["reason"] for e in inv.get("excluded_files", [])}
+    assert "processing_error" in reasons
 
 
 def test_fork_worker_sheds_inherited_sigterm_handler() -> None:

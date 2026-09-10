@@ -746,6 +746,14 @@ def build_inventory(
         # drivers — the sweep's own shape) is lazy: the constructor
         # succeeds and the first submit dies.
         pool = _make_extractor_pool(initargs)
+        # Process-pool workers run with stdio detached (see
+        # _init_inventory_worker), so their own per-file WARNING (with
+        # traceback) never reaches the console and the future SUCCEEDS
+        # with an _excluded record — the parent must re-voice the
+        # failure or it is visible only in the artifact. Thread-pool
+        # fallback workers log in-process; re-voicing there would
+        # print every failure twice.
+        worker_stdio_detached = pool is not None
         if pool is None:
             pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
@@ -771,7 +779,15 @@ def build_inventory(
             nonlocal skipped
             fp = futures[future]
             try:
-                _collect_result(future.result())
+                result = future.result()
+                if (worker_stdio_detached and isinstance(result, dict)
+                        and result.get("_reason") == "processing_error"):
+                    logger.warning(
+                        "inventory: per-file extractor failed on %s "
+                        "(%s) — recorded as processing_error",
+                        fp, result.get("_pattern"),
+                    )
+                _collect_result(result)
             except Exception as exc:  # noqa: BLE001 — one bad file must not sink the pool
                 logger.warning(
                     "inventory: per-file extractor raised on "
@@ -1314,6 +1330,25 @@ def _init_inventory_worker(
     except (ValueError, OSError):
         # ValueError: not the main thread (thread-pool fallback path
         # reuses none of this, but be safe); OSError: exotic platform.
+        pass
+    # Detach the worker from the parent's stdout/stderr. Workers
+    # inherit those descriptors, and when the parent's stdout is a
+    # pipe (CI step streams), any worker that outlives the parent —
+    # however it got there — keeps the pipe open and the pipe's
+    # reader waiting; the teardown escalation makes that window
+    # small, this makes the worker unable to hold it at all. Nothing
+    # owned is lost: per-file failures come back as processing_error
+    # records that the parent re-voices (see _on_done), and direct
+    # worker writes were unowned noise interleaving into the
+    # parent's stream. Never raise.
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
+    except OSError:
         pass
     _worker_ctx["target"] = target
     _worker_ctx["exclude_patterns"] = exclude_patterns
