@@ -18,11 +18,15 @@ import os
 import signal
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from pathlib import Path
 from types import FrameType
 
 import pytest
 
-from core.inventory.builder import _shutdown_pool_nowait
+from core.inventory.builder import (
+    _init_inventory_worker,
+    _shutdown_pool_nowait,
+)
 
 pytestmark = pytest.mark.skipif(
     not hasattr(os, "fork"),
@@ -128,3 +132,48 @@ def test_teardown_no_ops_on_thread_pool() -> None:
     pool = ThreadPoolExecutor(max_workers=1)
     pool.submit(lambda: None).result(timeout=30)
     _shutdown_pool_nowait(pool)  # must not raise
+
+
+def _report_sigterm_is_default() -> bool:
+    return signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+_INIT_ARGS = (Path("."), [], True, {}, False, None, None, None)
+
+
+def test_init_inventory_worker_resets_sigterm() -> None:
+    """The worker initializer must restore the default SIGTERM
+    disposition — inherited parent handlers must never run inside an
+    extractor worker."""
+    prior = signal.getsignal(signal.SIGTERM)
+    try:
+        signal.signal(signal.SIGTERM, _blocking_handler)
+        _init_inventory_worker(*_INIT_ARGS)
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, prior)
+
+
+def test_fork_worker_sheds_inherited_sigterm_handler() -> None:
+    """End to end through a real fork pool: a parent-installed
+    SIGTERM handler must not survive into the worker."""
+    prior = signal.getsignal(signal.SIGTERM)
+    pool = None
+    try:
+        signal.signal(signal.SIGTERM, _blocking_handler)
+        ctx = multiprocessing.get_context("fork")
+        pool = ProcessPoolExecutor(
+            max_workers=1, mp_context=ctx,
+            initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+        )
+        assert pool.submit(_report_sigterm_is_default).result(
+            timeout=60,
+        ) is True
+    finally:
+        signal.signal(signal.SIGTERM, prior)
+        if pool is not None:
+            # The bounded teardown, not shutdown(wait=True): a fork
+            # worker can wedge on a fork-frozen lock even AFTER its
+            # task completed (pytest runs threads too), and an
+            # unbounded join then hangs the whole test session.
+            _shutdown_pool_nowait(pool)
