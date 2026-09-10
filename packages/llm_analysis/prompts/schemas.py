@@ -12,6 +12,14 @@ ANALYSIS_SCHEMA = {
     "reasoning": "string",
     "attack_scenario": "string",
     "prerequisites": "list of strings",
+    "evidence_status": (
+        "string (confirmed/rejected/needs_more_evidence) - whether the "
+        "available evidence supports a terminal decision"
+    ),
+    "confirmed_edges": "list of source, guard, reachability, and sink edges proven by evidence",
+    "missing_edges": "list of exploit-chain edges that remain unproven",
+    "required_preconditions": "list of conditions required for exploitation and who controls them",
+    "next_evidence_action": "string or null - most useful bounded check when evidence is incomplete",
     "impact": "string",
     "cvss_vector": "string - CVSS v3.1 vector (e.g. CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H)",
     "cvss_score_estimate": "float or null - computed from cvss_vector, do not estimate manually",

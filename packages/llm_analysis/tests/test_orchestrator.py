@@ -935,6 +935,7 @@ class TestWeakenedDefenses:
 
         mock_model = MagicMock()
         mock_model.model_name = "ollama/llama3"
+        mock_model.provider = "ollama"
 
         role_resolution = {
             "analysis_model": mock_model,
@@ -943,6 +944,57 @@ class TestWeakenedDefenses:
             "fallback_models": [],
         }
         return fake_config, role_resolution
+
+    def test_subscription_provider_runs_probe_and_never_falls_back_cross_host(
+        self, tmp_path, capsys,
+    ):
+        report = _make_prep_report()
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(report))
+        fake_config, role_res = self._make_external_llm_mocks()
+        model = role_res["analysis_model"]
+        model.provider = "codexcli"
+        model.model_name = "session-default"
+        role_res["analysis_models"] = [model]
+
+        from core.security.envelope_probe import ProbeResult
+        passed = ProbeResult(
+            compatible=True, valid_json=True, correct_verdict=True,
+            nonce_leaked=False, raw_response="{}", error=None,
+        )
+        probe_calls = []
+
+        def fake_probe(*args, **kwargs):
+            probe_calls.append((args, kwargs))
+            return passed
+
+        def all_errors(task, findings, *args, **kwargs):
+            return [
+                {"finding_id": f["finding_id"], "error": "transport failed"}
+                for f in findings
+            ]
+
+        with patch("core.llm.config.resolve_model_roles", return_value=role_res), \
+             patch("core.llm.client.LLMClient"), \
+             patch("packages.llm_analysis.dispatch.dispatch_task",
+                   side_effect=all_errors), \
+             patch("core.security.envelope_probe.probe_envelope_compatibility",
+                   side_effect=fake_probe), \
+             patch("core.llm.cc_adapter.resolve_claude_cli") as claude:
+            result = orchestrate(
+                prep_report_path=report_path,
+                repo_path=tmp_path,
+                out_dir=tmp_path / "orch",
+                llm_config=fake_config,
+                no_exploits=True,
+                no_patches=True,
+                dataflow_validation_enabled=False,
+            )
+
+        assert probe_calls
+        claude.assert_not_called()
+        assert "No cross-host fallback was attempted" in capsys.readouterr().err
+        assert result is not None
 
     def _run_with_failing_probe(self, tmp_path, accept=False):
         """Helper: dispatch with an external LLM model that fails the canary probe."""

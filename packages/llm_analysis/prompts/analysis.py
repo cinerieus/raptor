@@ -207,6 +207,13 @@ If your reasoning hedges ("maybe", "in theory"), verify the claim or rule it out
 
 **Final assessment:**
 Based on your analysis through Stages A-D:
+- Set evidence_status to confirmed only when attacker control, reachability,
+  guard failure, and impact are supported. Set rejected only when evidence
+  disproves a required edge. Otherwise use needs_more_evidence.
+- List confirmed_edges and missing_edges explicitly. For every required
+  precondition, state who controls it and whether another primitive can
+  satisfy or bypass it. If evidence is incomplete, name one bounded
+  next_evidence_action that would most reduce uncertainty.
 - Set is_true_positive based on whether the vulnerability pattern is real
 - Set is_exploitable based on whether a realistic attack path exists
 - Rate exploitability_score from 0.0 (impossible) to 1.0 (trivial to exploit)

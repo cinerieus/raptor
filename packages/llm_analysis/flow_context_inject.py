@@ -124,6 +124,15 @@ def clear_flow_context_cache() -> None:
         _FC_CACHE.clear()
 
 
+def prepared_context_map(repo_path: Path) -> dict[str, Any] | None:
+    """Return the prepared map for invariant seeding, if one was discovered."""
+    with _FC_LOCK:
+        entry = _FC_CACHE.get(str(Path(repo_path).resolve()))
+        if entry is None or not isinstance(entry[2], dict):
+            return None
+        return dict(entry[2])
+
+
 def context_blocks_for_finding(
     finding: dict[str, Any],
 ) -> tuple[UntrustedBlock, ...]:
