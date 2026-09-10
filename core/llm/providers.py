@@ -1232,10 +1232,15 @@ def _normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
     Simple format: {"field": "type description"}
     JSON Schema format: {"properties": {...}, "required": [...]}
 
-    Returns the schema unchanged if already in JSON Schema format.
+    Existing JSON Schema objects are preserved, apart from filling the
+    explicit object type required by strict CLI validators.
     """
     if "properties" in schema:
-        return schema  # Already JSON Schema
+        if schema.get("type") == "object":
+            return schema
+        normalized = dict(schema)
+        normalized["type"] = "object"
+        return normalized
 
     type_aliases = {
         "bool": "boolean", "str": "string", "int": "integer",
@@ -1286,7 +1291,15 @@ def _normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
         desc_lower = str(field_desc).lower()
         if "optional" not in desc_lower and "or null" not in desc_lower:
             required.append(field_name)
-    return {"properties": properties, "required": required}
+    # Claude Code validates ``--json-schema`` in strict mode.  A schema
+    # containing object-only keywords without an explicit object type is
+    # rejected before inference, even though looser validators infer the
+    # intended shape from ``properties``.
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
 
 
 def _codex_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
