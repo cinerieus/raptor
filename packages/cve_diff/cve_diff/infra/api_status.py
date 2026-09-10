@@ -159,6 +159,13 @@ def render_startup_banner() -> str:
     # for the CodeQL false-positive rationale).
     _, n_configured, via_dispatcher = llm_auth_status()
     lines.append("LLM auth:")
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected in ("claude", "codex", "opencode"):
+        lines.append(
+            f"  ✓ {selected} CLI subscription selected; provider API keys "
+            "are optional and will not override it"
+        )
     if via_dispatcher:
         lines.append(
             "  ✓ credential-isolation dispatcher "
@@ -169,7 +176,7 @@ def render_startup_banner() -> str:
         lines.append(
             f"  ✓ {n_configured} LLM provider env var(s) set"
         )
-    if not via_dispatcher and n_configured == 0:
+    if not selected and not via_dispatcher and n_configured == 0:
         lines.append(
             "  — no LLM provider env var and no dispatcher; cve-diff "
             "will fall back to Claude Code OAuth for Anthropic models. "

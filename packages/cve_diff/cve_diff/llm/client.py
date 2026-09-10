@@ -65,7 +65,7 @@ def _provider_for_model(model_id: str, timeout_s: float) -> LLMProvider:
     decision = resolve_auth(model_id)
     config = ModelConfig(
         provider=decision.provider,
-        model_name=model_id,
+        model_name=decision.model_id or model_id,
         api_key=decision.api_key,
         timeout=int(timeout_s),
     )
