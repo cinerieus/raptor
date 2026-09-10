@@ -14,8 +14,8 @@ security conventions — lives in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 RAPTOR is a Python **execution layer** (scanning, subprocess
 management, SARIF parsing, LLM dispatch, cost tracking — no judgement
-calls) driven by a Claude Code **decision layer** (`.claude/`,
-`tiers/`, `CLAUDE.md`) that prioritises findings, interprets results,
+calls) driven by an agent **decision layer** (`AGENTS.md`, `CLAUDE.md`,
+`.claude/`, `tiers/`) that prioritises findings, interprets results,
 and decides what to do next. The split is deliberate: the Python layer
 runs standalone in CI, the decision layer drives it interactively.
 When you add a capability, the mechanical part goes in Python and the
@@ -60,8 +60,8 @@ detail):
 - **`codeql`** — CodeQL database creation, suite execution, and
   dataflow validation (SMT path feasibility plus LLM review).
 - **`llm_analysis`** — LLM exploitability analysis of findings; the
-  orchestrator dispatches `claude -p` sub-agents and correlates
-  multi-model verdicts.
+  host-bound transport dispatches the selected agent CLI and correlates
+  multi-model verdicts. Standalone runs use the configured provider.
 - **`exploitability_validation`** — the staged `/validate` pipeline
   proving findings real, reachable, and exploitable.
 - **`fuzzing`** — AFL++ campaign orchestration, corpus management,

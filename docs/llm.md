@@ -1,5 +1,53 @@
 # LLM Providers
 
+## Coding-agent subscription transport
+
+`bin/raptor --agent claude|codex|opencode` selects orchestration. For analysis,
+explicit analysis `--model` flags win, followed by a usable `models.json`, then
+API-key/environment detection. The selected authenticated CLI is the fallback
+when none of those supplies an analysis model. Starting `claude`, `codex`, or
+`opencode` directly from the checkout does the same through repository rules
+and host session detection. Claude uses `claude -p`, Codex uses `codex exec`,
+and OpenCode uses `opencode run`. When subscription inference is selected,
+ambient model API keys are stripped from that inference subprocess. The host
+CLI's own stored authentication remains available.
+
+An explicit launcher `--model` is passed to both the interactive host and its
+analysis children. Without that flag, each CLI resolves its normal configured
+model, aliases, provider, endpoint, and stored authentication. A model change
+made only inside the interactive session cannot be observed by a separate CLI
+process; restart with `raptor --agent <host> --model <model>` to pin both
+layers.
+
+Codex and OpenCode inference children run from an empty RAPTOR scratch
+workspace while retaining their operator-owned user configuration for model
+and provider routing. Codex ignores project rules and disables MCP, hooks,
+plugins, skills, web access, and executable tools through explicit CLI
+overrides. OpenCode runs with `--pure`, a forced tool-disabled
+`raptor-inference` agent, empty instructions, plugins, and MCP configuration,
+and deny-all permissions. OpenCode runtime data and stored authentication are
+staged under the scratch workspace while its user configuration remains
+read-only. RAPTOR also applies its read-restricted, hostname-allowlisted network
+sandbox around both CLIs. Authentication is checked through `codex login
+status` or `opencode auth list`; RAPTOR does not parse credentials. RAPTOR
+converts descriptive task schemas to valid object schemas for both
+subscription CLIs. Codex additionally receives its strict JSON Schema form,
+including closed objects, complete required lists, and nullable optional fields.
+Other provider schema paths retain their existing behavior.
+Subscription usage has no reliable monetary price signal, so RAPTOR enforces a
+process-wide
+100-call ceiling. Set `RAPTOR_AGENT_CLI_MAX_CALLS` to another positive integer
+when a run deliberately needs more or fewer calls. The existing
+`--max-findings` cap remains the primary analysis-volume control.
+OpenCode installations using another provider endpoint must add its hostname
+(hostname only, no scheme or path) to the comma-separated
+`RAPTOR_AGENT_CLI_PROXY_HOSTS` allowlist.
+
+Direct API providers below are optional. They are selected for standalone
+Python runs or explicit provider configuration when `RAPTOR_AGENT` is unset.
+Existing `models.json` role splits, API credentials, local providers,
+consensus, judge, aggregate, and fallback routing are unchanged.
+
 RAPTOR uses large language models for vulnerability analysis, exploit generation, dataflow
 validation, and autonomous decision-making. This guide covers provider configuration,
 model selection, multi-model workflows, and cost management.
