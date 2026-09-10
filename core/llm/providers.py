@@ -5150,6 +5150,121 @@ def _guard_transport_model_shape(
         raise ModelTransportMismatchError(msg)
 
 
+class AgentCLILLMProvider(LLMProvider):
+    """Codex/OpenCode subscription-backed subprocess transport."""
+
+    def __init__(self, config: ModelConfig, agent: str) -> None:
+        super().__init__(config)
+        self.agent = agent
+
+    def context_window(self) -> int:
+        return self.config.max_context
+
+    def generate(
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any,
+    ) -> LLMResponse:
+        from .agent_cli_adapter import run_agent_cli
+
+        text, _, duration = run_agent_cli(
+            self.agent,
+            prompt,
+            system_prompt=system_prompt,
+            model=self.config.model_name,
+            timeout_s=kwargs.pop("timeout_s", self.config.timeout),
+        )
+        estimated_in = self.estimate_tokens((system_prompt or "") + prompt)
+        estimated_out = self.estimate_tokens(text)
+        total = estimated_in + estimated_out
+        self.track_usage(
+            tokens=total,
+            cost=0.0,
+            input_tokens=estimated_in,
+            output_tokens=estimated_out,
+            duration=duration,
+        )
+        return LLMResponse(
+            content=text,
+            model=self.config.model_name,
+            provider=f"{self.agent}cli",
+            tokens_used=total,
+            cost=0.0,
+            finish_reason="stop",
+            input_tokens=estimated_in,
+            output_tokens=estimated_out,
+            duration=duration,
+        )
+
+    def generate_structured(
+        self,
+        prompt: str,
+        schema: dict[str, Any],
+        system_prompt: str | None = None,
+        **kwargs: Any,
+    ) -> StructuredResponse:
+        from .agent_cli_adapter import run_agent_cli
+
+        raw, result, duration = run_agent_cli(
+            self.agent,
+            prompt,
+            system_prompt=system_prompt,
+            model=self.config.model_name,
+            schema=schema,
+            timeout_s=kwargs.pop("timeout_s", self.config.timeout),
+        )
+        if result is None:
+            raise RuntimeError(
+                f"{self.agent} CLI returned no structured result"
+            )
+        estimated_in = self.estimate_tokens(
+            (system_prompt or "") + prompt + json.dumps(schema)
+        )
+        estimated_out = self.estimate_tokens(raw)
+        total = estimated_in + estimated_out
+        self.track_usage(
+            tokens=total,
+            cost=0.0,
+            input_tokens=estimated_in,
+            output_tokens=estimated_out,
+            duration=duration,
+        )
+        return StructuredResponse(
+            result=result,
+            raw=raw,
+            cost=0.0,
+            tokens_used=total,
+            model=self.config.model_name,
+            provider=f"{self.agent}cli",
+            duration=duration,
+            input_tokens=estimated_in,
+            output_tokens=estimated_out,
+        )
+
+    def supports_tool_use(self) -> bool:
+        return True
+
+    def supports_parallel_tools(self) -> bool:
+        return False
+
+    def turn(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        system: str | None = None,
+        max_tokens: int = 4096,
+        cache_control: CacheControl = _DEFAULT_CACHE_CONTROL,
+        **provider_specific: Any,
+    ) -> TurnResponse:
+        return self._tool_use_fallback(
+            messages,
+            tools,
+            system=system,
+            max_tokens=max_tokens,
+            cache_control=cache_control,
+            **provider_specific,
+        )
+
+
 def create_provider(config: ModelConfig) -> LLMProvider:
     """
     Factory function to create appropriate provider.
@@ -5165,6 +5280,8 @@ def create_provider(config: ModelConfig) -> LLMProvider:
         LLMProvider instance
     """
     provider = config.provider.lower()
+    if provider in ("codexcli", "opencodecli"):
+        return AgentCLILLMProvider(config, provider.removesuffix("cli"))
     if provider in (
         "claudecode-resumable",
         "claude_code_resumable",

@@ -969,8 +969,13 @@ def detect_llm_availability() -> LLMAvailability:
 
     # Check Claude Code environment
     in_claude_code = bool(os.getenv("CLAUDECODE"))
+    selected_agent = os.getenv("RAPTOR_AGENT", "").strip().lower()
+    selected_cli = (
+        selected_agent in ("claude", "codex", "opencode")
+        and shutil.which(selected_agent) is not None
+    )
     claude_on_path = shutil.which("claude") is not None
-    claude_code = in_claude_code or claude_on_path
+    claude_code = in_claude_code or selected_cli or claude_on_path
 
     external_llm = (
         has_cloud_keys or has_config_file or has_ollama or has_dispatcher_route
