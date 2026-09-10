@@ -218,8 +218,21 @@ def run_sweep_and_report(
         sys.stderr.flush()
 
     prior_term = signal.getsignal(signal.SIGTERM)
+    handler_pid = os.getpid()
 
     def _on_term(signum: int, frame: object) -> None:
+        if os.getpid() != handler_pid:
+            # Fork-context children (inventory extractor workers, mp
+            # helpers) inherit this handler. The post-mortem below
+            # must never run in a child: its lock-taking
+            # (``_in_flight``) can block forever on a lock some
+            # sibling thread held at fork time — a terminate()d
+            # worker then never dies — and its output would
+            # interleave a bogus "sweep interrupted" summary into the
+            # real log. Die like an unhandled SIGTERM instead.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.raise_signal(signal.SIGTERM)
+            return
         _partial_summary("SIGTERM (cancellation / shutdown)")
         signal.signal(signal.SIGTERM, prior_term)
         signal.raise_signal(signal.SIGTERM)
