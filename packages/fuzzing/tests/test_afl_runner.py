@@ -124,6 +124,14 @@ class TestCreateDefaultCorpus:
 
         monkeypatch.setattr(mod, "prepare_builtin_seed_corpus",
                             fake_prepare)
+        # Ctor plumbing only — no real AFL++ needed. Stub the
+        # availability probe and command validation (the
+        # test_host_mode_never_stages pattern) so the test runs on
+        # hosts without afl-fuzz installed.
+        monkeypatch.setattr(mod.shutil, "which",
+                            lambda *_a, **_k: "/usr/bin/afl-fuzz")
+        monkeypatch.setattr(AFLRunner, "_validate_afl_command",
+                            lambda self: None)
         AFLRunner(
             binary_path=binary,
             output_dir=tmp_path / "out",
