@@ -245,7 +245,7 @@ With `--threat-model`, RAPTOR runs the map first, creates `threat-model.json` an
 - Stage E: binary exploit feasibility (when a compiled artefact is available)
 - Stage F: self-review -- did any earlier stage hedge or contradict itself?
 
-Findings that clear validation get exploit PoCs and patches generated. A cross-finding analysis runs at the end to find shared root causes and attack chains.
+Mechanical dataflow verdicts are reconciled before exploit or patch generation. Findings are then represented as compact evidence packs, invariants, capability primitives, and dependency-aware attack chains. Only the highest-priority unpruned chains receive an additional model review; uncertain primitives are retained for more evidence.
 
 `/validate` runs this same pipeline as a standalone step if you already have findings from a previous scan.
 
