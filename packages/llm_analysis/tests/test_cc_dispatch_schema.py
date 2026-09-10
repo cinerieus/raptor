@@ -72,6 +72,7 @@ class TestSchemaNormalisedForCCTransport:
         sent = self._invoke(monkeypatch, descriptive)
         # Real JSON Schema shape: properties with typed entries, not
         # bare descriptive strings the CLI validator would ignore.
+        assert sent["type"] == "object"
         assert "properties" in sent
         props = sent["properties"]
         assert props["reasoning"]["type"] == "string"
@@ -87,7 +88,7 @@ class TestSchemaNormalisedForCCTransport:
             "required": ["verdict"],
         }
         sent = self._invoke(monkeypatch, proper)
-        assert sent == proper
+        assert sent == {**proper, "type": "object"}
 
     def test_none_schema_stays_freeform(self, monkeypatch):
         assert self._invoke(monkeypatch, None) is None
