@@ -394,7 +394,7 @@ for tag in v3.1.0 v10.20.30; do
 
     # raptor-offset: NOT stamped — placeholder must survive untouched so
     # banner.py can inject the live version at render time.
-    BANNER_LINE=$(grep "Based on Claude Code" "$BANNER_PATH")
+    BANNER_LINE=$(grep "Agent-Agnostic Orchestration" "$BANNER_PATH")
     assert_contains "raptor-offset placeholder preserved" "$BANNER_LINE" "__VERSION__"
     assert_not_contains "raptor-offset not stamped with $tag" "$BANNER_LINE" "$tag"
 
@@ -455,7 +455,7 @@ assert_file_missing "conftest.py excluded"          "$ARCHIVE_DIR/conftest.py"
 
 # Archive ships the banner placeholder (rendered at runtime) and the stamped
 # baked VERSION the placeholder falls back to when there is no .git.
-ARCHIVE_BANNER=$(grep "Based on Claude Code" "$ARCHIVE_DIR/core/startup/assets/raptor-offset")
+ARCHIVE_BANNER=$(grep "Agent-Agnostic Orchestration" "$ARCHIVE_DIR/core/startup/assets/raptor-offset")
 assert_contains "archive banner keeps placeholder"   "$ARCHIVE_BANNER" "__VERSION__"
 ARCHIVE_CONFIG=$(cat "$ARCHIVE_DIR/core/config/__init__.py")
 assert_contains "archive config has stamped version" "$ARCHIVE_CONFIG" 'VERSION = "3.0.0"'

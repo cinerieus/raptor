@@ -62,6 +62,21 @@ def _make_stub_claude(tmp_path: Path) -> Path:
     return stub_dir
 
 
+def _make_stub_agent(tmp_path: Path, name: str) -> Path:
+    stub_dir = tmp_path / f"stub-{name}"
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / name
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo STUB_{name.upper()}_RAN\n"
+        'echo "AGENT_SEEN=${RAPTOR_AGENT:-}"\n'
+        'printf \'ARG:%s\\n\' "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub_dir
+
+
 def _launch(
     tmp_path: Path,
     *args: str,
@@ -91,6 +106,136 @@ def _launch(
         cwd=str(cwd or home),
         check=False,
     )
+
+
+def _launch_selected_agent(
+    tmp_path: Path, agent: str, *args: str,
+) -> subprocess.CompletedProcess:
+    stub_dir = _make_stub_agent(tmp_path, agent)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    tmpdir = tmp_path / "tmp"
+    tmpdir.mkdir(exist_ok=True)
+    return subprocess.run(
+        ["bash", str(LAUNCHER), "--agent", agent, *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={
+            "PATH": ":".join([str(stub_dir)] + _system_path_dirs()),
+            "HOME": str(home),
+            "TMPDIR": str(tmpdir),
+            "TERM": "xterm",
+        },
+        cwd=str(home),
+        check=False,
+    )
+
+
+def test_codex_selection_passes_native_raptor_prompt(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    r = _launch_selected_agent(tmp_path, "codex", str(target))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "STUB_CODEX_RAN" in r.stdout
+    assert "AGENT_SEEN=codex" in r.stdout
+    assert "ARG:--sandbox" in r.stdout
+    assert "ARG:danger-full-access" in r.stdout
+    assert "ARG:--ask-for-approval" in r.stdout
+    assert "ARG:never" in r.stdout
+    assert "ARG:$raptor" in r.stdout
+    assert str(target) in r.stdout
+    assert "read-coverage hooks are unavailable" in r.stderr
+
+
+def test_opencode_selection_passes_bootstrap_with_prompt_flag(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    r = _launch_selected_agent(tmp_path, "opencode", str(target))
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "STUB_OPENCODE_RAN" in r.stdout
+    assert "AGENT_SEEN=opencode" in r.stdout
+    assert "ARG:--prompt" in r.stdout
+    assert "ARG:/raptor" in r.stdout
+    assert "ARG:/raptor " in r.stdout
+    assert str(target) in r.stdout
+    assert f"ARG:{REPO_ROOT}" in r.stdout
+    assert "Autonomous Offensive/Defensive Research Framework" not in r.stdout
+    assert "read-coverage hooks are unavailable" in r.stderr
+
+
+def test_codex_flag_translation(tmp_path):
+    r = _launch_selected_agent(
+        tmp_path, "codex", "--model", "gpt-test", "--verbose",
+    )
+    assert "ARG:--model" in r.stdout
+    assert "ARG:gpt-test" in r.stdout
+    assert "no direct --verbose equivalent" in r.stderr
+
+
+def test_opencode_flag_translation(tmp_path):
+    r = _launch_selected_agent(
+        tmp_path, "opencode", "--model", "provider/model", "--verbose",
+    )
+    assert "ARG:--model" in r.stdout
+    assert "ARG:provider/model" in r.stdout
+    assert "ARG:--print-logs" in r.stdout
+
+
+def test_opencode_bare_raptor_prompt_has_command_terminator(tmp_path):
+    r = _launch_selected_agent(tmp_path, "opencode")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "ARG:/raptor \n" in r.stdout
+
+
+def test_non_claude_command_registries_cover_canonical_commands():
+    canonical = {
+        path.stem for path in (REPO_ROOT / ".claude" / "commands").glob("*.md")
+    }
+    opencode = {
+        path.stem for path in (REPO_ROOT / ".opencode" / "commands").glob("*.md")
+    }
+    codex = {
+        path.parent.name
+        for path in (REPO_ROOT / ".agents" / "skills").glob("*/SKILL.md")
+    }
+    assert opencode == canonical
+    assert codex == canonical
+
+    for name in canonical:
+        opencode_body = (
+            REPO_ROOT / ".opencode" / "commands" / f"{name}.md"
+        ).read_text(encoding="utf-8")
+        codex_body = (
+            REPO_ROOT / ".agents" / "skills" / name / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assert f".claude/commands/{name}.md" in opencode_body
+        assert f".claude/commands/{name}.md" in codex_body
+
+
+def test_commands_reference_selects_codex_prefix():
+    body = (REPO_ROOT / ".claude" / "commands" / "commands.md").read_text()
+    assert "`$` when `RAPTOR_AGENT=codex`" in body
+    assert "use `/` on every other host" in body
+
+
+def test_shared_contract_selects_operator_facing_codex_prefix():
+    body = (REPO_ROOT / "CLAUDE.md").read_text()
+    assert "render commands as\n`$name` when `RAPTOR_AGENT=codex`" in body
+    assert "This is\ndisplay-only" in body
+
+
+def test_raptor_command_only_initializes_session():
+    body = (REPO_ROOT / ".claude" / "commands" / "raptor.md").read_text()
+    assert "dispatch: skill" in body
+    assert "It never starts a\nscan" in body
+    assert "Do not dispatch `python3 raptor.py agentic`" in body
+
+
+def test_invalid_agent_is_rejected(tmp_path):
+    r = _launch_selected_agent(tmp_path, "codex", "--agent", "unknown")
+    assert r.returncode == 2
+    assert "unsupported agent 'unknown'" in r.stderr
 
 
 # ---------------------------------------------------------------------------

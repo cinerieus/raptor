@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# raptor - launch RAPTOR via Claude Code
+# raptor - launch RAPTOR via a supported coding agent
 #
 # Install: add this directory to PATH, or symlink to a directory already on PATH.
 #
@@ -148,18 +148,19 @@ if [ -z "${RAPTOR_NO_LAUNCHER_HARDENING:-}" ]; then
     export PATH
     unset _scrubbed _rest _last _entry _drop_reason _perm
 
-    # Warn (don't drop) when claude resolves under a world-writable
-    # ANCESTOR — the per-entry check above can't see parents.
-    _claude_path="$(command -v claude 2>/dev/null || true)"
-    if [ -n "$_claude_path" ]; then
-        _dir="$(_rp dirname "$_claude_path")"
+    # Warn (don't drop) when a supported agent resolves under a
+    # world-writable ancestor; the per-entry check cannot see parents.
+    for _agent_name in claude codex opencode; do
+        _agent_path="$(command -v "$_agent_name" 2>/dev/null || true)"
+        [ -n "$_agent_path" ] || continue
+        _dir="$(_rp dirname "$_agent_path")"
         _hops=0
         while [ -n "$_dir" ] && [ "$_dir" != "/" ] && [ "$_hops" -lt 64 ]; do
             _perm="$(_rp stat -Lc '%a' "$_dir" 2>/dev/null \
                      || _rp stat -Lf '%Lp' "$_dir" 2>/dev/null \
                      || echo '')"
             if [ -n "$_perm" ] && [ "$(( 0$_perm & 2 ))" -ne 0 ]; then
-                echo "raptor: WARNING: claude resolves under a world-writable tree: $_claude_path (writable ancestor: $_dir)" >&2
+                echo "raptor: WARNING: $_agent_name resolves under a world-writable tree: $_agent_path (writable ancestor: $_dir)" >&2
                 break
             fi
             # Parameter expansion, not dirname(1) — no external
@@ -169,8 +170,8 @@ if [ -z "${RAPTOR_NO_LAUNCHER_HARDENING:-}" ]; then
             _hops=$((_hops + 1))
         done
         unset _dir _hops _perm
-    fi
-    unset _claude_path
+    done
+    unset _agent_name _agent_path
 
     # Per-session TMPDIR: <base>/raptor-<uid>/session-<pid>-<rand>
     # (0700; <base> = RAPTOR_WORK_DIR, else operator TMPDIR, else
@@ -283,8 +284,9 @@ Arguments:
   target             Path or URL to scan (optional)
 
 Options:
+  -A, --agent AGENT Choose session agent (auto, claude, codex, opencode)
   -c, --continue     Resume last RAPTOR session
-  -m, --model MODEL  Choose model (opus, sonnet, haiku)
+  -m, --model MODEL  Choose a model supported by the selected agent
   -p, --project NAME Set the active project
   -v, --verbose      Verbose output
   --trust-repo       Trust target repo's config (skip safety checks)
@@ -303,7 +305,8 @@ Projects:
   raptor project none                  Clear the active project
   raptor project help                  Full subcommand list
 
-Any additional flags are passed through to Claude Code.
+Selection order for --agent auto: RAPTOR_AGENT, then claude, codex, opencode.
+Any additional flags are passed through to the selected agent.
 USAGE
     exit 0
 fi
@@ -355,12 +358,54 @@ if [[ "${1:-}" == "sage-setup" ]]; then
     exec "$RAPTOR_DIR/libexec/raptor-sage-setup" "$@"
 fi
 
-# Claude required for everything else
-if ! command -v claude >/dev/null 2>&1; then
-    echo "raptor: claude not found. Install Claude Code:" >&2
-    echo "  https://docs.anthropic.com/en/docs/claude-code/overview" >&2
+# Select the interactive coding-agent host. Explicit CLI selection wins,
+# followed by RAPTOR_AGENT; auto preserves the historical Claude-first order.
+RAPTOR_AGENT_CLI="auto"
+_scan_args=("$@")
+_scan_i=0
+while [ "$_scan_i" -lt "${#_scan_args[@]}" ]; do
+    case "${_scan_args[$_scan_i]}" in
+        -A|--agent)
+            _scan_i=$((_scan_i + 1))
+            [ "$_scan_i" -lt "${#_scan_args[@]}" ] || {
+                echo "raptor: --agent requires a value" >&2; exit 1;
+            }
+            RAPTOR_AGENT_CLI="${_scan_args[$_scan_i]}"
+            ;;
+        --agent=*) RAPTOR_AGENT_CLI="${_scan_args[$_scan_i]#--agent=}" ;;
+    esac
+    _scan_i=$((_scan_i + 1))
+done
+unset _scan_args _scan_i
+
+if [ "$RAPTOR_AGENT_CLI" = "auto" ]; then
+    RAPTOR_AGENT_CLI="${RAPTOR_AGENT:-auto}"
+fi
+if [ "$RAPTOR_AGENT_CLI" = "auto" ]; then
+    for _candidate in claude codex opencode; do
+        if command -v "$_candidate" >/dev/null 2>&1; then
+            RAPTOR_AGENT_CLI="$_candidate"
+            break
+        fi
+    done
+    unset _candidate
+fi
+case "$RAPTOR_AGENT_CLI" in
+    claude|codex|opencode) ;;
+    auto)
+        echo "raptor: no supported coding agent found (claude, codex, opencode)" >&2
+        exit 1
+        ;;
+    *)
+        echo "raptor: unsupported agent '$RAPTOR_AGENT_CLI' (expected auto, claude, codex, or opencode)" >&2
+        exit 2
+        ;;
+esac
+if ! command -v "$RAPTOR_AGENT_CLI" >/dev/null 2>&1; then
+    echo "raptor: selected agent '$RAPTOR_AGENT_CLI' is not installed or not on PATH" >&2
     exit 1
 fi
+export RAPTOR_AGENT="$RAPTOR_AGENT_CLI"
 
 # Export static env vars. RAPTOR_CALLER_DIR = operator's PWD at
 # launch (resolves targets/projects downstream). Reject control
@@ -385,14 +430,22 @@ export RAPTOR_DIR
 # direct invocation through this launcher is the safe path.
 export _RAPTOR_TRUSTED=1
 
-# Parse RAPTOR-specific args, collect Claude args
+# Parse RAPTOR-specific args, collect host-neutral agent options.
 STARTUP_ARGS=("--caller-dir" "$RAPTOR_CALLER_DIR")
-CLAUDE_ARGS=("-n" "RAPTOR")
-INITIAL_PROMPT="/raptor"
+_agent_args=()
+CONTINUE_SESSION=""
+MODEL=""
+VERBOSE=""
+INITIAL_PROMPT="Initialize RAPTOR. Read AGENTS.md, CLAUDE.md, and .startup-output. Render the startup banner, summarize readiness briefly, then wait for the operator's command. Do not dispatch or simulate /raptor, /agentic, or any other RAPTOR command until explicitly requested."
 TARGET=""
 TRUST_REPO_ARG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        -A|--agent)
+            [[ $# -ge 2 ]] || { echo "raptor: $1 requires a value" >&2; exit 1; }
+            shift 2
+            ;;
+        --agent=*) shift ;;
         -p|--project)
             [[ $# -ge 2 ]] || { echo "raptor: $1 requires a value" >&2; exit 1; }
             STARTUP_ARGS+=("-p" "$2")
@@ -411,17 +464,17 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -c|--continue)
-            CLAUDE_ARGS+=("--continue")
+            CONTINUE_SESSION=1
             INITIAL_PROMPT=""
             shift
             ;;
         -m|--model)
             [[ $# -ge 2 ]] || { echo "raptor: $1 requires a value" >&2; exit 1; }
-            CLAUDE_ARGS+=("--model" "$2")
+            MODEL="$2"
             shift 2
             ;;
         -v|--verbose)
-            CLAUDE_ARGS+=("--verbose")
+            VERBOSE=1
             shift
             ;;
         --trust-repo)
@@ -435,7 +488,7 @@ while [[ $# -gt 0 ]]; do
             exec "$0" -h
             ;;
         -*)
-            CLAUDE_ARGS+=("$1")
+            _agent_args+=("$1")
             shift
             ;;
         *)
@@ -454,10 +507,15 @@ _target_clean=$(printf '%s' "$TARGET" | tr -d '\000-\010\012-\037')
 if [ "$_target_clean" != "$TARGET" ]; then
     echo "raptor: TARGET contained control bytes - stripped before use" >&2
 fi
-if [[ -n "$_target_clean" && -n "$INITIAL_PROMPT" ]]; then
-    INITIAL_PROMPT="/raptor $_target_clean"
+if [ -n "$INITIAL_PROMPT" ]; then
+    case "$RAPTOR_AGENT_CLI" in
+        claude) INITIAL_PROMPT="/raptor${_target_clean:+ $_target_clean}" ;;
+        # A trailing space makes OpenCode resolve and submit the custom command;
+        # without it, the TUI leaves `/raptor` in the command composer.
+        opencode) INITIAL_PROMPT="/raptor${_target_clean:+ $_target_clean} " ;;
+        codex) INITIAL_PROMPT="\$raptor${_target_clean:+ $_target_clean}" ;;
+    esac
 fi
-
 # Resolve which directory the trust check should scan. Built from the
 # same control-stripped spelling the prompt carries: the gate and the
 # session must vet and resolve the SAME path. Scanning the raw TARGET
@@ -670,10 +728,63 @@ else
 fi
 unset _sessions_dir _startup_out _seed_proj _seed_by
 
-# Load coverage tracking plugin if available
+# Translate neutral launcher options to the selected host CLI.
+case "$RAPTOR_AGENT_CLI" in
+    claude)
+        _agent_args=("-n" "RAPTOR" "${_agent_args[@]}")
+        [ -z "$CONTINUE_SESSION" ] || _agent_args+=("--continue")
+        [ -z "$MODEL" ] || _agent_args+=("--model" "$MODEL")
+        [ -z "$VERBOSE" ] || _agent_args+=("--verbose")
+        ;;
+    codex)
+        [ -z "$CONTINUE_SESSION" ] || _agent_args=("resume" "--last" "${_agent_args[@]}")
+        [ -z "$MODEL" ] || _agent_args+=("--model" "$MODEL")
+        # RAPTOR applies its own fail-closed namespaces, Landlock, seccomp,
+        # and egress proxy to untrusted work. Codex's outer sandbox blocks
+        # the namespace and loopback operations that containment layer needs,
+        # causing scanners to fail before analysis. Leave approval handling
+        # non-interactive and let RAPTOR enforce the inner policy.
+        _agent_args=(
+            "--sandbox" "danger-full-access"
+            "--ask-for-approval" "never"
+            "${_agent_args[@]}"
+        )
+        if [ -n "$VERBOSE" ]; then
+            echo "raptor: note: Codex has no direct --verbose equivalent; continuing" >&2
+        fi
+        ;;
+    opencode)
+        [ -z "$CONTINUE_SESSION" ] || _agent_args+=("--continue")
+        [ -z "$MODEL" ] || _agent_args+=("--model" "$MODEL")
+        [ -z "$VERBOSE" ] || _agent_args+=("--print-logs")
+        # OpenCode reserves positional arguments for the project path. Its
+        # interactive TUI accepts the initial message through --prompt.
+        if [ -n "$INITIAL_PROMPT" ]; then
+            _agent_args+=("--prompt" "$INITIAL_PROMPT")
+            INITIAL_PROMPT=""
+        fi
+        # Open the RAPTOR checkout as OpenCode's project so it discovers
+        # AGENTS.md, .opencode/commands/, and the env plugin even when the
+        # operator launches from another directory. RAPTOR_CALLER_DIR and
+        # the session binding retain the actual default scan target.
+        _agent_args+=("$RAPTOR_DIR")
+        ;;
+esac
+
+# Claude invokes this through SessionStart. Other hosts have no compatible
+# hook contract, so prepare the same startup artifact before their exec.
+if [ "$RAPTOR_AGENT_CLI" != "claude" ]; then
+    if ! "$RAPTOR_DIR/libexec/raptor-session-init" >/dev/null; then
+        echo "raptor: warning: startup initialization failed for $RAPTOR_AGENT_CLI" >&2
+    fi
+fi
+
+# Load the Claude coverage plugin where its hook API exists.
 PLUGIN_ARGS=()
-if [ -d "$RAPTOR_DIR/plugins/coverage" ]; then
+if [ "$RAPTOR_AGENT_CLI" = "claude" ] && [ -d "$RAPTOR_DIR/plugins/coverage" ]; then
     PLUGIN_ARGS+=(--plugin-dir "$RAPTOR_DIR/plugins/coverage")
+elif [ "$RAPTOR_AGENT_CLI" != "claude" ] && [ -d "$RAPTOR_DIR/plugins/coverage" ]; then
+    echo "raptor: note: read-coverage hooks are unavailable with $RAPTOR_AGENT_CLI; run lifecycle remains enabled" >&2
 fi
 
 # `env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS` at the exec
@@ -693,8 +804,8 @@ fi
 
 if [[ -n "$INITIAL_PROMPT" ]]; then
     exec env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
-        claude "${PLUGIN_ARGS[@]}" "${CLAUDE_ARGS[@]}" "$INITIAL_PROMPT"
+        "$RAPTOR_AGENT_CLI" "${PLUGIN_ARGS[@]}" "${_agent_args[@]}" "$INITIAL_PROMPT"
 else
     exec env -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
-        claude "${PLUGIN_ARGS[@]}" "${CLAUDE_ARGS[@]}"
+        "$RAPTOR_AGENT_CLI" "${PLUGIN_ARGS[@]}" "${_agent_args[@]}"
 fi
