@@ -96,7 +96,7 @@ def stamp_readme(tag: str) -> str:
         return content + " " * pad + "║"
 
     text, n = re.subn(
-        r"(║\s+Based on Claude Code \()[^)]+\)[^║]*║",
+        r"(║\s+Agent-Agnostic Orchestration \()[^)]+\)[^║]*║",
         replace_banner,
         text,
     )
@@ -104,7 +104,7 @@ def stamp_readme(tag: str) -> str:
         print("warning: banner pattern not found in README.md", file=sys.stderr)
         return ""
     atomic_write(path, text)
-    match = re.search(r".*Based on Claude Code.*", text)
+    match = re.search(r".*Agent-Agnostic Orchestration.*", text)
     return match.group(0).strip() if match else ""
 
 
