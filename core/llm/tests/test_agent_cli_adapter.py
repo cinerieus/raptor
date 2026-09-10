@@ -9,9 +9,22 @@ from core.llm.agent_cli_adapter import run_agent_cli, selected_agent
 
 
 @pytest.fixture(autouse=True)
-def _isolate_adapter_state(monkeypatch):
+def _isolate_adapter_state(monkeypatch, tmp_path):
     monkeypatch.setattr("core.llm.agent_cli_adapter._CALL_COUNT", 0)
     monkeypatch.setattr("core.llm.agent_cli_adapter._AUTHENTICATED", set())
+    data_home = tmp_path / "host-xdg-data"
+    auth_dir = data_home / "opencode"
+    auth_dir.mkdir(parents=True)
+    (auth_dir / "auth.json").write_text("{}", encoding="utf-8")
+    config_home = tmp_path / "host-xdg-config"
+    config_dir = config_home / "opencode"
+    config_dir.mkdir(parents=True)
+    (config_dir / "opencode.jsonc").write_text(
+        '{"model":"provider/model"}', encoding="utf-8"
+    )
+    monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.delenv("RAPTOR_AGENT_MODEL", raising=False)
 
 
 def test_direct_agent_session_markers_select_host(monkeypatch) -> None:
@@ -38,12 +51,18 @@ def test_opencode_project_plugin_exports_host() -> None:
     assert 'output.env.RAPTOR_AGENT = "opencode"' in plugin
 
 
-def test_codex_command_uses_subscription_auth_and_schema(monkeypatch) -> None:
+def test_codex_command_uses_subscription_auth_and_schema(
+    monkeypatch, tmp_path,
+) -> None:
     captured = {}
     monkeypatch.setattr("core.llm.agent_cli_adapter._check_auth", lambda *a: None)
 
     def fake_run(cmd, **kwargs):
         captured.update(cmd=cmd, kwargs=kwargs)
+        staged = Path(kwargs["env"]["CODEX_HOME"])
+        captured["staged_config"] = (staged / "config.toml").read_text(
+            encoding="utf-8"
+        )
         output = Path(cmd[cmd.index("--output-last-message") + 1])
         output.write_text('{"ok":true}', encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -54,7 +73,14 @@ def test_codex_command_uses_subscription_auth_and_schema(monkeypatch) -> None:
     )
     monkeypatch.setattr("core.sandbox.run_untrusted_networked", fake_run)
     monkeypatch.setenv("OPENAI_API_KEY", "must-be-stripped")
-    monkeypatch.setenv("CODEX_HOME", "/tmp/codex-test-home")
+    source_home = tmp_path / "codex-source"
+    source_home.mkdir()
+    (source_home / "tmp").mkdir()
+    (source_home / "auth.json").write_text("{}", encoding="utf-8")
+    (source_home / "config.toml").write_text(
+        'model = "configured-codex-model"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_home))
     raw, result, _ = run_agent_cli(
         "codex",
         "question",
@@ -65,15 +91,50 @@ def test_codex_command_uses_subscription_auth_and_schema(monkeypatch) -> None:
     assert result == {"ok": True}
     assert captured["cmd"][1] == "exec"
     assert "--strict-config" in captured["cmd"]
-    assert "--ignore-user-config" in captured["cmd"]
+    assert "--ignore-user-config" not in captured["cmd"]
     assert "--ignore-rules" in captured["cmd"]
     assert "--disable" in captured["cmd"]
     assert "--output-schema" in captured["cmd"]
+    assert "--model" not in captured["cmd"]
     assert captured["kwargs"]["env"].get("OPENAI_API_KEY") is None
-    assert captured["kwargs"]["env"]["CODEX_HOME"] == "/tmp/codex-test-home"
+    assert captured["kwargs"]["env"]["OTEL_SDK_DISABLED"] == "true"
+    staged_home = Path(captured["kwargs"]["env"]["CODEX_HOME"])
+    assert staged_home.parent == Path(captured["kwargs"]["target"])
+    assert captured["staged_config"] == 'model = "configured-codex-model"\n'
+    assert str(source_home) not in captured["kwargs"]["readable_paths"]
+    assert str(staged_home / "tmp") in captured["kwargs"]["writable_paths"]
     assert "<raptor-system-instructions>" in captured["kwargs"]["input"]
     assert captured["kwargs"]["target"] == captured["kwargs"]["output"]
     assert "chatgpt.com" in captured["kwargs"]["proxy_hosts"]
+
+
+@pytest.mark.parametrize("agent", ["codex", "opencode"])
+def test_session_default_is_resolved_by_host_config(monkeypatch, agent) -> None:
+    from core.llm.agent_cli_adapter import _resolve_agent_model
+
+    assert _resolve_agent_model(agent, "session-default") is None
+
+
+@pytest.mark.parametrize("agent", ["codex", "opencode"])
+def test_launcher_model_overrides_host_config(monkeypatch, agent) -> None:
+    from core.llm.agent_cli_adapter import _resolve_agent_model
+
+    monkeypatch.setenv("RAPTOR_AGENT_MODEL", "launcher-model")
+    assert _resolve_agent_model(agent, "session-default") == (
+        "launcher-model"
+    )
+    assert _resolve_agent_model(agent, "per-call-model") == (
+        "per-call-model"
+    )
+
+
+@pytest.mark.parametrize("agent", ["codex", "opencode"])
+def test_invalid_explicit_agent_model_fails_closed(monkeypatch, agent) -> None:
+    from core.llm.agent_cli_adapter import _resolve_agent_model
+
+    monkeypatch.setenv("RAPTOR_AGENT_MODEL", "bad model\n--danger")
+    with pytest.raises(RuntimeError, match="invalid model identifier"):
+        _resolve_agent_model(agent, "session-default")
 
 
 def test_opencode_command_uses_run_and_stored_auth(monkeypatch) -> None:
@@ -82,6 +143,10 @@ def test_opencode_command_uses_run_and_stored_auth(monkeypatch) -> None:
 
     def fake_run(cmd, **kwargs):
         captured.update(cmd=cmd, kwargs=kwargs)
+        data_home = Path(kwargs["env"]["XDG_DATA_HOME"])
+        captured["staged_auth"] = (
+            data_home / "opencode" / "auth.json"
+        ).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "answer", "")
 
     monkeypatch.setattr(
@@ -94,10 +159,24 @@ def test_opencode_command_uses_run_and_stored_auth(monkeypatch) -> None:
     assert result is None
     assert captured["cmd"][1] == "run"
     assert "--pure" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--agent") + 1] == (
+        "raptor-inference"
+    )
     assert "--dir" in captured["cmd"]
     config = captured["kwargs"]["env"]["OPENCODE_CONFIG_CONTENT"]
     assert '"*": "deny"' in config
+    assert '"plugin": []' in config
+    assert '"default_agent": "raptor-inference"' in config
     assert "api.opencode.ai" in captured["kwargs"]["proxy_hosts"]
+    assert captured["staged_auth"] == "{}"
+    assert Path(captured["kwargs"]["env"]["XDG_DATA_HOME"]).parent == Path(
+        captured["kwargs"]["target"]
+    )
+    config_home = Path(captured["kwargs"]["env"]["XDG_CONFIG_HOME"])
+    assert config_home.name == "host-xdg-config"
+    assert str(config_home / "opencode") in captured["kwargs"][
+        "readable_paths"
+    ]
 
 
 def test_target_path_in_prompt_never_becomes_cli_workspace(

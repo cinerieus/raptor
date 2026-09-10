@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -32,20 +33,35 @@ _PROXY_HOSTS = {
 
 _CODEX_DISABLED_FEATURES = (
     "apps", "browser_use", "browser_use_external", "computer_use",
-    "enable_mcp_apps", "in_app_browser", "plugins", "remote_plugin",
-    "shell_tool", "skill_mcp_dependency_install",
-    "tool_call_mcp_elicitation",
+    "enable_mcp_apps", "goals", "hooks", "image_generation",
+    "in_app_browser", "multi_agent", "plugins", "remote_plugin",
+    "shell_tool", "skill_mcp_dependency_install", "skill_search",
+    "sleep_tool", "tool_call_mcp_elicitation", "unified_exec",
+    "view_image", "workspace_dependencies",
 )
 
 _OPENCODE_INFERENCE_CONFIG = json.dumps({
     "permission": {"*": "deny"},
     "tools": {"*": False},
     "mcp": {},
+    "plugin": [],
+    "instructions": [],
+    "default_agent": "raptor-inference",
+    "agent": {
+        "raptor-inference": {
+            "description": "Tool-disabled RAPTOR inference substrate",
+            "mode": "primary",
+            "prompt": "Answer only the supplied RAPTOR analysis request.",
+            "permission": {"*": "deny"},
+            "tools": {"*": False},
+        },
+    },
 })
 _HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
 )
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$")
 
 
 def selected_agent() -> str | None:
@@ -75,6 +91,25 @@ def resolve_agent_cli(agent: str) -> str:
     if not resolved:
         raise RuntimeError(f"selected agent CLI is unavailable: {agent}")
     return str(Path(resolved).resolve())
+
+
+def _validate_agent_model(value: str, *, source: str) -> str:
+    model = value.strip()
+    if not _MODEL_RE.fullmatch(model):
+        raise RuntimeError(f"{source} contains an invalid model identifier")
+    return model
+
+
+def _resolve_agent_model(agent: str, requested: str | None) -> str | None:
+    """Resolve explicit pins; otherwise let the host CLI load its config."""
+    if requested and requested != "session-default":
+        return _validate_agent_model(requested, source="requested model")
+    launcher_model = os.environ.get("RAPTOR_AGENT_MODEL", "").strip()
+    if launcher_model:
+        return _validate_agent_model(
+            launcher_model, source="RAPTOR_AGENT_MODEL"
+        )
+    return None
 
 
 def _prompt(user_prompt: str, system_prompt: str | None) -> str:
@@ -113,11 +148,12 @@ def _safe_diagnostic(value: object, limit: int = 500) -> str:
     return clean if len(clean) <= limit else "..." + clean[-limit:]
 
 
-def _auth_paths(agent: str) -> list[str]:
+def _auth_paths(agent: str, env: dict[str, str] | None = None) -> list[str]:
     home = Path.home()
     if agent == "codex":
-        root = Path(os.environ.get("CODEX_HOME", home / ".codex"))
-        return [str(root / "auth.json")]
+        values = env if env is not None else os.environ
+        root = Path(values.get("CODEX_HOME", home / ".codex"))
+        return [str(root / "auth.json"), str(root / "config.toml")]
     data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
     config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     return [
@@ -125,6 +161,79 @@ def _auth_paths(agent: str) -> list[str]:
         str(config / "opencode" / "opencode.json"),
         str(config / "opencode" / "opencode.jsonc"),
     ]
+
+
+def _stage_bounded_file(source: Path, destination: Path, recovery: str,
+                        label: str) -> None:
+    """Copy one bounded regular file without following symlinks."""
+    try:
+        source_fd = os.open(
+            source,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"subscription auth is unavailable; run `{recovery}`"
+        ) from exc
+    try:
+        source_stat = os.fstat(source_fd)
+        if (not stat.S_ISREG(source_stat.st_mode)
+                or source_stat.st_size > 1024 * 1024):
+            raise RuntimeError(
+                f"{label} is not a regular file under 1 MiB; "
+                f"run `{recovery}`"
+            )
+        auth_bytes = bytearray()
+        while len(auth_bytes) <= 1024 * 1024:
+            chunk = os.read(source_fd, min(65536, 1024 * 1024 + 1
+                                           - len(auth_bytes)))
+            if not chunk:
+                break
+            auth_bytes.extend(chunk)
+        if len(auth_bytes) > 1024 * 1024:
+            raise RuntimeError(f"{label} exceeds 1 MiB")
+    finally:
+        os.close(source_fd)
+    destination.write_bytes(auth_bytes)
+    destination.chmod(0o600)
+
+
+def _stage_codex_home(work_path: Path) -> Path:
+    """Snapshot Codex routing config and auth into a private runtime home."""
+    source_root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    staged = work_path / ".codex-home"
+    staged.mkdir(mode=0o700)
+    (staged / "tmp").mkdir(mode=0o700)
+    _stage_bounded_file(
+        source_root / "auth.json", staged / "auth.json", "codex login",
+        "auth.json",
+    )
+    source_config = source_root / "config.toml"
+    if source_config.exists():
+        _stage_bounded_file(
+            source_config, staged / "config.toml",
+            "repair the Codex config",
+            "config.toml",
+        )
+    return staged
+
+
+def _stage_opencode_data(work_path: Path) -> Path:
+    """Create a private OpenCode data root containing subscription auth."""
+    home = Path.home()
+    source_data = Path(
+        os.environ.get("XDG_DATA_HOME", home / ".local" / "share")
+    )
+    staged_data = work_path / ".xdg-data"
+    app_data = staged_data / "opencode"
+    app_data.mkdir(parents=True, mode=0o700)
+    _stage_bounded_file(
+        source_data / "opencode" / "auth.json",
+        app_data / "auth.json",
+        "opencode auth login",
+        "auth.json",
+    )
+    return staged_data
 
 
 def _proxy_hosts(agent: str) -> list[str]:
@@ -212,6 +321,7 @@ def run_agent_cli(
 ) -> tuple[str, dict[str, Any] | None, float]:
     """Run one isolated, non-interactive inference call."""
     binary = resolve_agent_cli(agent)
+    effective_model = _resolve_agent_model(agent, model)
     full_prompt = _prompt(prompt, system_prompt)
     started = time.monotonic()
     with scratch_dir(f"raptor-{agent}-cli-") as work:
@@ -219,8 +329,8 @@ def run_agent_cli(
         if agent == "codex":
             output_path = work_path / "last-message.txt"
             cmd = [
-                binary, "exec", "--strict-config", "--ignore-user-config",
-                "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
+                binary, "exec", "--strict-config", "--ignore-rules",
+                "--ephemeral", "--skip-git-repo-check",
                 "--sandbox", "read-only", "--color", "never",
                 "--output-last-message", str(output_path), "-C", str(work_path),
             ]
@@ -232,17 +342,20 @@ def run_agent_cli(
                 cmd.extend(["--config", override])
             for feature in _CODEX_DISABLED_FEATURES:
                 cmd.extend(["--disable", feature])
-            if model and model != "session-default":
-                cmd.extend(["--model", model])
+            if effective_model:
+                cmd.extend(["--model", effective_model])
             if schema is not None:
                 schema_path = work_path / "schema.json"
                 schema_path.write_text(json.dumps(schema), encoding="utf-8")
                 cmd.extend(["--output-schema", str(schema_path)])
             cmd.append("-")
         else:
-            cmd = [binary, "run", "--pure", "--dir", str(work_path)]
-            if model and model != "session-default":
-                cmd.extend(["--model", model])
+            cmd = [
+                binary, "run", "--pure", "--agent", "raptor-inference",
+                "--dir", str(work_path),
+            ]
+            if effective_model:
+                cmd.extend(["--model", effective_model])
             if schema is not None:
                 full_prompt += (
                     "\n\nReturn only JSON matching this schema:\n"
@@ -253,8 +366,17 @@ def run_agent_cli(
             from core.config import RaptorConfig
 
             child_env = RaptorConfig.get_safe_env()
-            if os.environ.get("CODEX_HOME"):
-                child_env["CODEX_HOME"] = os.environ["CODEX_HOME"]
+            if agent == "codex":
+                child_env["CODEX_HOME"] = str(
+                    _stage_codex_home(work_path)
+                )
+            elif agent == "opencode":
+                child_env["XDG_DATA_HOME"] = str(
+                    _stage_opencode_data(work_path)
+                )
+                child_env["XDG_CONFIG_HOME"] = os.environ.get(
+                    "XDG_CONFIG_HOME", str(Path.home() / ".config")
+                )
             # A host-bound session means "use this CLI's authenticated
             # account". Ambient model API keys must not silently change
             # its billing route. The CLI's own config/auth stores remain.
@@ -265,6 +387,11 @@ def run_agent_cli(
                 child_env.pop(name, None)
             if agent == "opencode":
                 child_env["OPENCODE_CONFIG_CONTENT"] = _OPENCODE_INFERENCE_CONFIG
+            # Both CLIs use OpenTelemetry-compatible exporters. Disable those
+            # exporters in inference children: telemetry is not required for
+            # authentication, model discovery, or inference, and its denied
+            # CONNECTs otherwise look like transport failures.
+            child_env["OTEL_SDK_DISABLED"] = "true"
             _check_auth(agent, binary, child_env)
             _claim_call(agent)
             from core.sandbox import run_untrusted_networked
@@ -279,9 +406,24 @@ def run_agent_cli(
                 output=str(work_path),
                 readable_paths=[
                     str(Path(binary).parent),
-                    *(p for p in _auth_paths(agent) if Path(p).exists()),
+                    *(p for p in _auth_paths(agent, child_env)
+                      if Path(p).exists()),
+                    *(
+                        [str(Path(child_env["XDG_CONFIG_HOME"]) / "opencode")]
+                        if agent == "opencode" and (
+                            Path(child_env["XDG_CONFIG_HOME"]) / "opencode"
+                        ).exists() else []
+                    ),
                 ],
-                writable_paths=[str(work_path)],
+                writable_paths=[
+                    str(work_path),
+                    *(
+                        [str(Path(child_env["CODEX_HOME"]) / "tmp")]
+                        if agent == "codex" and (
+                            Path(child_env["CODEX_HOME"]) / "tmp"
+                        ).is_dir() else []
+                    ),
+                ],
                 proxy_hosts=_proxy_hosts(agent),
                 caller_label=f"{agent}-inference",
             )
