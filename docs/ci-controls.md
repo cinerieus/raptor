@@ -21,7 +21,7 @@ This page is split into:
 | Prompt-envelope audit | Pytest | Registered prompt construction paths |
 | Code scanning | GitHub CodeQL Advanced | Python, C/C++, GitHub Actions |
 | Slash-command metadata lint | In-tree Python checker | `.claude/commands/*.md` dispatch metadata |
-| Dependency regression gate | RAPTOR SCA | PR head versus `main` dependency surface |
+| Dependency regression gate | RAPTOR SCA | PR merge result versus `main` dependency surface |
 | Corpus label schema lint | In-tree Python linter | Corpus label JSON files |
 | Corpus label pin lint (PR) | In-tree Python linter | Changed label files in a PR |
 | SARIF known-FP suppressions | In-tree Python script | CodeQL SARIF output |
