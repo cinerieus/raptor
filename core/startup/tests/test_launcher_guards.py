@@ -70,6 +70,7 @@ def _make_stub_agent(tmp_path: Path, name: str) -> Path:
         "#!/usr/bin/env bash\n"
         f"echo STUB_{name.upper()}_RAN\n"
         'echo "AGENT_SEEN=${RAPTOR_AGENT:-}"\n'
+        'echo "AGENT_MODEL_SEEN=${RAPTOR_AGENT_MODEL:-}"\n'
         'printf \'ARG:%s\\n\' "$@"\n',
         encoding="utf-8",
     )
@@ -170,6 +171,7 @@ def test_codex_flag_translation(tmp_path):
     )
     assert "ARG:--model" in r.stdout
     assert "ARG:gpt-test" in r.stdout
+    assert "AGENT_MODEL_SEEN=gpt-test" in r.stdout
     assert "no direct --verbose equivalent" in r.stderr
 
 
@@ -179,6 +181,7 @@ def test_opencode_flag_translation(tmp_path):
     )
     assert "ARG:--model" in r.stdout
     assert "ARG:provider/model" in r.stdout
+    assert "AGENT_MODEL_SEEN=provider/model" in r.stdout
     assert "ARG:--print-logs" in r.stdout
 
 

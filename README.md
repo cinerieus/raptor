@@ -156,7 +156,7 @@ The simplest thing you can do:
 /scan /path/to/code
 ```
 
-This runs Semgrep (plus Coccinelle when `spatch` is installed; add `--codeql` for CodeQL) against the target, deduplicates findings, and writes a SARIF report. No LLM analysis, no API keys beyond Claude Code. Takes a few minutes on a typical repository.
+This runs Semgrep (plus Coccinelle when `spatch` is installed; add `--codeql` for CodeQL) against the target, deduplicates findings, and writes a SARIF report. It performs no LLM analysis and requires no model API keys. Takes a few minutes on a typical repository.
 
 To add LLM-powered validation:
 
@@ -166,7 +166,7 @@ To add LLM-powered validation:
 
 This runs the full pipeline: scan, deduplicate, then send each finding through the validation stages (A-F). On a medium-sized codebase with ~50 findings, expect 10-30 minutes and $2-8 in analysis-layer LLM costs (depending on the model). The default cost cap is $10 per run; adjust with `--max-cost-usd`.
 
-**Cost note:** Host-bound sessions use the selected agent's authenticated account for orchestration and analysis. Ambient model API keys do not override that route. Direct API calls are billed separately only when explicitly selected outside a host-bound session. Codex and OpenCode analysis calls are tool-disabled and capped at 100 calls per RAPTOR process because their CLIs do not expose a monetary cost signal. `RAPTOR_AGENT_CLI_MAX_CALLS` sets an explicit alternative limit.
+**Cost note:** The selected agent's authenticated account covers orchestration. Analysis keeps the original independent precedence: explicit analysis flags, then `models.json`, then API-key/environment detection, with the selected agent subscription as the keyless fallback. Direct-provider analysis is billed by that provider; subscription fallback has no separate model API charge. Codex and OpenCode subscription analysis calls are tool-disabled and capped at 100 calls per RAPTOR process because their CLIs do not expose a monetary cost signal. `RAPTOR_AGENT_CLI_MAX_CALLS` sets an explicit alternative limit.
 
 ---
 
@@ -388,7 +388,7 @@ RAPTOR has two separate model layers, and it is worth knowing how both work befo
 
 The **orchestration layer** can be Claude Code, Codex, or OpenCode. Select it with `raptor --agent <name>` or `RAPTOR_AGENT`. `AGENTS.md` is the host-neutral bootstrap, `CLAUDE.md` retains the shared contract, and `.claude/commands/` is the canonical command registry.
 
-The **analysis dispatch layer** analyses individual findings. In a host-bound session it uses the selected Claude Code, Codex, or OpenCode CLI. For standalone direct-API or multi-model runs, configure providers in `~/.config/raptor/models.json`:
+The **analysis dispatch layer** analyses individual findings. It keeps the original RAPTOR precedence independently of the orchestration host: explicit analysis flags such as `agentic --model` win, followed by a usable `~/.config/raptor/models.json`, then API-key/environment auto-detection. If none of those provides an analysis model, RAPTOR reuses the selected Claude Code, Codex, or OpenCode subscription. This means `raptor --agent codex` can orchestrate with Codex while a pre-existing `models.json` continues to control analysis and split model roles:
 
 ```json
 {

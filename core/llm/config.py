@@ -794,8 +794,10 @@ def _get_default_primary_model(
        the thinking-model scorer can't match Bedrock ids, so those
        entries get their own step (see ``_config_bedrock_primary``).
     3. **Default-order autodetect** via env var: Anthropic > OpenAI
-       > Gemini > Mistral > Ollama > Claude Code (subprocess,
-       absolute last resort).
+       > Gemini > Mistral > Bedrock > Ollama.
+    4. **Selected host subscription fallback**. When no usable external
+       analysis configuration exists, reuse the Claude, Codex, or OpenCode
+       CLI selected for orchestration.
 
     ``prefer`` is lenient: unknown / unavailable preferred providers
     are silently skipped. A consumer expresses preference via this
@@ -815,16 +817,6 @@ def _get_default_primary_model(
     except when that primary could only ever be a live Ollama
     endpoint.
     """
-    from core.llm.agent_cli_adapter import selected_agent
-    selected = selected_agent()
-    if selected == "claude":
-        bound = _build_claudecode_config()
-        if bound is not None:
-            return bound
-    if selected in ("codex", "opencode"):
-        bound = _build_agent_cli_config(selected)
-        if bound is not None:
-            return bound
     if _operator_primary_override is not None:
         return _operator_primary_override
     if isinstance(prefer, str):
@@ -888,6 +880,8 @@ def _get_default_primary_model(
     # Step 3: default-order autodetect via env vars. Skip providers
     # already tried in step 1.
     for name in _DEFAULT_PROVIDER_ORDER:
+        if name == "claudecode":
+            continue
         if offline and name in _NETWORK_PROBING_PROVIDERS:
             continue
         if prefer_set is not None and name in prefer_set:
@@ -897,7 +891,13 @@ def _get_default_primary_model(
         if config is not None:
             return config
 
-    return None
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected == "claude":
+        return _build_claudecode_config()
+    if selected in ("codex", "opencode"):
+        return _build_agent_cli_config(selected)
+    return _build_claudecode_config()
 
 
 def _model_config_from_entry(entry: dict) -> 'ModelConfig':
@@ -1188,12 +1188,6 @@ def _get_default_fallback_models() -> list['ModelConfig']:
     Returns ALL available models; client.py filters to same tier as primary.
     """
     from core.config import RaptorConfig
-
-    from core.llm.agent_cli_adapter import selected_agent
-    if selected_agent() in (
-        "claude", "codex", "opencode",
-    ):
-        return []
 
     availability = detect_llm_availability()
     if not availability.external_llm:
