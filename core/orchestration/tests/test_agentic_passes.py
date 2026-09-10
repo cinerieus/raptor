@@ -257,6 +257,39 @@ class SelectFindingsTests(unittest.TestCase):
 
 class UnderstandPrepassTests(unittest.TestCase):
 
+    def test_selected_agent_runs_understand_skill(self):
+        for agent in ("codex", "opencode"):
+            with self.subTest(agent=agent), TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                understand_dir = tmp / "understand_run"
+                dispatcher = _make_lifecycle_dispatcher(
+                    start_dir=understand_dir,
+                )
+
+                def run_agent(selected, prompt, **kwargs):
+                    self.assertEqual(selected, agent)
+                    self.assertEqual(kwargs["target"], tmp.resolve())
+                    self.assertEqual(
+                        kwargs["output"], understand_dir.resolve(),
+                    )
+                    (understand_dir / "context-map.json").write_text(
+                        "{}", encoding="utf-8",
+                    )
+                    return _ok()
+
+                with patch.dict("os.environ", {"RAPTOR_AGENT": agent}), \
+                     patch("core.orchestration.skill_dispatch.subprocess.run",
+                           side_effect=dispatcher), \
+                     patch("core.llm.agent_cli_adapter.run_agent_skill_cli",
+                           side_effect=run_agent) as agent_run, \
+                     patch("core.llm.cc_adapter.resolve_claude_cli") as claude:
+                    result = run_understand_prepass(
+                        target=tmp, agentic_out_dir=tmp,
+                    )
+                self.assertTrue(result.ran, msg=result.skipped_reason)
+                agent_run.assert_called_once()
+                claude.assert_not_called()
+
     def test_skips_when_block_cc_dispatch(self):
         with TemporaryDirectory() as tmp:
             result = run_understand_prepass(
@@ -525,6 +558,37 @@ class ValidatePostpassTests(unittest.TestCase):
         path = dir_ / "autonomous_analysis_report.json"
         path.write_text(json.dumps({"results": results}))
         return path
+
+    def test_selected_agent_runs_validate_skill(self):
+        for agent in ("codex", "opencode"):
+            with self.subTest(agent=agent), TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                validate_dir = tmp / "validate_run"
+                report = self._make_report(tmp, [{
+                    "id": "F-1", "is_exploitable": True,
+                    "file": "src/a.c", "line": 1,
+                }])
+                dispatcher = _make_lifecycle_dispatcher(start_dir=validate_dir)
+
+                def run_agent(selected, prompt, **kwargs):
+                    self.assertEqual(selected, agent)
+                    self.assertEqual(kwargs["target"], tmp.resolve())
+                    self.assertEqual(kwargs["output"], validate_dir.resolve())
+                    return _ok()
+
+                with patch.dict("os.environ", {"RAPTOR_AGENT": agent}), \
+                     patch("core.orchestration.skill_dispatch.subprocess.run",
+                           side_effect=dispatcher), \
+                     patch("core.llm.agent_cli_adapter.run_agent_skill_cli",
+                           side_effect=run_agent) as agent_run, \
+                     patch("core.llm.cc_adapter.resolve_claude_cli") as claude:
+                    result = run_validate_postpass(
+                        target=tmp, agentic_out_dir=tmp,
+                        analysis_report=report,
+                    )
+                self.assertTrue(result.ran, msg=result.skipped_reason)
+                agent_run.assert_called_once()
+                claude.assert_not_called()
 
     def test_skips_when_no_findings_qualify(self):
         with TemporaryDirectory() as tmp:

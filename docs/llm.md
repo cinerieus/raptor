@@ -43,6 +43,15 @@ OpenCode installations using another provider endpoint must add its hostname
 (hostname only, no scheme or path) to the comma-separated
 `RAPTOR_AGENT_CLI_PROXY_HOSTS` allowlist.
 
+Tool-enabled orchestration children also follow the selected host. This covers
+the agentic `/understand` and `/validate` companion passes, CodeQL build-flag
+inference, and web validation. Unlike finding-analysis calls, these children
+can read source and invoke RAPTOR helpers. Their CLI-native sandbox is disabled
+inside RAPTOR's namespace, Landlock, seccomp, read/write, and hostname egress
+boundary. The target remains read-only and only the lifecycle output and
+private staged CLI state are writable. Claude retains its existing scoped
+credential-proxy and monetary-budget behavior.
+
 Direct API providers below are optional. They are selected for standalone
 Python runs or explicit provider configuration when `RAPTOR_AGENT` is unset.
 Existing `models.json` role splits, API credentials, local providers,

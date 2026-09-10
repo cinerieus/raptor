@@ -388,6 +388,8 @@ RAPTOR has two separate model layers, and it is worth knowing how both work befo
 
 The **orchestration layer** can be Claude Code, Codex, or OpenCode. Select it with `raptor --agent <name>` or `RAPTOR_AGENT`. `AGENTS.md` is the host-neutral bootstrap, `CLAUDE.md` retains the shared contract, and `.claude/commands/` is the canonical command registry.
 
+Tool-enabled companion work, including agentic `/understand` and `/validate` passes, CodeQL build-flag inference, and web validation, follows the selected orchestration host. RAPTOR runs those children inside its own namespace, filesystem, seccomp, and egress sandbox. It does not silently fall back to Claude when Codex or OpenCode is selected.
+
 The **analysis dispatch layer** analyses individual findings. It keeps the original RAPTOR precedence independently of the orchestration host: explicit analysis flags such as `agentic --model` win, followed by a usable `~/.config/raptor/models.json`, then API-key/environment auto-detection. If none of those provides an analysis model, RAPTOR reuses the selected Claude Code, Codex, or OpenCode subscription. This means `raptor --agent codex` can orchestrate with Codex while a pre-existing `models.json` continues to control analysis and split model roles:
 
 ```json
