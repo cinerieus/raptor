@@ -181,7 +181,7 @@ def probe_cc_session_model(
     """Run (or recall) the pre-flight probe.
 
     Returns the backend-resolved model id (e.g.
-    ``anthropic.claude-mythos-5``) on success, ``None`` when the CLI
+    ``anthropic.claude-fable-5``) on success, ``None`` when the CLI
     is missing, times out, exits non-zero, or produces no parseable
     envelope — i.e. ``None`` means "do not trust the claudecode
     transport on this install right now".

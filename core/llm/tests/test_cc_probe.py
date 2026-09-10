@@ -21,19 +21,19 @@ pytestmark = pytest.mark.usefixtures("cc_spawn_machinery_enabled")
 
 class TestExtractModel:
     def test_single_model(self):
-        env = {"modelUsage": {"anthropic.claude-mythos-5": {
+        env = {"modelUsage": {"anthropic.claude-fable-5": {
             "outputTokens": 5}}}
         assert extract_model_from_envelope(env) == (
-            "anthropic.claude-mythos-5"
+            "anthropic.claude-fable-5"
         )
 
     def test_main_model_wins_over_helper(self):
         env = {"modelUsage": {
             "claude-haiku-4-5": {"outputTokens": 3},
-            "anthropic.claude-mythos-5": {"outputTokens": 812},
+            "anthropic.claude-fable-5": {"outputTokens": 812},
         }}
         assert extract_model_from_envelope(env) == (
-            "anthropic.claude-mythos-5"
+            "anthropic.claude-fable-5"
         )
 
     def test_missing_usage(self):
@@ -92,16 +92,16 @@ class TestProbe:
     def test_success_returns_model_and_caches(self, monkeypatch):
         envelope = json.dumps({
             "type": "result", "is_error": False,
-            "modelUsage": {"anthropic.claude-mythos-5": {
+            "modelUsage": {"anthropic.claude-fable-5": {
                 "outputTokens": 4}},
         })
         calls = self._fake_run(monkeypatch, stdout=envelope)
         got = probe_cc_session_model("/usr/bin/true")
-        assert got == "anthropic.claude-mythos-5"
+        assert got == "anthropic.claude-fable-5"
         assert len(calls) == 1
         # Second call served from cache — no new subprocess.
         got2 = probe_cc_session_model("/usr/bin/true")
-        assert got2 == "anthropic.claude-mythos-5"
+        assert got2 == "anthropic.claude-fable-5"
         assert len(calls) == 1
 
     def test_nonzero_exit_returns_none(self, monkeypatch):

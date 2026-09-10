@@ -660,7 +660,7 @@ class LLMProvider(ABC):
         # Same four-step normalisation chain as ``context_window_for``:
         # exact -> dated alias -> bedrock strip -> both. Pre-fix the
         # bedrock steps were missing here, so a Bedrock-form id
-        # (``anthropic.claude-mythos-5``) resolved limits but NOT
+        # (``anthropic.claude-fable-5``) resolved limits but NOT
         # rates and fell into the $0 unknown-model path — budget caps
         # silently unenforced for every Bedrock-routed model.
         rates = resolve_model_costs(self.config.model_name)

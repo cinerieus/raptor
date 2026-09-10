@@ -783,12 +783,12 @@ class TestCcSubprocessEnv:
     def test_backend_families_overlaid(self, monkeypatch):
         from core.llm.cc_adapter import cc_subprocess_env
         monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
-        monkeypatch.setenv("ANTHROPIC_MODEL", "anthropic.claude-mythos-5")
+        monkeypatch.setenv("ANTHROPIC_MODEL", "anthropic.claude-fable-5")
         monkeypatch.setenv("AWS_PROFILE", "bedrock-ci")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         env = cc_subprocess_env()
         assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
-        assert env["ANTHROPIC_MODEL"] == "anthropic.claude-mythos-5"
+        assert env["ANTHROPIC_MODEL"] == "anthropic.claude-fable-5"
         assert env["AWS_PROFILE"] == "bedrock-ci"
         assert env["AWS_REGION"] == "us-east-1"
 
