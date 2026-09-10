@@ -499,6 +499,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Keep the analysis transport on the same explicit model as the interactive
+# host. The subscription provider consumes this after launcher/session
+# subprocess boundaries; it is a model identifier, never a credential.
+if [ -n "$MODEL" ]; then
+    export RAPTOR_AGENT_MODEL="$MODEL"
+fi
+
 # Build initial prompt: /raptor [target]. Strip control bytes from
 # the operator-supplied TARGET first - an embedded newline would
 # split the prompt and read as a second downstream instruction;

@@ -134,7 +134,7 @@ def test_opencode_descriptive_schema_has_object_root(monkeypatch) -> None:
         ("opencode", "opencodecli"),
     ],
 )
-def test_host_binding_beats_ambient_api_key(
+def test_api_configuration_beats_host_subscription_fallback(
     monkeypatch, agent, provider,
 ) -> None:
     monkeypatch.setenv("RAPTOR_AGENT", agent)
@@ -144,17 +144,45 @@ def test_host_binding_beats_ambient_api_key(
 
     config = _get_default_primary_model()
     assert config is not None
-    assert config.provider == provider
-    assert config.api_key is None
+    assert config.provider == "openai"
+    assert config.api_key == "must-not-win"
+
+
+def test_models_json_configuration_beats_host_subscription_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("RAPTOR_AGENT", "codex")
+    configured = ModelConfig(
+        provider="anthropic", model_name="claude-opus-4-6",
+        api_key="configured-key", role="analysis",
+    )
+    monkeypatch.setattr(
+        "core.llm.config._get_best_thinking_model", lambda: configured,
+    )
+    from core.llm.config import _get_default_primary_model
+
+    assert _get_default_primary_model() is configured
 
 
 @pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
-def test_host_binding_disables_api_fallbacks(monkeypatch, agent) -> None:
+def test_host_subscription_is_used_without_external_analysis_config(
+    monkeypatch, agent,
+) -> None:
     monkeypatch.setenv("RAPTOR_AGENT", agent)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-fallback")
-    from core.llm.config import _get_default_fallback_models
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("core.llm.config._get_best_thinking_model", lambda: None)
+    monkeypatch.setattr("core.llm.config._config_bedrock_primary", lambda: None)
+    monkeypatch.setattr("core.llm.config._get_available_ollama_models", lambda: [])
+    from core.llm.config import _get_default_primary_model
 
-    assert _get_default_fallback_models() == []
+    config = _get_default_primary_model()
+    assert config is not None
+    expected = {
+        "claude": "claudecode",
+        "codex": "codexcli",
+        "opencode": "opencodecli",
+    }
+    assert config.provider == expected[agent]
 
 
 @pytest.mark.parametrize(
@@ -175,8 +203,10 @@ def test_direct_session_marker_binds_inference(
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(marker, "session")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-win")
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr("core.llm.config._get_best_thinking_model", lambda: None)
+    monkeypatch.setattr("core.llm.config._config_bedrock_primary", lambda: None)
+    monkeypatch.setattr("core.llm.config._get_available_ollama_models", lambda: [])
 
     from core.llm.config import _get_default_primary_model
 
