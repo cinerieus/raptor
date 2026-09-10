@@ -10,7 +10,7 @@ reference documentation for the framework.
 ## Getting Started
 
 Install the required tools and Python packages ([dependencies](dependencies.md)),
-then launch RAPTOR via Claude Code with `bin/raptor`, or invoke the Python CLI
+then launch RAPTOR through Claude Code, Codex, or OpenCode with `bin/raptor`, or invoke the Python CLI
 directly with `python3 raptor.py <mode>` for CI pipelines and scripting
 ([Python CLI reference](python-cli.md)).
 

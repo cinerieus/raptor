@@ -32,8 +32,8 @@ The framework operates in six distinct modes:
 5. **Exploitability Validation**: Multi-stage pipeline proving findings are real, reachable, and exploitable
 6. **Code Understanding**: Adversarial code comprehension -- attack surface mapping, data flow tracing
 
-All modes are accessible via the unified `raptor.py` launcher or via Claude
-Code slash commands (`/scan`, `/agentic`, `/codeql`, `/fuzz`, `/web`, `/sca`,
+All modes are accessible via the unified `raptor.py` launcher or via agent
+commands (`/scan`, `/agentic`, `/codeql`, `/fuzz`, `/web`, `/sca`,
 `/validate`, `/understand`, etc.).
 
 ## Layout
@@ -79,10 +79,10 @@ Structural notes:
 
 Two distinct entry points:
 
-- **`bin/raptor`** (bash) launches the interactive Claude Code session:
+- **`bin/raptor`** (bash) launches Claude Code, Codex, or OpenCode:
   startup banner, progressive persona loading from `tiers/`,
-  slash-command dispatch, permission wiring. It also routes a few
-  commands directly without Claude (`raptor project`, `raptor doctor`,
+  command dispatch and host-specific permission wiring. It also routes a few
+  commands directly without an agent (`raptor project`, `raptor doctor`,
   `raptor frida`, `raptor sage-setup`).
 - **`raptor.py`** (python) is the non-interactive unified CLI:
   `python3 raptor.py <mode>` with modes scan, sca, binary, fuzz, web,
@@ -94,8 +94,8 @@ Two distinct entry points:
 
 RAPTOR is split into a Python **execution layer** (scanning,
 subprocess management, SARIF parsing, LLM dispatch, cost tracking --
-no judgement calls) and a Claude Code **decision layer** (`.claude/`,
-`tiers/`, `CLAUDE.md`) that prioritises findings, interprets results,
+no judgement calls) and an agent **decision layer** (`AGENTS.md`, `CLAUDE.md`,
+`.claude/`, `tiers/`) that prioritises findings, interprets results,
 and decides what to do next. The split means the Python layer runs
 standalone in CI pipelines while the decision layer drives it
 interactively. [Core concepts](concepts.md#two-layers) covers this in

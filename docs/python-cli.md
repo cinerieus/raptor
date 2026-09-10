@@ -1,8 +1,8 @@
 # Python CLI
 
 `raptor.py` is the direct entry point for CI pipelines, scripting, and
-non-interactive use. For interactive analysis via Claude Code, launch with
-`bin/raptor` instead.
+non-interactive use. For interactive analysis through Claude Code, Codex, or
+OpenCode, launch with `bin/raptor --agent <host>` instead.
 
 See also: [commands](commands.md), [README](README.md),
 [dependencies](dependencies.md).
