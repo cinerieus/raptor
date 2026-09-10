@@ -58,6 +58,37 @@ class TestKeyHandling:
         key.chmod(0o600)
         assert tmac.mint({"kind": "proxy-event", "host": "h"}) is None
 
+    def test_chunked_key_read_loads_full_key(self, tmp_path, monkeypatch):
+        """os.read may legally return fewer bytes than requested;
+        chunked delivery must not land a healthy key in the
+        wrong-length refusal (which would leave every artifact
+        unstamped and steer honest runs toward tampered)."""
+        raptor_dir = tmp_path / "xdg" / "raptor"
+        raptor_dir.mkdir(mode=0o700, parents=True)
+        key = raptor_dir / "telemetry-mac.key"
+        data = os.urandom(32)
+        key.write_bytes(data)
+        key.chmod(0o600)
+        real_read = os.read
+        monkeypatch.setattr(os, "read", lambda fd, n: real_read(fd, min(n, 5)))
+        assert tmac._read_existing_key(key) == data
+
+    def test_truncated_key_file_reads_exact_length(
+            self, tmp_path, monkeypatch):
+        # Two-direction guard: the loop reads to EOF, never pads — a
+        # torn 10-byte key still fails the caller's length check
+        # (fail-closed).
+        raptor_dir = tmp_path / "xdg" / "raptor"
+        raptor_dir.mkdir(mode=0o700, parents=True)
+        key = raptor_dir / "telemetry-mac.key"
+        key.write_bytes(os.urandom(10))
+        key.chmod(0o600)
+        real_read = os.read
+        monkeypatch.setattr(os, "read", lambda fd, n: real_read(fd, min(n, 5)))
+        got = tmac._read_existing_key(key)
+        assert isinstance(got, bytes)
+        assert len(got) == 10
+
 
 class TestKeyCreationRace:
     """The O_EXCL creation-race loser can observe the winner's file
