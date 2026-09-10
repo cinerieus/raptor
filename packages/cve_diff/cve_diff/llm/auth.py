@@ -1,4 +1,4 @@
-"""Provider resolution + Claude Code OAuth fallback for cve-diff.
+"""Provider resolution plus coding-agent subscription auth for cve-diff.
 
 cve-diff is model-agnostic: ``--model gpt-5`` calls OpenAI,
 ``--model gemini-2.5-pro`` calls Gemini, etc. Provider resolution
@@ -11,7 +11,8 @@ var. cve-diff doesn't need to enumerate provider env vars; the
 central LLM config (:data:`core.config.RaptorConfig.LLM_API_KEY_VARS`)
 does that already.
 
-cve-diff's only special case: when the operator wants an Anthropic
+cve-diff first honours a launcher-selected Codex or OpenCode transport.
+Its historical special case remains: when the operator wants an Anthropic
 model but has neither ``ANTHROPIC_API_KEY`` nor the dispatcher,
 fall through to ``provider="claudecode"`` so Claude Code's OAuth
 auth handles the call (historical cve-diff behaviour: cheap-by-
@@ -65,6 +66,7 @@ class AuthDecision:
     dispatcher route in :mod:`core.llm.providers` handles auth.
     """
     provider: str
+    model_id: str | None = None
     api_key: str | None = None
     via_dispatcher: bool = False
 
@@ -72,6 +74,14 @@ class AuthDecision:
 def resolve_auth(model_id: str) -> AuthDecision:
     """Resolve provider from model id, with the Claude Code OAuth
     fallback for Anthropic models when no other auth is available."""
+    from core.llm.agent_cli_adapter import selected_agent
+    selected = selected_agent()
+    if selected == "claude":
+        return AuthDecision(provider="claudecode", model_id="session-default")
+    if selected in ("codex", "opencode"):
+        return AuthDecision(
+            provider=f"{selected}cli", model_id="session-default",
+        )
     # Lazy import — keep this module importable in minimal envs.
     from core.security.llm_family import provider_of
 

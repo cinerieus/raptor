@@ -1,6 +1,8 @@
 """Tests for cve_diff/infra/service_health.py — probe formatting and orchestration."""
 from __future__ import annotations
 
+import pytest
+
 from cve_diff.infra import service_health
 from cve_diff.infra.service_health import (
     HealthResult,
@@ -82,6 +84,16 @@ def test_probe_anthropic_requires_api_key(monkeypatch, _anthropic_routed) -> Non
     r = service_health.probe_anthropic()
     assert r.ok is False
     assert "ANTHROPIC_API_KEY not set" in r.detail
+
+
+@pytest.mark.parametrize("agent", ["claude", "codex", "opencode"])
+def test_probe_anthropic_skips_for_selected_cli(monkeypatch, agent) -> None:
+    monkeypatch.setenv("RAPTOR_AGENT", agent)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    r = service_health.probe_anthropic()
+    assert r.ok
+    assert r.name == "Model transport"
+    assert f"selected {agent} CLI" in r.detail
 
 
 def test_probes_tuple_lists_dns_first() -> None:

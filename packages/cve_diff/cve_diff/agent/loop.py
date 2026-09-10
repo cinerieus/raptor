@@ -471,7 +471,7 @@ class AgentLoop:
             provider_name[0] = decision.provider
             model_config = ModelConfig(
                 provider=decision.provider,
-                model_name=config.model_id,
+                model_name=decision.model_id or config.model_id,
                 api_key=decision.api_key,
                 timeout=int(self.timeout_s),
             )
