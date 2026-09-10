@@ -246,6 +246,75 @@ def _pool_probe() -> bool:
     return True
 
 
+def _shutdown_pool_nowait(
+    pool: "ProcessPoolExecutor | ThreadPoolExecutor",
+    *,
+    kill_grace_s: float = 5.0,
+) -> None:
+    """Tear down an extractor pool without blocking on its workers,
+    and make sure process-pool workers actually die.
+
+    Order matters: ``ProcessPoolExecutor.shutdown()`` drops the
+    executor's reference to its worker map (``self._processes =
+    None``) before returning, so the worker snapshot MUST be taken
+    first — a post-shutdown read sees ``None`` and terminates
+    nothing. A leaked wedged worker is not just leaked RAM: the
+    executor's manager thread joins its workers, interpreter exit
+    joins the manager thread, and the worker still holds the
+    process's inherited stdout/stderr — one surviving worker turns a
+    finished-and-summarised run into a process that never exits and
+    an output pipe that never closes (a CI runner waits on that pipe
+    even after the step's shell would have finished).
+
+    ``terminate()`` alone is not enough either: a worker forked from
+    a threaded parent inherits the parent's Python signal handlers,
+    and a handler that touches a fork-frozen lock never returns — the
+    worker survives SIGTERM indefinitely. Wait on the process
+    sentinels (death is visible there no matter which thread reaps)
+    and escalate to SIGKILL after ``kill_grace_s``. Grace trade-off
+    both ways: longer lets a slow-but-responsive worker exit on
+    SIGTERM cleanly; shorter recovers the build faster when the
+    worker is truly wedged. 5s is orders of magnitude above a healthy
+    worker's SIGTERM latency and well below the stall window that
+    triggers this teardown.
+
+    ThreadPoolExecutor has no ``_processes``: the snapshot is empty
+    and this degrades to the plain non-blocking shutdown — hung
+    threads cannot be killed, only abandoned.
+    """
+    import time as _time
+    from multiprocessing import connection as _mp_connection
+
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for proc in procs:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+    if not procs:
+        return
+    deadline = _time.monotonic() + kill_grace_s
+    pending = {proc.sentinel: proc for proc in procs}
+    while pending:
+        remaining = deadline - _time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            ready = _mp_connection.wait(list(pending), timeout=remaining)
+        except OSError:
+            break
+        for sentinel in ready:
+            pending.pop(sentinel, None)
+    for proc in pending.values():
+        # kill() no-ops on an already-reaped process (returncode set),
+        # so racing the manager thread's own join here is safe.
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+
+
 def _make_extractor_pool(initargs, *, max_workers=None, contexts=None):
     """Create the extractor process pool, PROBING each candidate
     context with a real worker round-trip before committing to it.
@@ -286,13 +355,7 @@ def _make_extractor_pool(initargs, *, max_workers=None, contexts=None):
                 "inventory: %s pool context failed its worker probe; "
                 "trying the next candidate", method,
             )
-        pool.shutdown(wait=False, cancel_futures=True)
-        procs = getattr(pool, "_processes", None) or {}
-        for proc in list(procs.values()):
-            try:
-                proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+        _shutdown_pool_nowait(pool)
     return None
 
 # Stall watchdog for the extractor pool. The previous loop used
@@ -331,14 +394,8 @@ def _retry_stalled_files(files, initargs, *, _on_retry_done, futures_map):
     ``with`` block: the context manager exit would block on wedged
     workers, which is exactly what the teardown here must never do.
     """
-    def _kill(p) -> None:
-        p.shutdown(wait=False, cancel_futures=True)
-        procs = getattr(p, "_processes", None) or {}
-        for proc in list(procs.values()):
-            try:
-                proc.terminate()
-            except Exception:  # noqa: BLE001
-                pass
+    def _kill(p: ProcessPoolExecutor) -> None:
+        _shutdown_pool_nowait(p)
 
     still_failed = []
     pool = None
@@ -775,15 +832,7 @@ def build_inventory(
                 # nor interpreter exit waits on them. (Thread-pool
                 # fallback threads can't be killed — the build still
                 # proceeds; the hung thread is abandoned.)
-                pool.shutdown(wait=False, cancel_futures=True)
-                # ProcessPoolExecutor has no public kill API; _processes
-                # is the documented-in-source worker map.
-                procs = getattr(pool, "_processes", None) or {}
-                for proc in list(procs.values()):
-                    try:
-                        proc.terminate()
-                    except Exception:  # noqa: BLE001
-                        pass
+                _shutdown_pool_nowait(pool)
             else:
                 pool.shutdown(wait=True)
     else:
@@ -1250,6 +1299,22 @@ def _init_inventory_worker(
     build_tus,
     crate_modules,
 ) -> None:
+    # Signal hygiene first: fork-context workers inherit the parent's
+    # Python-level signal handlers, and embedding drivers install
+    # SIGTERM handlers whose post-mortem paths take locks that can be
+    # fork-frozen in this child — SIGTERM then never kills the worker
+    # (the handler blocks forever) and the pool teardown has to
+    # escalate to SIGKILL. Reset to the default disposition so
+    # terminate() means terminate and no parent post-mortem ever runs
+    # (and prints) inside an extractor worker. Never raise: a raising
+    # initializer breaks the whole pool.
+    import signal as _signal
+    try:
+        _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+    except (ValueError, OSError):
+        # ValueError: not the main thread (thread-pool fallback path
+        # reuses none of this, but be safe); OSError: exotic platform.
+        pass
     _worker_ctx["target"] = target
     _worker_ctx["exclude_patterns"] = exclude_patterns
     _worker_ctx["skip_generated"] = skip_generated
