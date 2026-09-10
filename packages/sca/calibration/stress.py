@@ -39,6 +39,15 @@ elapsed and keeps the better sample, so a genuine code regression
 the sweep. Count drifts are never re-measured — they are
 deterministic given upstream data.
 
+Timeout-abandoned scans get the same variance treatment inside
+:func:`run_stress_sweep` itself: the same registry roulette that
+produces 5× elapsed noise can push the largest project past its
+whole per-scan budget, so each timed-out scan is retried exactly
+once at the end of the sweep, on a fresh full budget, against the
+in-run caches the sweep just warmed — but only when its orphaned
+worker has actually finished (see the retry pass for the safety
+argument).
+
 What's deliberately NOT measured:
   * Cache hit ratio (fluctuates with TTL eviction)
   * SCA total runtime when including supply-chain / hygiene checks
@@ -324,7 +333,10 @@ def run_stress_sweep(
     — if it hasn't returned by then, a timeout result is recorded and
     the sweep continues. The scan thread itself cannot be killed and
     may linger until process exit, but won't block other scans or the
-    final summary.
+    final summary. After every other project has finished, each
+    timeout-abandoned scan whose orphaned worker has completed is
+    retried once on a fresh budget (see the retry pass below); a
+    successful retry replaces the timeout result wholesale.
 
     ``out_root`` defaults to a STABLE per-machine path under
     ``~/.raptor/cache/sca/stress/clones/``. Stable so that the
@@ -420,6 +432,15 @@ def run_stress_sweep(
         # (result already recorded) and the final shutdown skips
         # joining them.
         abandoned: set[concurrent.futures.Future] = set()
+        # Timeout-abandoned scans eligible for the end-of-sweep
+        # retry pass: (orphan future, sample, index of the timeout
+        # result in ``results``), recorded at abandonment time.
+        # Keying off the abandonment bookkeeping itself (rather than
+        # error-string matching) scopes the retry to exactly the
+        # timeout-abandonment shape.
+        timeout_abandoned: list[
+            tuple[concurrent.futures.Future, ProjectSample, int]
+        ] = []
         try:
             future_to_sample = {
                 executor.submit(
@@ -511,6 +532,9 @@ def run_stress_sweep(
                                 f"after {now - started:.0f}s"
                             ),
                         ))
+                        timeout_abandoned.append(
+                            (future, sample, len(results) - 1),
+                        )
 
                     # Starvation escape: when EVERY worker is held by
                     # an over-budget scan, queued futures may never
@@ -542,6 +566,158 @@ def run_stress_sweep(
                                     "by over-budget scans"
                                 ),
                             ))
+
+                # ── End-of-sweep retry for timeout-abandoned scans ──
+                # A scan's wall clock is one sample of a network-
+                # dominated process (see confirm_elapsed_regressions):
+                # the same registry roulette behind 5× elapsed noise
+                # can push the largest project past its whole budget,
+                # and that single sample then errors the project and
+                # blocks any baseline refresh. Retry each timeout-
+                # abandoned scan exactly ONCE, sequentially, on a
+                # fresh full budget — cheap in the common case
+                # because the sweep just warmed the in-run registry
+                # caches (cold/warm pairs on one project have
+                # measured ~18×). Headroom-via-retry deliberately
+                # beats headroom-via-bigger-budget: a larger
+                # ``sca_timeout`` would also stretch every genuinely
+                # hung scan by the same amount.
+                #
+                # Scope is timeout-ABANDONMENT only. Clone failures
+                # and clone timeouts return normally from the worker
+                # (``subprocess`` timeout) — no orphan, and no warm-
+                # cache advantage either: the clone talks to the git
+                # host, not the registry caches the sweep warmed.
+                # "Never started" cancellations and driver crashes
+                # are not variance evidence. None of those retry.
+                #
+                # Concurrency safety: the orphaned worker cannot be
+                # killed, so a retry must never overlap it on the
+                # same clone dir / shared caches. ``orphan.done()``
+                # is a sufficient gate: the executor sets a future's
+                # result strictly AFTER ``_scan_one`` returns — i.e.
+                # after every filesystem write and the in-flight-
+                # registry pop in its ``finally`` — so a done orphan
+                # makes no further writes. Nor can a late orphan
+                # clobber the retry's RESULT: abandonment removed the
+                # orphan from ``pending``, and only futures still in
+                # ``pending`` are ever read into ``results``. When
+                # the orphan is still running at its retry slot, the
+                # retry is skipped and the timeout error stands —
+                # never two concurrent scans of one project.
+                for orphan, sample, idx in timeout_abandoned:
+                    label = f"{sample.ecosystem}/{sample.name}"
+                    if not orphan.done():
+                        logger.info(
+                            "sca.calibration.stress: timeout retry "
+                            "for %s — orphan still running, retry "
+                            "skipped (keeping the timeout error)",
+                            label,
+                        )
+                        continue
+                    logger.info(
+                        "sca.calibration.stress: timeout retry for "
+                        "%s — orphan finished; retrying once on a "
+                        "fresh %.0fs budget (warm in-run cache)",
+                        label, per_scan_budget,
+                    )
+                    # Dedicated single-thread pool, not the sweep
+                    # executor: the sweep pool's threads can ALL be
+                    # held by other still-running orphans, and a
+                    # queued retry would have its fresh budget eaten
+                    # by queue time. A fresh thread starts the scan
+                    # immediately, so measuring the budget from
+                    # submit is measuring it from work start.
+                    retry_pool = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="sca-stress-timeout-retry",
+                    )
+                    try:
+                        retry = retry_pool.submit(
+                            _scan_one, sample, out_root,
+                            git_clone_timeout=git_clone_timeout,
+                        )
+                        try:
+                            second = retry.result(
+                                timeout=per_scan_budget,
+                            )
+                        except KeyboardInterrupt:
+                            raise
+                        except concurrent.futures.TimeoutError:
+                            # Ambiguous re-raise: ``result(timeout=)``
+                            # raises TimeoutError when the WAIT
+                            # expired, when the scan fn itself raised
+                            # one, and when the fn finished a moment
+                            # AFTER the wait expired. All three keep
+                            # the original timeout error (the budget
+                            # is the verdict); the split below is for
+                            # log accuracy only.
+                            if not retry.done():
+                                # The retry worker is now its own
+                                # orphan — never joined, like any
+                                # other abandoned scan; there is no
+                                # second retry.
+                                logger.warning(
+                                    "sca.calibration.stress: timeout "
+                                    "retry for %s — retry also timed "
+                                    "out; keeping the original "
+                                    "timeout error", label,
+                                )
+                            elif (exc := retry.exception()) is not None:
+                                logger.warning(
+                                    "sca.calibration.stress: timeout "
+                                    "retry for %s — retry raised "
+                                    "%s; keeping the original "
+                                    "timeout error", label,
+                                    type(exc).__name__,
+                                )
+                            else:
+                                logger.warning(
+                                    "sca.calibration.stress: timeout "
+                                    "retry for %s — retry finished "
+                                    "just past its budget; keeping "
+                                    "the original timeout error",
+                                    label,
+                                )
+                            continue
+                        except BaseException as e:  # noqa: BLE001
+                            # Same degrade-not-die posture as the
+                            # sweep loop: a raising retry keeps the
+                            # original timeout error.
+                            logger.warning(
+                                "sca.calibration.stress: timeout "
+                                "retry for %s — retry raised %s: %s; "
+                                "keeping the original timeout error",
+                                label, type(e).__name__, str(e)[:200],
+                            )
+                            continue
+                    finally:
+                        # wait=False: a timed-out retry must not
+                        # block the summary on its own thread.
+                        retry_pool.shutdown(wait=False)
+                    if second.error is not None:
+                        logger.warning(
+                            "sca.calibration.stress: timeout retry "
+                            "for %s — retry errored (%s); keeping "
+                            "the original timeout error",
+                            label, second.error,
+                        )
+                        continue
+                    # Wholesale replacement — counts, breakdown AND
+                    # elapsed all from the successful attempt,
+                    # matching the re-measure convention of using
+                    # the re-measured timing. (Unlike an elapsed
+                    # re-measure there is no count verdict to
+                    # preserve: the timed-out attempt produced no
+                    # counts at all.) In-place so ``results_sink``
+                    # consumers see the replacement too.
+                    results[idx] = second
+                    logger.info(
+                        "sca.calibration.stress: timeout retry for "
+                        "%s — succeeded in %.1fs (warm cache); "
+                        "timeout result replaced",
+                        label, second.elapsed_seconds,
+                    )
             except KeyboardInterrupt:
                 # Ctrl-C / SIGINT: without this, a plain shutdown
                 # drains the ENTIRE queued backlog (queued items

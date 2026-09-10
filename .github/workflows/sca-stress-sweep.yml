@@ -65,12 +65,25 @@ jobs:
     runs-on: ubuntu-latest
     # Base-image layer scanning joined the sweep (blob redirects +
     # distro matching), and CI runners start cold every week — the
-    # 51-project sweep now runs ~30 min wallclock, and the previous
+    # 51-project sweep runs ~30 min wallclock, and an earlier
     # 30-minute budget canceled a run AFTER the summary printed but
     # before the step could exit (losing the rc output and skipping
-    # the baseline-refresh step). 60 leaves the same relative
-    # headroom the old budget gave the pre-image-scanning sweep.
-    timeout-minutes: 60
+    # the baseline-refresh step). The end-of-sweep timeout-retry
+    # pass adds up to one per-scan budget (clone 300s + scan 600s =
+    # 15 min) per timed-out project, sequentially — a warm-cache
+    # success is ~1 min, only a retry that ALSO times out burns the
+    # full 15. Arithmetic: 30 min sweep + two full-budget failed
+    # retries (30 min) = 60 min worst case; 90 keeps headroom over
+    # that (also covering the elapsed re-measure phase's up-to-3
+    # warm re-scans, ~1 min each). More simultaneous full-budget
+    # retry failures than two means systemic registry distress —
+    # rc=2 either way, and the SIGTERM post-mortem still prints
+    # the partial summary.
+    # Trade-off both ways: lower re-risks canceling a healthy run
+    # after its summary but before the refresh step (the past
+    # incident); higher delays noticing a genuinely hung run and
+    # burns runner minutes on it.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
