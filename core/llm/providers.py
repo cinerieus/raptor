@@ -1289,6 +1289,49 @@ def _normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return {"properties": properties, "required": required}
 
 
+def _codex_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Convert JSON Schema to the strict object form Codex accepts."""
+    import copy
+
+    def nullable(value: dict[str, Any]) -> dict[str, Any]:
+        field = copy.deepcopy(value)
+        field_type = field.get("type")
+        if isinstance(field_type, str) and field_type != "null":
+            field["type"] = [field_type, "null"]
+        elif isinstance(field_type, list) and "null" not in field_type:
+            field["type"] = [*field_type, "null"]
+        elif "anyOf" in field:
+            variants = list(field["anyOf"])
+            if not any(v.get("type") == "null" for v in variants
+                       if isinstance(v, dict)):
+                field["anyOf"] = [*variants, {"type": "null"}]
+        if isinstance(field.get("enum"), list) \
+                and None not in field["enum"]:
+            field["enum"] = [*field["enum"], None]
+        return field
+
+    def strict(value: Any) -> Any:
+        if isinstance(value, list):
+            return [strict(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: strict(item) for key, item in value.items()}
+        properties = result.get("properties")
+        if isinstance(properties, dict):
+            originally_required = set(result.get("required", []))
+            result["type"] = "object"
+            result["additionalProperties"] = False
+            result["properties"] = {
+                name: (spec if name in originally_required
+                       else nullable(spec))
+                for name, spec in properties.items()
+            }
+            result["required"] = list(properties)
+        return result
+
+    return strict(schema)
+
+
 def _schema_to_gemini(schema: dict[str, Any]) -> dict[str, Any]:
     """Convert JSON Schema to Gemini-compatible schema.
 
@@ -5203,12 +5246,17 @@ class AgentCLILLMProvider(LLMProvider):
     ) -> StructuredResponse:
         from .agent_cli_adapter import run_agent_cli
 
+        normalized_schema = _normalize_schema(schema)
+        if self.agent == "codex":
+            normalized_schema = _codex_strict_schema(normalized_schema)
+        elif "type" not in normalized_schema:
+            normalized_schema = {"type": "object", **normalized_schema}
         raw, result, duration = run_agent_cli(
             self.agent,
             prompt,
             system_prompt=system_prompt,
             model=self.config.model_name,
-            schema=schema,
+            schema=normalized_schema,
             timeout_s=kwargs.pop("timeout_s", self.config.timeout),
         )
         if result is None:
@@ -5216,7 +5264,7 @@ class AgentCLILLMProvider(LLMProvider):
                 f"{self.agent} CLI returned no structured result"
             )
         estimated_in = self.estimate_tokens(
-            (system_prompt or "") + prompt + json.dumps(schema)
+            (system_prompt or "") + prompt + json.dumps(normalized_schema)
         )
         estimated_out = self.estimate_tokens(raw)
         total = estimated_in + estimated_out

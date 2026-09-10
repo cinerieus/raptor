@@ -46,7 +46,12 @@ def test_generate_uses_selected_cli(monkeypatch) -> None:
 
 
 def test_generate_structured_uses_cli_schema(monkeypatch) -> None:
-    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
 
     def fake(agent, prompt, **kwargs):
         assert kwargs["schema"] == schema
@@ -56,6 +61,70 @@ def test_generate_structured_uses_cli_schema(monkeypatch) -> None:
     response = create_provider(_config()).generate_structured("q", schema)
     assert response.result == {"ok": True}
     assert response.provider == "codexcli"
+
+
+def test_generate_structured_normalizes_descriptive_schema(monkeypatch) -> None:
+    schema = {"ok": "boolean", "reason": "string optional"}
+
+    def fake(agent, prompt, **kwargs):
+        assert kwargs["schema"] == {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "reason": {"type": ["string", "null"]},
+            },
+            "required": ["ok", "reason"],
+            "additionalProperties": False,
+        }
+        return '{"ok":true}', {"ok": True}, 0.1
+
+    monkeypatch.setattr("core.llm.agent_cli_adapter.run_agent_cli", fake)
+    response = create_provider(_config()).generate_structured("q", schema)
+    assert response.result == {"ok": True}
+
+
+def test_codex_schema_strictness_is_recursive() -> None:
+    from core.llm.providers import _codex_strict_schema
+
+    converted = _codex_strict_schema({
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "verdict": {"type": "string"},
+                        "detail": {"type": "string"},
+                    },
+                    "required": ["verdict"],
+                },
+            },
+        },
+        "required": ["items"],
+    })
+    nested = converted["properties"]["items"]["items"]
+    assert converted["type"] == "object"
+    assert converted["additionalProperties"] is False
+    assert nested["additionalProperties"] is False
+    assert nested["required"] == ["verdict", "detail"]
+    assert nested["properties"]["detail"]["type"] == ["string", "null"]
+
+
+def test_opencode_descriptive_schema_has_object_root(monkeypatch) -> None:
+    def fake(agent, prompt, **kwargs):
+        assert agent == "opencode"
+        assert kwargs["schema"] == {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+        }
+        return '{"ok":true}', {"ok": True}, 0.1
+
+    monkeypatch.setattr("core.llm.agent_cli_adapter.run_agent_cli", fake)
+    response = create_provider(_config("opencodecli")).generate_structured(
+        "q", {"ok": "boolean"}
+    )
+    assert response.result == {"ok": True}
 
 
 @pytest.mark.parametrize(
