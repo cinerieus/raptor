@@ -250,7 +250,20 @@ jobs:
           #   the refresh PR is then the (green) outcome
           # rc=1 → exit 0 (warn-only drift handled by baseline PR)
           # rc=0 → exit 0 (no drift)
-          sys.exit(2 if rc == 2 and not decision.allowed else 0)
+          #
+          # os._exit, not sys.exit: interpreter shutdown JOINS every
+          # still-running worker thread (timeout-abandoned scans and
+          # their OSV/enrichment pools are abandoned by design, and
+          # any leaked pool manager thread joins its processes) — a
+          # slow or wedged orphan then holds this step "running" long
+          # after the summary printed, until the job timeout reaps
+          # it. Everything durable is already on disk: the
+          # GITHUB_STEP_SUMMARY / GITHUB_OUTPUT writes above closed
+          # their files, the baseline write (when allowed) completed,
+          # and stdout/stderr are flushed here.
+          sys.stdout.flush()
+          sys.stderr.flush()
+          os._exit(2 if rc == 2 and not decision.allowed else 0)
           PY
 
       - name: Open baseline-refresh PR
