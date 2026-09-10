@@ -151,6 +151,7 @@ def run_sweep_and_report(
     sca_timeout: int = 600,
     max_workers: int = 4,
     out: "Callable[[str], Any]" = print,
+    driver_failure_sink: list[str] | None = None,
 ) -> tuple[int, list[StressResult]]:
     """Drive sweep → elapsed re-measure → baseline compare → render,
     and NEVER exit without a summary.
@@ -174,6 +175,16 @@ def run_sweep_and_report(
 
     Returns ``(rc, results)`` — rc per :func:`diffs_to_exit_code`,
     or 2 when a phase failed.
+
+    ``driver_failure_sink``: caller-owned list (same pattern as
+    ``results_sink``) that receives a one-line description of any
+    driver-phase failure. rc=2 alone cannot tell "fail-level drift"
+    from "the re-measure / compare / render phase crashed AFTER all
+    scans completed" — the results list is then complete and
+    error-free, exactly the shape a drift-only rc=2 has. Consumers
+    that must never treat a crashed run as adjudicable drift (the
+    baseline-refresh gate, :func:`decide_baseline_refresh`) key off
+    this sink.
     """
     import signal
     import traceback
@@ -241,6 +252,11 @@ def run_sweep_and_report(
                 f"{type(e).__name__}: {str(e)[:300]}")
             out(traceback.format_exc())
             _partial_summary("driver-phase failure")
+            if driver_failure_sink is not None:
+                driver_failure_sink.append(
+                    f"driver-phase failure: {type(e).__name__}: "
+                    f"{str(e)[:200]}"
+                )
             return 2, results
     finally:
         if prior_term is not None:
@@ -1167,13 +1183,112 @@ def diffs_to_exit_code(diffs: Sequence[StressDiff]) -> int:
     return 0
 
 
+@dataclass(frozen=True)
+class BaselineRefreshDecision:
+    """Verdict on whether a sweep's results may become the new
+    baseline, plus the human-readable reason either way."""
+
+    allowed: bool
+    reason: str
+
+
+def decide_baseline_refresh(
+    rc: int,
+    results: Sequence[StressResult],
+    *,
+    operator_refresh: bool = False,
+    expected_count: int | None = None,
+    driver_failures: Sequence[str] = (),
+) -> BaselineRefreshDecision:
+    """Gate every baseline capture a sweep driver performs.
+
+    ``rc`` is the sweep exit code (:func:`diffs_to_exit_code`, or 2
+    for a driver-phase failure). Without ``operator_refresh`` the
+    verdict matches the long-standing behaviour: warn-only drift
+    (rc=1) refreshes, fail (rc=2) never does — the operator must
+    investigate first.
+
+    ``operator_refresh`` is the investigated-and-adjudicated signal
+    (a manual workflow dispatch with the ``refresh-baseline`` input
+    set). It extends the refresh to fail-level drift — but ONLY when
+    every fail IS drift. Any errored scan (clone failure, timeout,
+    driver exception surfaced as ``StressResult.error``) refuses the
+    whole refresh: :func:`write_baseline` silently skips errored
+    projects, so the captured file would bless a partial run as the
+    expected state. An incomplete result set (fewer results than
+    ``expected_count``) refuses for the same reason, and so does any
+    entry in ``driver_failures`` (:func:`run_sweep_and_report`'s
+    ``driver_failure_sink``): a post-sweep phase crash leaves a
+    complete, error-free results list whose rc=2 was earned by the
+    crash, not by adjudicable drift — count checks alone cannot see
+    it.
+    """
+    if rc == 0:
+        return BaselineRefreshDecision(
+            allowed=False,
+            reason="no drift — baseline already current",
+        )
+    if rc == 1:
+        return BaselineRefreshDecision(
+            allowed=True, reason="warn-only drift",
+        )
+    if not operator_refresh:
+        return BaselineRefreshDecision(
+            allowed=False,
+            reason=(
+                "fail-level drift — operator must investigate "
+                "(dispatch with refresh-baseline=true once the "
+                "drift is adjudicated as legitimate)"
+            ),
+        )
+    if driver_failures:
+        return BaselineRefreshDecision(
+            allowed=False,
+            reason=(
+                f"refusing operator refresh: the sweep driver itself "
+                f"failed ({'; '.join(driver_failures)[:300]}) — this "
+                "rc=2 was earned by the crash, not by adjudicable "
+                "drift; a baseline is never captured from a broken run"
+            ),
+        )
+    errored = [r for r in results if r.error is not None]
+    if errored:
+        names = ", ".join(
+            f"{r.ecosystem}/{r.project}" for r in errored
+        )
+        return BaselineRefreshDecision(
+            allowed=False,
+            reason=(
+                f"refusing operator refresh: {len(errored)} scan(s) "
+                f"errored ({names}) — a baseline is never captured "
+                "from a broken run; re-dispatch once the errors are "
+                "resolved"
+            ),
+        )
+    if expected_count is not None and len(results) < expected_count:
+        return BaselineRefreshDecision(
+            allowed=False,
+            reason=(
+                f"refusing operator refresh: only {len(results)} of "
+                f"{expected_count} scans completed — a partial sweep "
+                "must not become the baseline"
+            ),
+        )
+    return BaselineRefreshDecision(
+        allowed=True,
+        reason="operator-adjudicated fail-level drift",
+    )
+
+
 __all__ = [
     "DEFAULT_DEPS_FAIL_PCT", "DEFAULT_DEPS_WARN_PCT",
     "DEFAULT_ELAPSED_FAIL_X", "DEFAULT_ELAPSED_WARN_X",
     "DEFAULT_VULN_FAIL_PCT", "DEFAULT_VULN_WARN_PCT",
+    "BaselineRefreshDecision",
     "StressDiff", "StressResult",
     "compare_to_baseline", "configure_sweep_logging",
     "confirm_elapsed_regressions",
+    "decide_baseline_refresh",
     "run_sweep_and_report",
     "diffs_to_exit_code",
     "render_diffs", "run_stress_sweep", "write_baseline",
