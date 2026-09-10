@@ -6,7 +6,7 @@ exclude_from_listing: true
 
 # RAPTOR Command Reference
 
-Output "RAPTOR commands:" then list all available RAPTOR slash commands grouped by workflow stage. Use the groups below as `**bold headers**`, each followed by a bullet list of commands in alphabetical order. Format: `- /command <args> — Description`. Derive the command list from the available skills — do not use a hardcoded list.
+Output "RAPTOR commands:" then list all available RAPTOR commands grouped by workflow stage. Set the displayed command prefix to `$` when `RAPTOR_AGENT=codex`; use `/` on every other host. Use that prefix consistently throughout the response. Use the groups below as `**bold headers**`, each followed by a bullet list of commands in alphabetical order. Format: `- $command <args> — Description` on Codex or `- /command <args> — Description` otherwise. Derive the command list from the available skills — do not use a hardcoded list.
 
 **Discover**
 Find vulnerabilities: agentic, codeql, fuzz, scan, sca, web.
@@ -23,10 +23,10 @@ Present results: annotate, diagram, review, scorecard.
 **Project**
 Manage work: ask, project, sage, version.
 
-After the groups, on a separate line: `- /create-skill — Save approaches as reusable skills (alpha)`
+After the groups, on a separate line, show `create-skill` with the selected prefix and the description "Save approaches as reusable skills (alpha)".
 
 Omit commands flagged as "unavailable" in the most recent startup warnings. Commands flagged as "limited" should still be shown with a note (e.g., `(limited — rr not found)`).
 
-Exclude non-RAPTOR commands (e.g., /commands itself, /help) and internal/duplicate commands (e.g., raptor-scan, raptor-fuzz, raptor-web).
+Exclude non-RAPTOR commands (`commands` itself and `help`) and internal/duplicate commands (`raptor-scan`, `raptor-fuzz`, and `raptor-web`).
 
 End with: "Commands with missing dependencies are omitted. Check the startup warnings for details."
