@@ -40,7 +40,7 @@
 
 ## What is RAPTOR?
 
-RAPTOR is an autonomous security research framework built on top of Claude Code (but not tied to it -- you can plug in your own analysis layer too). It chains together static analysis, binary analysis, LLM-powered vulnerability validation, exploit generation, and patch writing into a single workflow you can run against a codebase or binary.
+RAPTOR is an autonomous security research framework with an agent-agnostic interactive layer. Claude Code, Codex, and OpenCode can drive the same Python execution layer, command registry, and security workflow.
 
 It is not polished software. It was built in free time, held together with enthusiasm and duct tape, and it works well enough that we can't stop using it. If you want to make it better, open a PR.
 
@@ -58,7 +58,7 @@ the code.
 
 ## Prerequisites
 
-- **Claude Code** with an active subscription (Max, Pro, Team, or Enterprise) or an Anthropic API key. This is the orchestration layer -- RAPTOR runs inside a Claude Code session.
+- **A supported coding agent:** Claude Code, Codex, or OpenCode, installed and authenticated.
 - **Python 3.10+** and **Node.js 18+**.
 - **Semgrep** (`pip install semgrep`) for static analysis. CodeQL is optional but recommended.
 
@@ -76,7 +76,7 @@ cd raptor
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install Claude Code (if you don't already have it)
+# Install at least one supported agent (example)
 npm install -g @anthropic-ai/claude-code
 
 # Install Semgrep (required for scanning)
@@ -87,15 +87,15 @@ pip install semgrep
 # the repo. (Alternatively, symlink bin/raptor into a directory already on PATH.)
 export PATH="$PATH:$PWD/bin"
 
-# Launch RAPTOR
-raptor
+# Launch RAPTOR with the selected orchestration host
+raptor --agent codex
 ```
 
-The `raptor` launcher is the recommended way to start a session, and it works from any directory -- it resolves the RAPTOR installation, remembers the directory you launched from (so commands like `/scan` default to it), runs the pre-flight trust and project checks, loads the coverage-tracking plugin, and sanitises the environment before handing off to Claude Code. It also takes an optional target path and flags like `--project`, `--continue`, and `--model` -- see `raptor --help`.
+The `raptor` launcher is the recommended way to start a session, and it works from any directory. It resolves the installation, remembers the caller directory, runs trust and project checks, and sanitises the environment before handing off to the selected agent. Use `--agent claude`, `--agent codex`, or `--agent opencode`; `auto` checks `RAPTOR_AGENT`, then preserves Claude-first compatibility. Claude Code gets the read-coverage plugin. Other hosts retain the shared run lifecycle but report that hook coverage is unavailable.
 
-Running plain `claude` from inside the repo directory also works -- Claude Code picks up RAPTOR's configuration from the checkout -- but you skip everything the launcher does above: no pre-flight checks, no coverage tracking, and commands that default to "the directory you ran this from" can't see it.
+Running `claude`, `codex`, or `opencode` directly from the RAPTOR checkout also works. Direct sessions skip launcher trust checks, project/session initialization, caller-directory capture, and coverage setup.
 
-**Important:** RAPTOR loads its configuration from the repo directory. If you run `claude` from any other directory, you get plain Claude Code, not RAPTOR. The `raptor` launcher avoids this failure mode entirely.
+> Command syntax: use `/scan`, `/agentic`, and `/commands` in Claude Code or OpenCode. Codex exposes the same commands as `$scan`, `$agentic`, and `$commands`. Command tables below use slash syntax once to avoid duplication.
 
 ### Option 2: Run in a container (recommended)
 
@@ -386,7 +386,7 @@ Not currently enforced: `mypy` is installed in `requirements-dev.txt` but does n
 
 RAPTOR has two separate model layers, and it is worth knowing how both work before you change anything.
 
-The **orchestration layer** is always Claude Code. The CLAUDE.md, skills, and commands all run as Claude Code instructions. To change which Claude model orchestrates RAPTOR, use Claude Code's `--model` flag or the `/model` command inside a session.
+The **orchestration layer** can be Claude Code, Codex, or OpenCode. Select it with `raptor --agent <name>` or `RAPTOR_AGENT`. `AGENTS.md` is the host-neutral bootstrap, `CLAUDE.md` retains the shared contract, and `.claude/commands/` is the canonical command registry.
 
 The **analysis dispatch layer** is the LLM that analyses individual vulnerability findings. This is separate from the orchestration layer and can be any supported provider. Configure it in `~/.config/raptor/models.json`:
 
@@ -495,17 +495,18 @@ RAPTOR is two layers.
 
 The **Python execution layer** (`raptor.py`, `packages/`, `core/`, `engine/`) handles the heavy lifting: running Semgrep and CodeQL, managing subprocesses, parsing SARIF, deduplicating findings, dispatching LLM API calls, tracking costs, writing output files. It does not make decisions. It executes.
 
-The **Claude Code decision layer** (`.claude/`, `tiers/`, `CLAUDE.md`) makes the calls: which findings to prioritise, how to interpret results, what the attack scenario is, whether the exploit is realistic. Implemented as Claude Code skills, commands, and agents that load progressively.
+The **agent decision layer** (`AGENTS.md`, `CLAUDE.md`, `.claude/`, `tiers/`) makes the calls: which findings to prioritise, how to interpret results, what the attack scenario is, whether the exploit is realistic.
 
 ```
-CLAUDE.md              always loaded -- bootstrap, routing, security rules
+AGENTS.md              agent-neutral bootstrap
+CLAUDE.md              shared routing, security, and lifecycle rules
 .claude/commands/      slash commands (/agentic, /scan, /validate, etc.)
 .claude/skills/        methodology detail, loaded on demand
 tiers/                 adversarial thinking, recovery, expert personas
 .claude/agents/        specialist sub-agents (offsec, crash analysis, forensics)
 ```
 
-The split means you can run the Python layer from a CI pipeline (`python3 raptor.py scan --repo ...`) and get structured SARIF output without Claude Code, or run it interactively with the full agentic workflow.
+The split means you can run the Python layer from CI without a coding agent, or use any supported interactive host for the full workflow.
 
 ---
 
