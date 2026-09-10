@@ -261,6 +261,46 @@ def test_run_sca_end_to_end_against_log4shell_fixture(tmp_path: Path) -> None:
     assert "**KEV**" in md
 
 
+def test_run_sca_result_carries_in_process_eco_breakdown(
+    tmp_path: Path,
+) -> None:
+    """``RunResult.eco_breakdown`` partitions the vuln findings by
+    finding ecosystem, computed from the in-memory list — consumers
+    (e.g. the calibration stress sweep) must never have to re-read
+    findings.json for it, because a size-capped re-read of a large
+    artifact degrades to an empty breakdown that is indistinguishable
+    from a genuinely clean scan."""
+    target = tmp_path / "repo"
+    out = tmp_path / "out"
+    target.mkdir()
+    # Two ecosystems in the dep set; only the Maven dep matches an
+    # advisory in the stub. The breakdown counts FINDINGS, not deps.
+    (target / "pom.xml").write_text(
+        '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+        '<dependencies><dependency>'
+        '<groupId>org.apache.logging.log4j</groupId>'
+        '<artifactId>log4j-core</artifactId>'
+        '<version>2.14.1</version>'
+        '</dependency></dependencies></project>',
+        encoding="utf-8",
+    )
+    (target / "package.json").write_text(
+        '{"dependencies": {"lodash": "4.17.21"}}', encoding="utf-8",
+    )
+
+    http = StubHttp()
+    cache = JsonCache(root=tmp_path / "cache")
+    result = run_sca(
+        target=target, output_dir=out,
+        options=RunOptions(enable_llm_review=False, enable_triage=False),
+        http=http, cache=cache,
+    )
+
+    assert result.eco_breakdown == {"Maven": 1}
+    # Invariant: the breakdown always sums to the vuln-finding count.
+    assert sum(result.eco_breakdown.values()) == result.vuln_findings
+
+
 def test_run_sca_offline_mode_does_not_call_network(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     out = tmp_path / "out"

@@ -95,9 +95,13 @@ from .project_samples import PROJECT_SAMPLES, ProjectSample
 
 from core.json import load_json, save_json
 
-# findings.json artifacts are RAPTOR-written run output — the
-# findings-class budget.
-_MAX_FINDINGS_BYTES = 64 * 1024 * 1024
+# Read budget for the (small, committed) stress-baseline file.
+# findings.json is deliberately NEVER re-read by this module: on
+# large corpus projects the artifact legitimately runs to hundreds
+# of MB, so any fixed read cap eventually turns a healthy scan into
+# a silent "no findings" — the per-ecosystem breakdown comes from
+# the in-process ``RunResult.eco_breakdown`` instead.
+_MAX_BASELINE_BYTES = 64 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -674,38 +678,20 @@ def _scan_one_inner(
         )
     elapsed = time.monotonic() - t0
 
-    eco_breakdown = _read_eco_breakdown(sca_out / "findings.json")
-
     return StressResult(
         project=sample.name, ecosystem=sample.ecosystem,
         elapsed_seconds=elapsed,
         deps_analysed=run_result.deps_analysed,
         vuln_findings=run_result.vuln_findings,
-        eco_breakdown=eco_breakdown,
+        # In-process breakdown from the same finding list the
+        # ``vuln_findings`` count comes from. Re-reading the
+        # written findings.json here would put a size cap between
+        # the scan and its own numbers — an over-cap artifact then
+        # reads back as an empty breakdown, indistinguishable from
+        # a real zero-finding scan, and a baseline captured from it
+        # would bake that ``{}`` in.
+        eco_breakdown=dict(run_result.eco_breakdown),
     )
-
-
-def _read_eco_breakdown(findings_path: Path) -> dict[str, int]:
-    """Extract per-finding-ecosystem distribution of vuln findings.
-
-    Returns ``{}`` on missing / unreadable file — the scan layer
-    above already captures that as the ``error`` string.
-    """
-    breakdown: dict[str, int] = {}
-    data = load_json(findings_path, max_bytes=_MAX_FINDINGS_BYTES)
-    if not isinstance(data, list):
-        return breakdown
-    for f in data:
-        if not isinstance(f, dict):
-            continue
-        if f.get("vuln_type") != "sca:vulnerable_dependency":
-            continue
-        sca = f.get("sca") or {}
-        if not isinstance(sca, dict):
-            continue
-        eco = sca.get("ecosystem") or "?"
-        breakdown[eco] = breakdown.get(eco, 0) + 1
-    return breakdown
 
 
 def confirm_elapsed_regressions(
@@ -1112,7 +1098,7 @@ def _load_baseline(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        data = load_json(path, strict=True, max_bytes=_MAX_FINDINGS_BYTES)
+        data = load_json(path, strict=True, max_bytes=_MAX_BASELINE_BYTES)
         if data is not None:
             return data
         # is_file()/load race — treat like a read failure below.

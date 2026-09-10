@@ -251,6 +251,15 @@ class RunResult:
     # mistake an empty result for a clean project. Empty when no
     # parser failed.
     parse_failures: list = field(default_factory=list)
+    # Per-finding-ecosystem distribution of the vuln findings
+    # (suppressed included — it partitions the same list
+    # ``vuln_findings`` counts, so the values always sum to it).
+    # Computed in-process so consumers never have to re-read
+    # findings.json: any size-capped re-read degrades to "no
+    # findings" on large legitimate artifacts (hundreds of MB on
+    # big projects), which is indistinguishable from a genuinely
+    # empty result.
+    eco_breakdown: dict[str, int] = field(default_factory=dict)
 
 
 def _suppression_entry_label(entry: _suppressions.SuppressionEntry) -> str:
@@ -1084,6 +1093,11 @@ def run_sca(
     if offline_db is not None:
         offline_db.close()
 
+    eco_breakdown: dict[str, int] = {}
+    for f in vuln_findings:
+        eco = f.dependency.ecosystem or "?"
+        eco_breakdown[eco] = eco_breakdown.get(eco, 0) + 1
+
     return RunResult(
         target=target,
         output_dir=output_dir,
@@ -1093,6 +1107,7 @@ def run_sca(
         sarif_path=sarif_path,
         deps_analysed=len(joined),
         vuln_findings=len(vuln_findings),
+        eco_breakdown=eco_breakdown,
         hygiene_findings=len(hygiene_findings),
         supply_chain_findings=len(supply_chain_findings),
         license_findings=len(license_findings),
