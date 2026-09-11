@@ -45,7 +45,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,10 @@ class AdaptiveThrottle:
         doubling.
     min_workers:
         Floor — never reduce below this.
+    clock:
+        Monotonic time source for cooldown bookkeeping.  Defaults to
+        ``time.monotonic``.  Tests inject a fake clock so cooldown
+        choreography never races wall time.
     """
 
     def __init__(
@@ -81,10 +85,17 @@ class AdaptiveThrottle:
         cooldown_s: float = _DEFAULT_COOLDOWN_S,
         min_workers: int = _MIN_WORKERS,
         auto_register: bool = True,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._max_workers = max(max_workers, 1)
         self._cooldown_s = cooldown_s
         self._min_workers = max(min_workers, 1)
+        # Resolved at construction (not in the signature default) so a
+        # caller that patches ``time.monotonic`` before constructing
+        # still takes effect.
+        self._clock: Callable[[], float] = (
+            clock if clock is not None else time.monotonic
+        )
 
         self._lock = threading.Lock()
         self._effective = self._max_workers
@@ -156,7 +167,7 @@ class AdaptiveThrottle:
         through the reduction and only wake on the next release.
         """
         with self._condition:
-            self._last_signal = time.monotonic()
+            self._last_signal = self._clock()
             self._signal_count += 1
             old = self._effective
             self._effective = max(self._effective // 2, self._min_workers)
@@ -187,7 +198,7 @@ class AdaptiveThrottle:
             if self._effective >= self._max_workers:
                 return
             anchor = max(self._last_signal, self._last_ramp)
-            elapsed = time.monotonic() - anchor
+            elapsed = self._clock() - anchor
             if elapsed >= self._cooldown_s:
                 # Credit every FULL quiet interval since the anchor —
                 # a checker that only wakes occasionally still earns
@@ -204,7 +215,7 @@ class AdaptiveThrottle:
                         break
                     new *= 2
                 self._effective = min(new, self._max_workers)
-                self._last_ramp = time.monotonic()
+                self._last_ramp = self._clock()
                 logger.info(
                     "throttle: cooldown elapsed — concurrency %d → %d%s",
                     old, self._effective,
