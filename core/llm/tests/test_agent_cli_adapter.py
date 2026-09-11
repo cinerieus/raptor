@@ -332,6 +332,74 @@ def test_operator_can_extend_provider_host_allowlist(monkeypatch) -> None:
     assert "llm.example.test" in hosts
 
 
+def test_codex_provider_base_url_extends_allowlist(
+    tmp_path, monkeypatch,
+) -> None:
+    from core.llm.agent_cli_adapter import proxy_hosts_for_agent
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[model_providers.gateway]\nbase_url = "https://llm.example.test/v1"\n'
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert "llm.example.test" in proxy_hosts_for_agent("codex")
+
+
+def test_opencode_provider_base_urls_extend_allowlist(
+    tmp_path, monkeypatch,
+) -> None:
+    from core.llm.agent_cli_adapter import proxy_hosts_for_agent
+
+    config_home = tmp_path / "config"
+    opencode = config_home / "opencode"
+    opencode.mkdir(parents=True)
+    (opencode / "opencode.jsonc").write_text(
+        '{"provider": {'
+        '"gateway": {"options": {'
+        '"baseURL": "https://llm.example.test/v1"}},'
+        '"amazon-bedrock": {"options": {"region": "eu-west-1"}}'
+        '}}'
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    hosts = proxy_hosts_for_agent("opencode")
+
+    assert "llm.example.test" in hosts
+    assert "bedrock-runtime.eu-west-1.amazonaws.com" in hosts
+    assert "sts.eu-west-1.amazonaws.com" in hosts
+
+
+def test_opencode_vertex_environment_extends_allowlist(
+    tmp_path, monkeypatch,
+) -> None:
+    from core.llm.agent_cli_adapter import proxy_hosts_for_agent
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "security-project")
+    monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
+    hosts = proxy_hosts_for_agent("opencode")
+
+    assert "us-central1-aiplatform.googleapis.com" in hosts
+    assert "oauth2.googleapis.com" in hosts
+
+
+def test_configured_provider_rejects_credentialed_url(
+    tmp_path, monkeypatch,
+) -> None:
+    from core.llm.agent_cli_adapter import proxy_hosts_for_agent
+
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[model_providers.gateway]\n'
+        'base_url = "https://user:secret@llm.example.test/v1"\n'
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    assert "llm.example.test" not in proxy_hosts_for_agent("codex")
+
+
 def test_provider_host_override_rejects_urls(monkeypatch) -> None:
     from core.llm.agent_cli_adapter import _proxy_hosts
 

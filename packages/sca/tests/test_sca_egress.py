@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from packages.sca import SCA_ALLOWED_HOSTS
+from packages.sca import SCA_ALLOWED_HOSTS, _cli_llm_proxy_hosts
 from packages.sca.agent import _find_sca_agent, run_sca_subprocess
 
 # ---------------------------------------------------------------------------
@@ -70,6 +70,39 @@ class TestScaAllowedHosts:
         should be lowercase for consistency."""
         for host in SCA_ALLOWED_HOSTS:
             assert host == host.lower(), f"{host} is not lowercase"
+
+
+class TestCliLlmProxyHosts:
+
+    @pytest.mark.parametrize(
+        ("provider", "required_host"),
+        (
+            ("claudecode", "api.anthropic.com"),
+            ("codexcli", "api.openai.com"),
+            ("opencodecli", "api.opencode.ai"),
+        ),
+    )
+    def test_selected_cli_provider_adds_transport_hosts(
+        self, provider, required_host,
+    ):
+        model = MagicMock(provider=provider)
+        config = MagicMock(
+            primary_model=model,
+            fallback_models=[],
+            specialized_models={},
+        )
+
+        assert required_host in _cli_llm_proxy_hosts(config)
+
+    def test_api_provider_does_not_add_cli_transport_hosts(self):
+        model = MagicMock(provider="anthropic")
+        config = MagicMock(
+            primary_model=model,
+            fallback_models=[],
+            specialized_models={},
+        )
+
+        assert _cli_llm_proxy_hosts(config) == set()
 
 
 # ---------------------------------------------------------------------------
