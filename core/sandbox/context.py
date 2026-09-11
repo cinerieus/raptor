@@ -3670,6 +3670,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # check result.sandbox_info["mount_ns_degraded"] instead of
         # scraping stderr warnings.
         _mount_ns_degraded = None
+        # The original backend exception when the demotion came via the
+        # mid-setup spawn EXCEPTION ladder (the environmental except arm
+        # below), kept so the fresh-procfs catch-all gate in the
+        # `if not used_spawn` block can chain its refusal to the real
+        # failure. None on every other demotion route.
+        _spawn_ladder_err: BaseException | None = None
         _audit_landlock_engaged = False
         # Why audit could not engage for this call, for the degrade
         # marker / audit_required raise at the no-audit bottleneck
@@ -4600,11 +4606,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     # fresh-procfs contract) keeps its fail-loud
                     # BaseException contract and is re-raised
                     # untouched. The degrade below is loud (warning +
-                    # sandbox_info.mount_ns_degraded) and the
-                    # Landlock-recheck / untrusted / strict / persona
-                    # gates in the `if not used_spawn` block still
-                    # decide whether the demoted call may actually
-                    # run.
+                    # sandbox_info.mount_ns_degraded) and the strict /
+                    # persona / fresh-procfs (untrusted) / Landlock-
+                    # recheck gates in the `if not used_spawn` block
+                    # still decide whether the demoted call may
+                    # actually run.
                     if (isinstance(_spawn_err, _errors.SandboxSetupError)
                             and _spawn_err.setup_category != "U"):
                         raise
@@ -4665,6 +4671,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             "userns sysctl) to restore the mount-ns "
                             "audit tier.")
                     _mount_ns_degraded = f"spawn setup failed: {_spawn_err}"
+                    # Keep the exception object itself: the except
+                    # binding is unset when this block exits, and the
+                    # fresh-procfs gate below needs it for `raise ...
+                    # from` chaining and its setup_category.
+                    _spawn_ladder_err = _spawn_err
                     logger.warning(
                         "Sandbox: mount-ns spawn path failed (%s); "
                         "falling back to Landlock-only subprocess path."
@@ -4744,6 +4755,49 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             "require_sanitisation= to accept "
                             "host-real identity surfaces on degrade.",
                         )
+                    # Fresh-procfs fail-closed gate (catch-all arm):
+                    # this subprocess path runs with NO pid namespace
+                    # and the HOST /proc — the exact posture
+                    # require_fresh_procfs exists to refuse. The
+                    # pre-spawn arm gates the routes that never attempt
+                    # the spawn backend, and the M/X arm gates the
+                    # status-byte demotions, but the mid-setup spawn
+                    # EXCEPTION ladder (FileNotFoundError /
+                    # RuntimeError / OSError / category-'U'
+                    # SandboxSetupError) landed here ungated: an
+                    # untrusted run whose spawn raised silently re-ran
+                    # with the full host process table visible, never
+                    # consulting the operator override that governs
+                    # every other degraded-untrusted shape. Like the
+                    # persona arm above, this one backstops every
+                    # route into the Landlock-only lane. Chained to
+                    # the original backend failure so the real cause
+                    # stays diagnosable.
+                    if _require_fresh_procfs:
+                        from .errors import SandboxSetupError
+                        _demote_why = (
+                            f"{_spawn_ladder_err.__class__.__name__}: "
+                            f"{_spawn_ladder_err}"
+                            if _spawn_ladder_err is not None
+                            else (_mount_ns_degraded
+                                  or _b_fallback_reason
+                                  or "mount-ns spawn was demoted for "
+                                     "this call"))
+                        raise SandboxSetupError(
+                            "sandbox: this call was demoted from the "
+                            f"mount-ns backend ({_demote_why}) on an "
+                            "untrusted run — refusing the Landlock-"
+                            "only fallback, which exposes the "
+                            "host-pid /proc.",
+                            "fix the demotion cause (see the sandbox "
+                            "log for the spawn failure; typical hosts "
+                            "need the uidmap package and the userns "
+                            "sysctl). "
+                            + _fresh_procfs_override_hint(),
+                            setup_category=getattr(
+                                _spawn_ladder_err, "setup_category",
+                                None),
+                        ) from _spawn_ladder_err
                     # Landlock recheck (fail-closed). The construction-
                     # time "confinement requested but Landlock
                     # unavailable" refusal only runs when the mount

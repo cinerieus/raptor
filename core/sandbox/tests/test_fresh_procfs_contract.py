@@ -20,6 +20,7 @@ import sys
 import textwrap
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -487,6 +488,170 @@ def test_exec_failure_refusal_carries_setup_category(tmp_path, monkeypatch):
         pytest.skip(f"mount-ns lane unavailable: {e}")
     assert excinfo.value.setup_category == "X"
     assert "ETXTBSY" in str(excinfo.value)
+
+
+def _make_ladder_exc(shape: str) -> BaseException:
+    """One representative exception per arm of context.py's mid-setup
+    spawn-exception ladder (the environmental ``except`` around
+    ``_spawn.run_sandboxed``)."""
+    from core.sandbox.errors import SandboxSetupError
+    if shape == "filenotfound":
+        return FileNotFoundError("newuidmap: no such file or directory")
+    if shape == "oserror":
+        return OSError("libc soname absent (ctypes.CDLL)")
+    if shape == "runtimeerror":
+        return RuntimeError("userns refused at runtime")
+    assert shape == "setup-category-u"
+    return SandboxSetupError(
+        "spawn child died at its unshare stage",
+        "environment hint", setup_category="U")
+
+
+def _untrusted_lane_or_skip(
+        ctx_mod: "types.ModuleType", spawn_mod: "types.ModuleType",
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pre-flight: prove run_untrusted() reaches the spawn dispatch on
+    this host (probes, entry gates) with a stubbed-successful backend.
+    Any failure here is host environment, not the property under test
+    — skip so the gated assertions below stay attributable."""
+
+    def ok_spawn(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, returncode=0,
+                                           stdout="", stderr="")
+
+    monkeypatch.setattr(spawn_mod, "run_sandboxed", ok_spawn)
+    try:
+        r = ctx_mod.run_untrusted(["true"], target=str(tmp_path),
+                                  output=str(tmp_path), timeout=60)
+    except BaseException as e:  # noqa: BLE001 — includes SandboxSetupError
+        pytest.skip(f"untrusted lane unavailable on this host: {e}")
+    if r.returncode != 0:
+        pytest.skip("untrusted lane pre-flight did not run cleanly")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+@pytest.mark.parametrize("shape", ["filenotfound", "oserror",
+                                   "runtimeerror", "setup-category-u"])
+def test_spawn_exception_refuses_landlock_only_for_untrusted(
+        tmp_path, monkeypatch, shape):
+    """A mid-setup spawn EXCEPTION on an untrusted run must not ride
+    the environmental-degradation ladder onto the Landlock-only
+    subprocess lane — that lane runs with no pid namespace and the
+    HOST /proc visible, the exact posture the fresh-procfs contract
+    refuses (the status-byte M/X demotions already refuse; pre-fix the
+    exception ladder silently proceeded). All four except-arm shapes
+    hit the same chokepoint: the refusal names the operator override,
+    chains the original backend failure, and the target never
+    executes."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    _untrusted_lane_or_skip(_ctx, _spawn_mod, monkeypatch, tmp_path)
+
+    original = _make_ladder_exc(shape)
+    attempts: list[int] = []
+    sentinel = tmp_path / "child-ran.marker"
+
+    def raising_spawn(cmd, **kwargs):
+        attempts.append(1)
+        raise original
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run_untrusted(["touch", str(sentinel)],
+                           target=str(tmp_path), output=str(tmp_path),
+                           timeout=60)
+    msg = str(excinfo.value)
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in msg
+    assert "host-pid /proc" in msg
+    # The original backend failure stays diagnosable: named in the
+    # message AND chained as the cause.
+    assert type(original).__name__ in msg
+    assert excinfo.value.__cause__ is original
+    if shape == "setup-category-u":
+        assert excinfo.value.setup_category == "U"
+    assert len(attempts) == 1, "expected exactly one spawn attempt"
+    assert not sentinel.exists(), (
+        "the refused call must never execute the target")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_spawn_exception_still_demotes_trusted_runs(
+        tmp_path, monkeypatch, caplog):
+    """Trusted runs keep the environmental-degradation ladder: a
+    mid-setup spawn exception falls back to the Landlock-only
+    subprocess lane, loudly (warning + sandbox_info marker), and the
+    child actually runs there."""
+    import logging as _logging
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+
+    def raising_spawn(cmd, **kwargs):
+        raise OSError("forced spawn setup failure")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    sentinel = tmp_path / "child-ran.marker"
+    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
+        try:
+            r = _ctx.run(["touch", str(sentinel)], target=str(tmp_path),
+                         output=str(tmp_path), timeout=60)
+        except SandboxSetupError as e:
+            # A refusal from the untrusted gate here would be an
+            # over-blocking regression, never a skip.
+            assert "untrusted run" not in str(e), str(e)
+            pytest.skip(f"Landlock-only lane unavailable: {e}")
+        except Exception as e:  # noqa: BLE001 — host can't reach the lane
+            pytest.skip(f"Landlock-only lane unavailable: {e}")
+    if r.returncode != 0:
+        pytest.skip(f"legacy lane child failed on this host: "
+                    f"rc={r.returncode}")
+    assert sentinel.exists(), "trusted demoted child did not run"
+    assert r.sandbox_info.get("mount_ns_degraded") == (
+        "spawn setup failed: forced spawn setup failure")
+    assert any("falling back to Landlock-only" in rec.getMessage()
+               for rec in caplog.records), caplog.text
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_spawn_exception_optin_keeps_legacy_lane_for_untrusted(
+        tmp_path, monkeypatch):
+    """RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 is exactly the consent the
+    refusal names: with it set, the same spawn exception demotes the
+    untrusted run onto the legacy subprocess lane as before. Positive
+    control for the refusal test: the child really runs there and
+    really sees the HOST /proc (pid 1 is the host's init — the legacy
+    lane's unshare --pid never remounts /proc)."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+
+    def raising_spawn(cmd, **kwargs):
+        raise RuntimeError("userns refused at runtime")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+    try:
+        r = _ctx.run_untrusted(["cat", "/proc/1/comm"],
+                               target=str(tmp_path),
+                               output=str(tmp_path), timeout=60,
+                               capture_output=True, text=True)
+    except SandboxSetupError as e:
+        pytest.fail(f"opted-in untrusted run was refused: {e}")
+    except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        pytest.skip(f"legacy lane unavailable: {e}")
+    if r.returncode != 0:
+        pytest.skip(f"legacy lane child failed on this host: "
+                    f"rc={r.returncode}")
+    host_init = Path("/proc/1/comm").read_text()
+    assert r.stdout == host_init, (
+        "the opted-in legacy lane is expected to expose the host-pid "
+        "/proc — that is exactly what the override consents to")
 
 
 @pytest.mark.integration
