@@ -721,6 +721,223 @@ def test_waiver_warn_covers_pass_fds_demotion(monkeypatch, caplog):
     assert not caplog.records, caplog.text
 
 
+# ------------------------------- environmental use_sandbox=False gate
+#
+# When the isolation backend cannot engage AT ALL (userns probe
+# refused: container default seccomp, Ubuntu 24.04 AppArmor sysctl,
+# missing uidmap; sandbox-exec smoke-test failure on macOS),
+# `use_sandbox` computes False and every OTHER fresh-procfs gate —
+# all guarded by `use_sandbox` — goes quiet. These tests pin the
+# environmental gate that refuses instead, and the three flows it
+# must NOT touch (opt-in, trusted, operator-disabled). Hermetic: the
+# environment is simulated at the probe seam (context.py's
+# module-level wrapper indirection exists exactly for this patch
+# point), no real namespace work.
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_environmental_no_sandbox_refuses_fresh_procfs_contract(
+        tmp_path, monkeypatch):
+    """A run carrying the resolved fresh-procfs contract on an
+    environmentally userns-less host must refuse up front — pre-fix
+    it proceeded on the plain-subprocess lane with the HOST process
+    table visible behind a once-per-process warning. The refusal
+    names the override, and neither the spawn backend nor the target
+    ever runs."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+
+    # Pre-flight: the same shape WITHOUT the contract flag must run on
+    # this host (plain-subprocess lane) — otherwise a refusal below
+    # would be unattributable to the gate under test.
+    try:
+        pre = _ctx.run(["true"], target=str(tmp_path),
+                       output=str(tmp_path), timeout=60)
+    except BaseException as e:  # noqa: BLE001 — includes SandboxSetupError
+        pytest.skip(f"degraded lane unavailable on this host: {e}")
+    if pre.returncode != 0:
+        pytest.skip("degraded-lane pre-flight did not run cleanly")
+
+    spawn_attempts: list[int] = []
+
+    def counting_spawn(cmd, **kwargs):
+        spawn_attempts.append(1)
+        return subprocess.CompletedProcess(cmd, returncode=0,
+                                           stdout="", stderr="")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", counting_spawn)
+    sentinel = tmp_path / "child-ran.marker"
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run(["touch", str(sentinel)], target=str(tmp_path),
+                 output=str(tmp_path), timeout=60,
+                 require_fresh_procfs=(
+                     _ctx.untrusted_fresh_procfs_required()))
+    msg = str(excinfo.value)
+    assert "fresh-procfs contract" in msg
+    assert "HOST process table" in msg
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in msg
+    assert not spawn_attempts, "the refused call reached the spawn backend"
+    assert not sentinel.exists(), (
+        "the refused call must never execute the target")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_environmental_no_sandbox_optin_keeps_degraded_lane(
+        tmp_path, monkeypatch, caplog):
+    """RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 is exactly the consent the
+    refusal names: the helper resolves the contract flag to False, no
+    gate fires, and the run proceeds on the degraded lane behind the
+    existing once-per-process warning (text pinned)."""
+    import logging as _logging
+    from core.sandbox import context as _ctx
+    from core.sandbox import state
+    from core.sandbox.errors import SandboxSetupError
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+    monkeypatch.setattr(state, "_sandbox_unavailable_warned", False)
+    sentinel = tmp_path / "child-ran.marker"
+    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
+        try:
+            r = _ctx.run(["touch", str(sentinel)], target=str(tmp_path),
+                         output=str(tmp_path), timeout=60,
+                         require_fresh_procfs=(
+                             _ctx.untrusted_fresh_procfs_required()))
+        except SandboxSetupError as e:
+            if "fresh-procfs" in str(e):
+                pytest.fail(f"opted-in run was refused: {e}")
+            pytest.skip(f"degraded lane unavailable on this host: {e}")
+    if r.returncode != 0:
+        pytest.skip(f"degraded-lane child failed on this host: "
+                    f"rc={r.returncode}")
+    assert sentinel.exists(), "opted-in degraded child did not run"
+    assert any(
+        rec.getMessage() == "Sandbox unavailable — subprocesses run "
+                            "without namespace isolation"
+        for rec in caplog.records), caplog.text
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_environmental_no_sandbox_trusted_flow_unchanged(
+        tmp_path, monkeypatch):
+    """A trusted run (contract flag absent) on the same userns-less
+    host keeps today's degrade-with-warning behavior — the gate keys
+    on the resolved flag, not on the environment."""
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+    sentinel = tmp_path / "child-ran.marker"
+    try:
+        r = _ctx.run(["touch", str(sentinel)], target=str(tmp_path),
+                     output=str(tmp_path), timeout=60)
+    except SandboxSetupError as e:
+        if "fresh-procfs" in str(e):
+            pytest.fail(f"trusted run was refused by the untrusted "
+                        f"gate: {e}")
+        pytest.skip(f"degraded lane unavailable on this host: {e}")
+    if r.returncode != 0:
+        pytest.skip(f"degraded-lane child failed: rc={r.returncode}")
+    assert sentinel.exists(), "trusted degraded child did not run"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_operator_disabled_sandbox_ignores_contract_flag(
+        tmp_path, monkeypatch):
+    """The operator's explicit sandbox-off surface stays authoritative:
+    under `disabled=True` or the CLI `--sandbox none` the per-call
+    contract flag is (today, deliberately) silenced along with every
+    other containment layer — the environmental gate must NOT fire
+    even on a userns-less host. Pins the pre-existing behavior in
+    both flag states and both operator-explicit disable spellings.
+    (A LIBRARY caller's `profile='none'` is not operator consent —
+    `effectively_disabled` derives from the CLI choice and the
+    `disabled=` kwarg only — so it is deliberately absent here.)"""
+    from core.sandbox import context as _ctx
+    from core.sandbox import state
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+    for spelling in ("disabled-kwarg", "cli-sandbox-none"):
+        if spelling == "cli-sandbox-none":
+            monkeypatch.setattr(state, "_cli_sandbox_profile", "none")
+            disable_kw = {}
+        else:
+            disable_kw = {"disabled": True}
+        for flag in (True, False):
+            sentinel = tmp_path / f"ran-{spelling}-{flag}"
+            r = _ctx.run(["touch", str(sentinel)], timeout=60,
+                         require_fresh_procfs=flag, **disable_kw)
+            assert r.returncode == 0, (spelling, flag, r)
+            assert sentinel.exists(), (spelling, flag)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_environmental_gate_literal_true_hint_is_honest(
+        tmp_path, monkeypatch):
+    """A caller passing a LITERAL require_fresh_procfs=True made an
+    explicit ask the env var does not relax: with the waiver set the
+    gate still fires, and the hint says the override will not relax
+    it instead of advertising it."""
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run(["true"], target=str(tmp_path), output=str(tmp_path),
+                 timeout=60, require_fresh_procfs=True)
+    msg = str(excinfo.value)
+    if "fresh-procfs contract" not in msg:
+        pytest.skip(f"different environmental refusal on this host: {msg}")
+    assert "does not relax" in msg
+
+
+def test_env_refusal_darwin_arm_names_seatbelt(monkeypatch):
+    """The darwin arm of the environmental refusal (seatbelt probe
+    failed + fresh-procfs contract) names the seatbelt remedy, not
+    the Linux userns diagnostics — unit-tested off-platform via the
+    module's `sys` attribute (the helper consults only
+    ``sys.platform``)."""
+    from core.sandbox import context as _ctx
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    monkeypatch.setattr(_ctx, "sys",
+                        types.SimpleNamespace(platform="darwin"))
+    text = str(_ctx._fresh_procfs_env_refusal())
+    assert "sandbox-exec" in text
+    assert "rlimits-only" in text
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in text
+    assert "mount-ns blocked" not in text, (
+        "darwin refusal carries the Linux userns diagnostic")
+
+
+def test_payload_executors_derive_contract_flag_from_helper():
+    """Source pin: the three direct payload executors derive
+    require_fresh_procfs= from the env-var-honouring helper — a
+    literal True at those call sites would make the operator waiver
+    a lie (the refusal hint tells literal-True callers so)."""
+    callers = {
+        "packages/llm_analysis/exploit_verify.py":
+            "require_fresh_procfs=untrusted_fresh_procfs_required()",
+        "packages/exploit_feasibility/under_mitigations.py":
+            "require_fresh_procfs=untrusted_fresh_procfs_required()",
+        "core/audit/dark_verify/_execute.py":
+            "require_fresh_procfs=_fresh_procfs_required()",
+    }
+    for rel, needle in callers.items():
+        src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert needle in src, f"{rel}: contract-flag derivation drifted"
+        assert "require_fresh_procfs=True" not in src, (
+            f"{rel}: literal require_fresh_procfs=True bypasses the "
+            f"operator waiver")
+    # dark_verify's local helper must itself delegate to the reader.
+    dv = (_REPO_ROOT / "core/audit/dark_verify/_execute.py").read_text(
+        encoding="utf-8")
+    assert "untrusted_fresh_procfs_required()" in dv, (
+        "_fresh_procfs_required() no longer delegates to the env-var "
+        "reader")
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
 def test_no_branded_names_in_target_view(tmp_path):

@@ -2827,6 +2827,32 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 "mount-ns backend can engage. "
                 + _fresh_procfs_override_hint(),
             )
+        # Environmental-degrade gate: every other fresh-procfs gate in
+        # run() is (or is only reached) behind `use_sandbox`, so on a
+        # host where the isolation backend cannot engage AT ALL
+        # (userns probe refused: container default seccomp, the
+        # Ubuntu 24.04 AppArmor userns sysctl, missing uidmap tooling;
+        # sandbox-exec smoke-test failure on macOS) a contract-carrying
+        # call skipped them all and ran on the plain-subprocess lane
+        # with the HOST process table visible — behind nothing louder
+        # than a once-per-process warning. Refuse instead. Deliberate
+        # trade-off on `not effectively_disabled`: the operator's
+        # explicit sandbox-off surface (--sandbox none / --no-sandbox
+        # / disabled=True) stays authoritative and is NOT
+        # second-guessed here (a LIBRARY caller's profile='none' is
+        # not operator consent — it does not set effectively_disabled
+        # and does not exempt), matching the pre-spawn arm's
+        # escape-hatch contract — at the cost that the explicit global
+        # disable also silences this per-call flag, exactly as it
+        # silences every other containment layer. Tightening that
+        # direction would make an operator's --sandbox none session
+        # unable to run the payload executors at all; loosening it
+        # (dropping the effectively_disabled test is already the other
+        # bound) would break the documented escape hatch. Both
+        # directions are pinned by tests.
+        if (_require_fresh_procfs and not use_sandbox
+                and not effectively_disabled):
+            raise _fresh_procfs_env_refusal()
         _inherit_netns = kwargs.pop("inherit_netns", False)
         _start_new_session = kwargs.pop("start_new_session", True)
         # Deterministic child cwd. With no cwd= the two execution paths
@@ -6186,6 +6212,41 @@ def _fresh_procfs_override_hint() -> str:
         "Alternatively set RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 to "
         "explicitly accept host-procfs-visible containment."
     )
+
+
+def _fresh_procfs_env_refusal() -> "_errors.SandboxSetupError":
+    """Build the refusal for a fresh-procfs contract call on a host
+    where no isolation backend engaged for ENVIRONMENTAL reasons
+    (``use_sandbox`` computed False without an operator disable).
+
+    Split out of run() so the darwin remedy arm is unit-testable
+    off-platform. The remedy names the actual host condition (Linux:
+    :func:`mount_unavailable_reason`, the host diagnostic for the
+    userns-founded backends — legitimate here because the mount
+    probe is definitionally False whenever the net probe is; macOS:
+    the sandbox-exec binary / smoke test) and appends
+    :func:`_fresh_procfs_override_hint`, which tells the
+    literal-True vs derived-flag override story honestly.
+    """
+    if sys.platform == "darwin":
+        condition = ("the seatbelt backend (sandbox-exec) is "
+                     "unavailable or failed its smoke test")
+        exposure = ("the fallback would run the untrusted target "
+                    "with rlimits-only containment")
+        fix = ("verify /usr/bin/sandbox-exec exists and can run a "
+               "minimal profile.")
+    else:
+        from .probes import mount_unavailable_reason
+        condition, fix = mount_unavailable_reason()
+        exposure = ("the fallback lanes leave the HOST process table "
+                    "visible to the untrusted target")
+    msg = (
+        "sandbox run(): the fresh-procfs contract cannot be met — no "
+        f"isolation backend engaged on this host ({condition}), and "
+        f"{exposure}."
+    )
+    return _errors.SandboxSetupError(
+        msg, fix + " " + _fresh_procfs_override_hint())
 
 
 def untrusted_fresh_procfs_required() -> bool:
