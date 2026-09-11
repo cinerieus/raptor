@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat as stat_module
 import subprocess
 import tempfile
 import time
@@ -20,6 +21,79 @@ from typing import Any
 _SCHEMA_VERSION = 1
 _TTL_SECONDS = 24 * 60 * 60
 _CLI_PROVIDERS = {"codexcli": "codex", "opencodecli": "opencode"}
+_MAX_ROUTING_FILE_BYTES = 1024 * 1024
+
+
+def _routing_file_digest(path: Path) -> str | None:
+    """Hash a bounded regular routing file, or return None if unsafe."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return None
+    if (not stat_module.S_ISREG(info.st_mode)
+            or info.st_size > _MAX_ROUTING_FILE_BYTES):
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > _MAX_ROUTING_FILE_BYTES:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _routing_fingerprint(cli: str) -> str | None:
+    """Fingerprint model/provider routing without recording secret values."""
+    home = Path.home()
+    paths: list[Path]
+    content = ""
+    if cli == "codex":
+        paths = [
+            Path(os.environ.get("CODEX_HOME", home / ".codex"))
+            / "config.toml"
+        ]
+    else:
+        config_home = Path(
+            os.environ.get("XDG_CONFIG_HOME", home / ".config")
+        )
+        paths = [
+            config_home / "opencode" / "opencode.json",
+            config_home / "opencode" / "opencode.jsonc",
+        ]
+        explicit = os.environ.get("OPENCODE_CONFIG", "").strip()
+        if explicit:
+            paths.append(Path(explicit))
+        content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
+        if len(content.encode("utf-8")) > _MAX_ROUTING_FILE_BYTES:
+            return None
+
+    file_digests: dict[str, str] = {}
+    for path in paths:
+        digest = _routing_file_digest(path)
+        if digest is None:
+            return None
+        file_digests[str(path)] = digest
+
+    routing_env = {
+        name: hashlib.sha256(value.encode("utf-8")).hexdigest()
+        for name, value in os.environ.items()
+        if value and (
+            name == "RAPTOR_AGENT_CLI_PROXY_HOSTS"
+            or name.endswith((
+                "_BASE_URL", "_ENDPOINT", "_MODEL", "_PROVIDER",
+                "_REGION", "_PROFILE",
+            ))
+        )
+    }
+    payload = {
+        "files": file_digests,
+        "content": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "environment": routing_env,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _cache_path() -> Path:
@@ -49,6 +123,10 @@ def _identity(model: Any, profile: Any) -> str | None:
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
 
+    routing = _routing_fingerprint(cli)
+    if routing is None:
+        return None
+
     payload = {
         "schema": _SCHEMA_VERSION,
         "provider": provider,
@@ -57,6 +135,7 @@ def _identity(model: Any, profile: Any) -> str | None:
         "binary_mtime_ns": stat.st_mtime_ns,
         "binary_size": stat.st_size,
         "cli_version": version,
+        "routing": routing,
         "profile": asdict(profile),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
