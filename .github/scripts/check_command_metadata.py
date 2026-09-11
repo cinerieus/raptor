@@ -35,6 +35,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 COMMANDS_DIR = REPO / ".claude" / "commands"
 COMMANDS_INDEX = COMMANDS_DIR / "commands.md"
+CODEX_SKILLS_DIR = REPO / ".agents" / "skills"
+OPENCODE_COMMANDS_DIR = REPO / ".opencode" / "commands"
 
 # Dispatch tokens we accept. ``skill`` means "no single libexec — see
 # the body of the .md for multi-step workflow." Everything else must
@@ -102,6 +104,46 @@ def _check_dispatch(name: str, dispatch: str) -> list[str]:
     return errs
 
 
+def _check_host_adapters(command_names: set[str]) -> list[str]:
+    """Require one thin Codex and OpenCode adapter per canonical command."""
+    errs: list[str] = []
+    codex_names = {
+        path.parent.name
+        for path in CODEX_SKILLS_DIR.glob("*/SKILL.md")
+    }
+    opencode_names = {
+        path.stem
+        for path in OPENCODE_COMMANDS_DIR.glob("*.md")
+    }
+
+    for host, actual in (("Codex", codex_names), ("OpenCode", opencode_names)):
+        for name in sorted(command_names - actual):
+            errs.append(f"/{name}: missing {host} command adapter")
+        for name in sorted(actual - command_names):
+            errs.append(
+                f"{host}: adapter {name!r} has no canonical command definition"
+            )
+
+    for name in sorted(command_names & codex_names):
+        text = (CODEX_SKILLS_DIR / name / "SKILL.md").read_text(encoding="utf-8")
+        canonical = f".claude/commands/{name}.md"
+        if canonical not in text:
+            errs.append(f"/{name}: Codex adapter does not reference {canonical}")
+        if f"`${name}`" not in text:
+            errs.append(f"/{name}: Codex adapter does not forward ${name} arguments")
+
+    for name in sorted(command_names & opencode_names):
+        text = (OPENCODE_COMMANDS_DIR / f"{name}.md").read_text(encoding="utf-8")
+        canonical = f".claude/commands/{name}.md"
+        if canonical not in text:
+            errs.append(f"/{name}: OpenCode adapter does not reference {canonical}")
+        if f"/{name} $ARGUMENTS" not in text:
+            errs.append(
+                f"/{name}: OpenCode adapter does not forward $ARGUMENTS"
+            )
+    return errs
+
+
 def main() -> int:
     if not COMMANDS_DIR.is_dir():
         print(f"FATAL: {COMMANDS_DIR} not a directory", file=sys.stderr)
@@ -112,6 +154,8 @@ def main() -> int:
         return 2
 
     errs: list[str] = []
+    md_names = {p.stem for p in md_files}
+    errs.extend(_check_host_adapters(md_names))
     excluded_via_frontmatter: set[str] = set()
     for md in md_files:
         name = md.stem
@@ -148,7 +192,6 @@ def main() -> int:
     else:
         excluded_in_index = set(re.findall(r"raptor-[\w-]+|\b\w[\w-]+\b", m.group(0)))
         # Drop noise tokens; only keep names that correspond to .md files.
-        md_names = {p.stem for p in md_files}
         excluded_in_index = excluded_in_index & md_names
 
         missing_in_md = excluded_in_index - excluded_via_frontmatter
