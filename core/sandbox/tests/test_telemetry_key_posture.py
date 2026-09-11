@@ -73,6 +73,14 @@ class TestPostureRecording:
     def test_unknown_run_is_none(self, tmp_path):
         assert summary_mod.get_run_posture(tmp_path) is None
 
+    def test_mountless_backend_is_reported(self, tmp_path):
+        summary_mod.record_run_posture(
+            tmp_path, mount_ns_active=False, restrict_reads=True,
+            mountless_backend=True,
+        )
+        assert summary_mod.get_run_posture(
+            tmp_path)["mountless_backend"] is True
+
     def test_key_hidden_needs_mount_ns_or_restrict_reads(self, tmp_path):
         summary_mod.record_run_posture(
             tmp_path, mount_ns_active=False, restrict_reads=False)

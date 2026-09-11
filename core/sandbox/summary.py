@@ -434,7 +434,8 @@ def get_proxy_persist_state(run_dir: Path) -> "dict | None":
 
 
 def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
-                       restrict_reads: bool) -> None:
+                       restrict_reads: bool,
+                       mountless_backend: bool = False) -> None:
     """Record whether a sandbox invocation's posture could hide the
     telemetry-MAC key from the sandboxed child.
 
@@ -468,12 +469,16 @@ def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
                 "restrict_reads": bool(restrict_reads),
                 "mac_key_hidden": hidden,
             }
+            if mountless_backend:
+                _run_postures[run_key]["mountless_backend"] = True
         else:
             cur["mount_ns_active"] = (cur["mount_ns_active"]
                                       and bool(mount_ns_active))
             cur["restrict_reads"] = (cur["restrict_reads"]
                                      and bool(restrict_reads))
             cur["mac_key_hidden"] = cur["mac_key_hidden"] and hidden
+            if mountless_backend:
+                cur["mountless_backend"] = True
 
 
 def get_run_posture(run_dir: Path) -> dict[str, bool] | None:

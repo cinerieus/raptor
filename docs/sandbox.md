@@ -75,6 +75,10 @@ process.
    copied). **Disabled on Ubuntu 24.04 by
    default** (AppArmor gates unprivileged user namespaces); see
    [Troubleshooting](#troubleshooting).
+   If namespace creation succeeds but the bind tree cannot be built,
+   trusted tool runs can keep the network, PID, IPC, fresh-proc, Landlock,
+   seccomp, and rlimit layers through the mountless backend. Untrusted runs
+   require the existing `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1` opt-in.
 6. **Landlock + seccomp-bpf + rlimits** -- always applied when
    available, even when namespaces fall back.
 
@@ -136,18 +140,32 @@ parse time; the flags are rejected alongside `--sandbox none` /
 
 **Tool visibility:** the mount-namespace sandbox bind-mounts a fixed
 set of system dirs; a tool installed anywhere else (`~/.local/bin/`,
-`/opt/homebrew/bin/`) would be invisible (exit 127). The sandbox
-auto-falls back to Landlock-only isolation when the command resolves
-outside the bind tree, and callers can opt tool directories in
+`/opt/homebrew/bin/`) would be invisible (exit 127). The sandbox retries
+through its namespace backend without the bind tree when a bind mount or
+in-tree exec fails. This keeps the PID, user, IPC, and network namespaces,
+fresh procfs, Landlock, seccomp, limits, and proxy bridge active. The result
+reports `backend=landlock-pidns` and `mount_ns_active=false`; tracked runs also
+write `posture.mountless_backend=true` in `sandbox-summary.json`. Callers can opt
+tool directories in
 (`--sandbox-tool-path`, or `tool_paths=` programmatically — with
 `python_runtime_tool_paths()` auto-discovering the running Python's
-runtime roots for Python tools). If a bind set turns out insufficient,
-the call automatically retries at Landlock-only and caches the result
-for the rest of the process — provided Landlock can actually enforce
-the call's declared policy: on a kernel without Landlock, a demoted
-call that requested target/output/allowed_tcp_ports/restrict_reads
-refuses (`SandboxSetupError`) instead of retrying, because the
-Landlock-only path would enforce none of it.
+runtime roots for Python tools). If the reduced namespace backend cannot
+mount fresh procfs or apply Landlock, seccomp, or namespaces, the call fails
+closed before the target executes. The fallback preserves the caller's read
+policy. Host paths remain visible by name, including an `ENOENT` versus
+`EACCES` filesystem-existence oracle. Landlock cannot block metadata changes
+such as `chmod` outside the write allowlist. For read-restricted calls, every
+mountless lane replaces the construction-time `/tmp` and `/dev/shm` write
+grants with a private mode-`0700` scratch directory and points `TMPDIR`,
+`TEMP`, and `TMP` at it. Explicit non-shared writable paths remain available.
+Calls with
+`restrict_reads=False` retain their historical writable baseline, which means
+host `/tmp` and `/dev/shm` are writable when the bind tree is absent.
+Untrusted runs therefore
+require `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1`; read-restricted runs also refuse
+the fallback on Landlock ABI below 3, where `truncate()` is not controlled.
+Every untrusted run refuses that backend on ABI below 3, even when the caller
+explicitly disabled read restriction.
 
 Declaring a directory via `tool_paths` is also how `$HOME`-resident
 toolchains stay runnable: the sandboxed child's environment scrub
@@ -576,13 +594,13 @@ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 sudo apt install uidmap
 ```
 
-Without both, the sandbox falls back to Landlock-only. Landlock alone
-already covers the main threat model (no writes outside the output
-dir, no credential reads under the read restriction). Exception: when
-the user-namespace tier is unavailable entirely, untrusted execution
-refuses to fall back — set `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1` to
-explicitly accept Landlock/seccomp-only containment for untrusted code
-(see [environment.md](environment.md)).
+If user, network, PID, and IPC namespaces are available but bind mounts
+fail, the sandbox retains those namespaces and uses Landlock read/write
+rules in place of the bind tree for trusted tool runs. Host paths remain
+visible by name and metadata-only operations are outside Landlock's control.
+Untrusted execution refuses both this tier and the namespace-less fallback.
+Set `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1` only to explicitly accept the reduced
+containment for untrusted code (see [environment.md](environment.md)).
 
 ### A target binary fails with EACCES reading `/home/<user>/...`
 

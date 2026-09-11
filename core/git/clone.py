@@ -20,7 +20,7 @@ Both wrap their ``git`` subprocess in ``core.sandbox.run_untrusted_networked``
     the target / repo directory;
   - sanitised env (``RaptorConfig.get_git_env()`` — clears
     HTTP_PROXY / NO_PROXY etc., sets GIT_TERMINAL_PROMPT=0 and
-    GIT_ASKPASS=true so a malformed-credential prompt can't hang
+    GIT_ASKPASS=/usr/bin/true so a malformed-credential prompt can't hang
     the run);
   - bounded timeout (``RaptorConfig.GIT_CLONE_TIMEOUT``).
 

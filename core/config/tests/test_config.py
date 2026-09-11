@@ -156,7 +156,7 @@ class TestGetGitEnv:
 
     def test_sets_askpass(self):
         env = RaptorConfig.get_git_env()
-        assert env.get("GIT_ASKPASS") == "true"
+        assert env.get("GIT_ASKPASS") == "/usr/bin/true"
 
     def test_also_strips_dangerous_vars(self):
         injected = {var: "bad" for var in RaptorConfig.DANGEROUS_ENV_VARS}

@@ -862,7 +862,9 @@ class RaptorConfig:
     # on the platform (e.g. some Windows builds).
     GIT_ENV_VARS: ClassVar[dict] = {
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "true",
+        # Absolute so Git cannot resolve an operator-controlled executable
+        # through PATH inside a sandbox.
+        "GIT_ASKPASS": "/usr/bin/true",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
