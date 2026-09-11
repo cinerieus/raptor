@@ -934,6 +934,12 @@ jobs:
         # detector tests (check_vocab_lists, check_env_docs,
         # check_miswiring_detector, check_optional_dep_imports) —
         # stdlib+pytest only, ~20s.
+        #
+        # NOTE: these are the detectors' UNIT TESTS (does the detector
+        # logic work), not the detectors themselves (is the repo clean).
+        # The detectors run against the tree in lint.yml's
+        # ``repo-invariants`` job on every PR and in the daily
+        # miswiring-scan.yml sweep.
         run: pytest .github/tests .github/scripts/tests
 
   # Heavy-subdir Python tiers — each gated on its own filter so a PR
