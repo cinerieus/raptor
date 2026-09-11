@@ -1420,6 +1420,17 @@ def _init_inventory_worker(
         # ValueError: not the main thread (thread-pool fallback path
         # reuses none of this, but be safe); OSError: exotic platform.
         pass
+    # The MASK is inherited separately from the disposition: a parent
+    # thread that had SIGTERM blocked at fork leaves it blocked here,
+    # where a pending SIGTERM then sits undelivered forever — the
+    # disposition reset above looks correct but terminate() still
+    # does nothing and teardown must SIGKILL. Unblock it explicitly.
+    try:
+        _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGTERM})
+    except (AttributeError, ValueError, OSError):
+        # pthread_sigmask absent (non-POSIX) or refused — the
+        # disposition reset above still holds; never break the pool.
+        pass
     # Detach the worker from the parent's stdout/stderr. Workers
     # inherit those descriptors, and when the parent's stdout is a
     # pipe (CI step streams), any worker that outlives the parent —

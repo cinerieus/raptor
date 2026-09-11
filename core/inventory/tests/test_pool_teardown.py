@@ -86,10 +86,22 @@ def test_teardown_kills_sigterm_immune_worker_via_sigkill() -> None:
 
 
 def test_teardown_lets_responsive_worker_die_on_sigterm() -> None:
-    """A worker with the default disposition dies to terminate() —
-    no gratuitous SIGKILL inside the grace window."""
+    """A production-shaped worker dies to terminate() — no gratuitous
+    SIGKILL inside the grace window.
+
+    The pool is built the way builder.py builds it (with the
+    initializer that resets the inherited SIGTERM disposition and
+    mask). A RAW pool made this test depend on whatever SIGTERM state
+    earlier tests left in this process: an orchestrator salvage
+    handler leaked by an audit test ran in the fork child, ate the
+    SIGTERM for longer than the grace, and the escalation SIGKILLed a
+    perfectly responsive worker (exitcode -9 after the full grace on
+    every run sharing that worker process)."""
     ctx = multiprocessing.get_context("fork")
-    pool = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+    pool = ProcessPoolExecutor(
+        max_workers=1, mp_context=ctx,
+        initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+    )
     procs: list = []
     try:
         pool.submit(_wedge)
@@ -105,12 +117,82 @@ def test_teardown_lets_responsive_worker_die_on_sigterm() -> None:
                 p.kill()
 
 
+def _salvage_shaped_handler(signum: int, frame: FrameType | None) -> None:
+    # Shape of a leaked graceful-shutdown handler: consumes SIGTERM
+    # and keeps running instead of dying.
+    time.sleep(600)
+
+
+def test_production_worker_sheds_inherited_salvage_handler() -> None:
+    """Deterministic replay of the observed poisoning: the parent
+    carries a salvage-shaped SIGTERM handler at fork; a
+    production-initialized worker must still die BY SIGTERM, fast —
+    the initializer's disposition reset is the seatbelt."""
+    prior = signal.getsignal(signal.SIGTERM)
+    ctx = multiprocessing.get_context("fork")
+    procs: list = []
+    try:
+        signal.signal(signal.SIGTERM, _salvage_shaped_handler)
+        pool = ProcessPoolExecutor(
+            max_workers=1, mp_context=ctx,
+            initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+        )
+        pool.submit(_wedge)
+        time.sleep(0.5)
+        procs = list(pool._processes.values())
+        assert procs, "worker never spawned"
+        _shutdown_pool_nowait(pool, kill_grace_s=10.0)
+        assert _wait_dead(procs, 10.0)
+        assert procs[0].exitcode == -signal.SIGTERM
+    finally:
+        signal.signal(signal.SIGTERM, prior)
+        for p in procs:  # leak-guard for assertion failures above
+            if p.is_alive():
+                p.kill()
+
+
+def test_production_worker_unblocks_inherited_sigterm_mask() -> None:
+    """The sibling hole: the MASK is inherited separately from the
+    disposition — SIGTERM blocked in the forking thread leaves the
+    signal pending-forever in the child even with SIG_DFL. The
+    initializer must unblock it."""
+    prior_mask = signal.pthread_sigmask(signal.SIG_BLOCK,
+                                        {signal.SIGTERM})
+    ctx = multiprocessing.get_context("fork")
+    procs: list = []
+    try:
+        pool = ProcessPoolExecutor(
+            max_workers=1, mp_context=ctx,
+            initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+        )
+        pool.submit(_wedge)
+        time.sleep(0.5)
+        procs = list(pool._processes.values())
+        assert procs, "worker never spawned"
+        _shutdown_pool_nowait(pool, kill_grace_s=10.0)
+        assert _wait_dead(procs, 10.0)
+        assert procs[0].exitcode == -signal.SIGTERM
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, prior_mask)
+        for p in procs:  # leak-guard for assertion failures above
+            if p.is_alive():
+                p.kill()
+
+
 def test_teardown_snapshot_precedes_shutdown() -> None:
     """The regression itself: shutdown() nulls ``_processes``, so a
     post-shutdown snapshot sees nothing to kill and a plainly wedged
-    worker leaks. The helper must reap it regardless."""
+    worker leaks. The helper must reap it regardless.
+
+    Production initializer so the worker's SIGTERM state is the
+    test's own — with a raw pool, an inherited handler makes the
+    reap burn the full grace before SIGKILL (slow, and it masks the
+    prompt-SIGTERM path this file pins elsewhere)."""
     ctx = multiprocessing.get_context("fork")
-    pool = ProcessPoolExecutor(max_workers=1, mp_context=ctx)
+    pool = ProcessPoolExecutor(
+        max_workers=1, mp_context=ctx,
+        initializer=_init_inventory_worker, initargs=_INIT_ARGS,
+    )
     procs: list = []
     try:
         pool.submit(_wedge)
@@ -142,7 +224,15 @@ def _square(x: int) -> int:
     return x * x
 
 
+_INIT_ARGS = (Path("."), [], True, {}, False, None, None, None)
+
+
 def _install_exit_wedge() -> None:
+    # Production-shaped worker first (SIGTERM disposition/mask reset,
+    # stdio detach): the wedge under test is the EXIT path, not
+    # signal state inherited from whatever ran earlier in this
+    # process.
+    _init_inventory_worker(*_INIT_ARGS)
     # Worker wedges on its EXIT path, after delivering every result:
     # multiprocessing children run registered Finalize callbacks in
     # _bootstrap's util._exit_function (module-level atexit hooks do
@@ -248,9 +338,6 @@ def test_clean_shutdown_escalates_on_exit_wedge(caplog) -> None:
         for p in procs:  # leak-guard for assertion failures above
             if p.is_alive():
                 p.kill()
-
-
-_INIT_ARGS = (Path("."), [], True, {}, False, None, None, None)
 
 
 def test_init_inventory_worker_resets_sigterm() -> None:
