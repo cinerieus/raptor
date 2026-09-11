@@ -2,10 +2,10 @@ from packages.llm_analysis.investigation import (
     build_investigation_graph,
     invariant_candidates_from_context_map,
 )
-from packages.llm_analysis.tasks import ChainAnalysisTask
+from packages.llm_analysis.tasks import ChainAnalysisTask, ExploitTask
 
 
-def _finding(fid, vuln_type, path):
+def _finding(fid, vuln_type, path, *, bridge="plugin-path"):
     return {
         "finding_id": fid,
         "file_path": path,
@@ -13,8 +13,8 @@ def _finding(fid, vuln_type, path):
         "rule_id": vuln_type,
         "code": "dangerous(value)",
         "dataflow": {
-            "source": {"file": path, "line": 2},
-            "sink": {"file": path, "line": 10},
+            "source": {"file": path, "line": 2, "variable": bridge},
+            "sink": {"file": path, "line": 10, "variable": bridge},
         },
     }
 
@@ -75,6 +75,19 @@ def test_low_confidence_negative_does_not_prune():
     assert graph["attack_chains"][0]["status"] == "candidate"
 
 
+def test_capability_pair_without_shared_flow_reference_is_not_a_chain():
+    findings = [
+        _finding("F-1", "arbitrary_file_write", "upload.py", bridge="upload"),
+        _finding("F-2", "dynamic_load", "plugins.py", bridge="plugin"),
+    ]
+    graph = build_investigation_graph(findings, {
+        "F-1": _result("arbitrary_file_write"),
+        "F-2": _result("dynamic_load"),
+    })
+
+    assert graph["attack_chains"] == []
+
+
 def test_chain_task_skips_pruned_and_caps_paid_reviews():
     task = ChainAnalysisTask()
     chains = [
@@ -86,6 +99,20 @@ def test_chain_task_skips_pruned_and_caps_paid_reviews():
 
     assert len(selected) == 10
     assert all(item["id"] != "BLOCKED" for item in selected)
+
+
+def test_exploit_prompt_includes_confirmed_chain_context():
+    finding = _finding("F-1", "arbitrary_file_write", "upload.py")
+    finding["confirmed_attack_chains"] = [{
+        "chain": {"id": "CHAIN-0001", "goal": "code_execution"},
+        "analysis": {"verdict": "confirmed", "poc_plan": ["write plugin"]},
+    }]
+
+    prompt = ExploitTask().build_prompt(finding)
+
+    assert "confirmed-attack-chain-context" in prompt
+    assert "CHAIN-0001" in prompt
+    assert "write plugin" in prompt
 
 
 def test_invariant_seed_requires_real_in_target_source(tmp_path):
