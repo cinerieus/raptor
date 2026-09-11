@@ -309,7 +309,10 @@ def compose_proxy_hosts(target: Path | None = None) -> list:
     try:
         from core.llm.config import LLMConfig
         from core.llm.egress import derive_allowlist
-        for h in derive_allowlist(LLMConfig()):
+        llm_config = LLMConfig()
+        llm_hosts = set(derive_allowlist(llm_config))
+        llm_hosts.update(_cli_llm_proxy_hosts(llm_config))
+        for h in llm_hosts:
             if h not in seen:
                 hosts.append(h)
                 seen.add(h)
@@ -395,6 +398,34 @@ def compose_proxy_hosts(target: Path | None = None) -> list:
             "; ".join(f"{src}: {', '.join(vals)}"
                       for src, vals in rejected.items()),
         )
+    return hosts
+
+
+def _cli_llm_proxy_hosts(config) -> set[str]:
+    """Endpoint hosts needed by configured subscription CLI providers.
+
+    ``core.llm.egress.derive_allowlist`` covers API-backed providers. CLI
+    providers resolve their endpoints through their host adapters, so SCA's
+    outer sandbox must include the same bounded host set or the nested CLI
+    sees the proxy's deny response as an authentication failure.
+    """
+    models = []
+    if config.primary_model is not None:
+        models.append(config.primary_model)
+    models.extend(config.fallback_models or [])
+    if config.specialized_models:
+        models.extend(config.specialized_models.values())
+
+    providers = {getattr(model, "provider", "") for model in models if model}
+    hosts: set[str] = set()
+    if "claudecode" in providers:
+        from core.llm.cc_proxy_hosts import proxy_hosts_for_cc_dispatch
+        hosts.update(proxy_hosts_for_cc_dispatch())
+    from core.llm.agent_cli_adapter import proxy_hosts_for_agent
+    if "codexcli" in providers:
+        hosts.update(proxy_hosts_for_agent("codex"))
+    if "opencodecli" in providers:
+        hosts.update(proxy_hosts_for_agent("opencode"))
     return hosts
 
 

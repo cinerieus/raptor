@@ -10,8 +10,10 @@ import stat
 import subprocess
 import threading
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.run.scratch import scratch_dir
 
@@ -287,6 +289,9 @@ def _stage_opencode_data(work_path: Path) -> Path:
 
 def _proxy_hosts(agent: str) -> list[str]:
     hosts = list(_PROXY_HOSTS[agent])
+    for host in _configured_proxy_hosts(agent):
+        if host not in hosts:
+            hosts.append(host)
     raw = os.environ.get("RAPTOR_AGENT_CLI_PROXY_HOSTS", "")
     for item in raw.split(","):
         host = item.strip().lower().rstrip(".")
@@ -300,6 +305,143 @@ def _proxy_hosts(agent: str) -> list[str]:
         if host not in hosts:
             hosts.append(host)
     return hosts
+
+
+def _bounded_config_text(path: Path) -> str | None:
+    """Read one operator-owned CLI config without following symlinks."""
+    try:
+        fd = os.open(
+            path,
+            os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            return None
+        raw = os.read(fd, 1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return None
+        return raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def _endpoint_host(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    env_match = re.fullmatch(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", candidate)
+    if env_match:
+        candidate = os.environ.get(env_match.group(1), "").strip()
+    try:
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme not in {"http", "https"} or not host:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if not _HOST_RE.fullmatch(host):
+            return None
+        return host
+    except ValueError:
+        return None
+
+
+def _codex_config_hosts() -> set[str]:
+    root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    text = _bounded_config_text(root / "config.toml")
+    if text is None:
+        return set()
+    try:
+        config = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return set()
+    providers = config.get("model_providers", {})
+    if not isinstance(providers, dict):
+        return set()
+    return {
+        host
+        for provider in providers.values()
+        if isinstance(provider, dict)
+        for host in [_endpoint_host(provider.get("base_url"))]
+        if host is not None
+    }
+
+
+def _opencode_config_hosts() -> set[str]:
+    config_root = Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    ) / "opencode"
+    configured = os.environ.get("OPENCODE_CONFIG", "").strip()
+    paths = ([Path(configured)] if configured else []) + [
+        config_root / "opencode.json",
+        config_root / "opencode.jsonc",
+    ]
+    hosts: set[str] = set()
+    from core.json.jsonc import load_jsonc
+    for path in paths:
+        text = _bounded_config_text(path)
+        if text is None:
+            continue
+        try:
+            config = load_jsonc(text)
+        except (ValueError, TypeError):
+            continue
+        providers = config.get("provider", {}) if isinstance(config, dict) else {}
+        if not isinstance(providers, dict):
+            continue
+        for provider_id, provider in providers.items():
+            if not isinstance(provider, dict):
+                continue
+            options = provider.get("options", {})
+            if not isinstance(options, dict):
+                continue
+            for key in ("endpoint", "baseURL"):
+                host = _endpoint_host(options.get(key))
+                if host is not None:
+                    hosts.add(host)
+            region = options.get("region")
+            if provider_id == "amazon-bedrock" and isinstance(region, str):
+                region = region.strip().lower()
+                if re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", region):
+                    hosts.add(f"bedrock-runtime.{region}.amazonaws.com")
+                    hosts.add(f"sts.{region}.amazonaws.com")
+    vertex_project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+    if vertex_project:
+        location = os.environ.get("VERTEX_LOCATION", "global").strip().lower()
+        if location == "global":
+            hosts.add("aiplatform.googleapis.com")
+        elif re.fullmatch(r"[a-z]+-[a-z]+\d", location):
+            hosts.add(f"{location}-aiplatform.googleapis.com")
+        hosts.add("oauth2.googleapis.com")
+
+    aws_region = (
+        os.environ.get("AWS_REGION", "").strip().lower()
+        or os.environ.get("AWS_DEFAULT_REGION", "").strip().lower()
+    )
+    if re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-\d", aws_region):
+        hosts.add(f"bedrock-runtime.{aws_region}.amazonaws.com")
+        hosts.add(f"sts.{aws_region}.amazonaws.com")
+    return hosts
+
+
+def _configured_proxy_hosts(agent: str) -> set[str]:
+    if agent == "codex":
+        return _codex_config_hosts()
+    if agent == "opencode":
+        return _opencode_config_hosts()
+    return set()
+
+
+def proxy_hosts_for_agent(agent: str) -> list[str]:
+    """Return the bounded egress hosts used by an agent CLI transport."""
+    if agent not in SUPPORTED_AGENT_CLIS:
+        raise ValueError(f"unsupported agent CLI: {agent}")
+    return _proxy_hosts(agent)
 
 
 def _check_auth(agent: str, binary: str, env: dict[str, str]) -> None:
