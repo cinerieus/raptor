@@ -2,8 +2,8 @@
 
 This repository can be operated through Claude Code, Codex, or OpenCode.
 Starting any of those CLIs directly from this checkout is a supported RAPTOR
-session. Downstream model calls must use the current host CLI and its stored
-subscription authentication.
+session. Each host exposes the same canonical RAPTOR command registry through
+its native command syntax.
 
 Before acting:
 
