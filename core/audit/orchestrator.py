@@ -382,11 +382,57 @@ def install_sigterm_grace() -> bool:
         return False
     import signal as _signal
     try:
+        prev = _signal.getsignal(_signal.SIGTERM)
         _signal.signal(_signal.SIGTERM, _handle_sigterm)
     except (ValueError, OSError):
         logger.debug("SIGTERM handler installation failed", exc_info=True)
         return False
+    _sigterm_state["prev"] = prev
     _sigterm_state["installed"] = True
+    return True
+
+
+def uninstall_sigterm_grace() -> bool:
+    """Restore the pre-install SIGTERM disposition — main thread, and
+    only while the installed handler is still ours.
+
+    The handler is PROCESS-WIDE state. The CLI process never needs to
+    undo it, but in-process embedders and tests do: a leaked salvage
+    handler is inherited by every later fork child of the host
+    process, where SIGTERM then starts a salvage drain instead of
+    killing the child — signal-sensitive work elsewhere in the
+    process (pool teardown escalation, subprocess supervision)
+    misreads that as an unresponsive process and SIGKILLs. Install /
+    uninstall must stay symmetric so hosts can scope the salvage
+    semantics to the run.
+
+    Returns True when the uninstall completed — the disposition was
+    restored, or a foreign current handler (someone installed over
+    us) was deliberately left in place with only the bookkeeping
+    cleared. False when nothing was installed or the restore failed.
+    """
+    if not _sigterm_state["installed"]:
+        return False
+    if _threading.current_thread() is not _threading.main_thread():
+        return False
+    import signal as _signal
+    try:
+        if _signal.getsignal(_signal.SIGTERM) is _handle_sigterm:
+            # ``prev`` can be None: getsignal() reports None for a
+            # handler installed by non-Python (C-level) means — the
+            # embedder case this API exists for. signal.signal()
+            # cannot re-install that; fall back to the default
+            # disposition rather than raising TypeError mid-teardown.
+            prev = _sigterm_state.get("prev")
+            if prev is None:
+                prev = _signal.SIG_DFL
+            _signal.signal(_signal.SIGTERM, prev)
+    except (TypeError, ValueError, OSError):
+        # TypeError: exotic non-handler value slipped into ``prev``.
+        logger.debug("SIGTERM handler restore failed", exc_info=True)
+        return False
+    _sigterm_state["installed"] = False
+    _sigterm_state.pop("prev", None)
     return True
 
 
