@@ -39,6 +39,13 @@ process-wide
 100-call ceiling. Set `RAPTOR_AGENT_CLI_MAX_CALLS` to another positive integer
 when a run deliberately needs more or fewer calls. The existing
 `--max-findings` cap remains the primary analysis-volume control.
+Codex and OpenCode releases must support the command surfaces RAPTOR invokes:
+`codex exec --strict-config --ignore-rules --ephemeral --output-last-message`
+and `opencode run --pure --agent --dir`. RAPTOR fails the call visibly when an
+installed CLI predates those flags. These command surfaces, rather than a
+package-version guess across distribution channels, are the compatibility
+floor.
+
 OpenCode installations using another provider endpoint must add its hostname
 (hostname only, no scheme or path) to the comma-separated
 `RAPTOR_AGENT_CLI_PROXY_HOSTS` allowlist.
@@ -63,8 +70,8 @@ model selection, multi-model workflows, and cost management.
 
 ## Supported Providers
 
-Eight providers are supported. RAPTOR probes for configured providers in this order
-and uses the first one found (the resumable Claude Code variant is never
+Ten provider transports are supported. RAPTOR probes configured direct
+providers in this order and uses the first one found (the resumable Claude Code variant is never
 auto-selected — pick it explicitly in `models.json`):
 
 | Provider | Auth | SDK | Default Model |
@@ -77,6 +84,8 @@ auto-selected — pick it explicitly in `models.json`):
 | Ollama | None (local) | `openai` | auto-detected |
 | Claude Code | None (`claude` CLI on PATH) | None | (session model) |
 | Claude Code (resumable) | None (`claude` CLI on PATH) | None | (session model) |
+| Codex CLI | Stored Codex subscription | None | (session model) |
+| OpenCode CLI | Stored OpenCode authentication | None | (session model) |
 
 `claudecode-resumable` (`"provider": "claudecode-resumable"` in
 `models.json`) reuses one Claude Code session across calls via
