@@ -396,6 +396,7 @@ def main() -> int:
             else ("_RAPTOR_STATUS_FD", "_RAPTOR_DEATH_FD",
                   "_RAPTOR_TRUSTED", "CLAUDECODE",
                   "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN",
+                  "RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
                   "RAPTOR_DIR", "RAPTOR_OUT_DIR", "RAPTOR_TARGET_KIND")
         )
         for _m in _strip:
