@@ -6,6 +6,7 @@ snapshot them before every test and restore afterwards as a safety net
 — individual tests are still free to mutate them deliberately.
 """
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -32,6 +33,27 @@ def short_sock_dir():
         yield Path(d)
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _consent_env_guard():
+    """Strip the degraded-untrusted consent variable around every test.
+
+    RAPTOR_ALLOW_DEGRADED_UNTRUSTED steers untrusted-run refusal
+    behaviour, so a shell or CI job exporting it flips fail-closed
+    expectations across this directory (four refusal tests turn red
+    under an exported consent). Tests that exercise the opt-in set it
+    explicitly via monkeypatch.setenv, which composes with this guard:
+    the guard strips first, the test sets, both restore in LIFO order.
+    """
+    saved = os.environ.pop("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", None)
+    try:
+        yield
+    finally:
+        if saved is not None:
+            os.environ["RAPTOR_ALLOW_DEGRADED_UNTRUSTED"] = saved
+        else:
+            os.environ.pop("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", None)
 
 
 @pytest.fixture(autouse=True)
