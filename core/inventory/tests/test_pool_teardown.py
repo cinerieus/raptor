@@ -138,6 +138,118 @@ def _report_sigterm_is_default() -> bool:
     return signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
 
+def _square(x: int) -> int:
+    return x * x
+
+
+def _install_exit_wedge() -> None:
+    # Worker wedges on its EXIT path, after delivering every result:
+    # multiprocessing children run registered Finalize callbacks in
+    # _bootstrap's util._exit_function (module-level atexit hooks do
+    # NOT run in mp children — Finalize is the one that does).
+    from multiprocessing.util import Finalize
+    Finalize(None, time.sleep, args=(600,), exitpriority=100)
+
+
+def test_clean_shutdown_prompt_exit_no_escalation(caplog) -> None:
+    """Happy path: workers that exit promptly off the shutdown
+    sentinel are never signalled and no warning is emitted.
+
+    Spawn context deliberately: this direction asserts NO escalation,
+    and a fork child of the (threaded) pytest process can wedge on a
+    fork-frozen lock at exit at a low baseline rate — the very class
+    the helper defends against — which would flake these assertions.
+    Spawn children start from a fresh interpreter and cannot inherit
+    a frozen lock, so their prompt exit is deterministic. The helper
+    is context-agnostic; the fork direction is covered by the
+    escalation test below.
+    """
+    import logging
+
+    from core.inventory.builder import _shutdown_pool_clean, logger
+
+    ctx = multiprocessing.get_context("spawn")
+    pool = ProcessPoolExecutor(max_workers=2, mp_context=ctx)
+    procs: list = []
+    try:
+        futs = [pool.submit(_square, i) for i in range(8)]
+        # Capture BEFORE resolving: a failure below must still leave
+        # the leak-guard something to kill (a failing test must not
+        # convert into an unbounded stall — the whole point here).
+        procs = list(pool._processes.values())
+        assert procs
+        results = [f.result(timeout=60) for f in futs]
+        assert results == [i * i for i in range(8)]
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            _shutdown_pool_clean(pool, grace_s=30.0)
+        assert _wait_dead(procs, 10.0)
+        # exitcode 0 is the invariant: normal exit, no signal. (No
+        # elapsed assertion — worker-exit latency on a loaded host is
+        # not flake-proof; the sentinel wait is event-driven anyway.)
+        assert all(p.exitcode == 0 for p in procs)
+        assert "clean drain" not in caplog.text
+    finally:
+        # Bounded on every failure path (idempotent after the clean
+        # shutdown above): never leave an unshut pool behind.
+        _shutdown_pool_nowait(pool)
+        for p in procs:  # leak-guard for assertion failures above
+            if p.is_alive():
+                p.kill()
+
+
+def test_clean_shutdown_escalates_on_exit_wedge(caplog) -> None:
+    """A worker wedged AFTER its last result must not hang the clean
+    shutdown: every result is already in hand, escalation fires
+    within the grace bound with a warning naming the pid, and no
+    orphan is left holding a parent-owned pipe."""
+    import logging
+    import select
+
+    from core.inventory.builder import _shutdown_pool_clean, logger
+
+    # Parent-owned pipe created BEFORE the pool: fork workers inherit
+    # the write end (fork copies the fd table; non-inheritable flags
+    # only matter across exec). EOF on the read end after teardown
+    # proves no worker survived holding it — the exact leak class
+    # that keeps a CI step's output pipe open.
+    r, w = os.pipe()
+    ctx = multiprocessing.get_context("fork")
+    pool = ProcessPoolExecutor(
+        max_workers=1, mp_context=ctx, initializer=_install_exit_wedge,
+    )
+    procs: list = []
+    try:
+        futs = [pool.submit(_square, i) for i in range(4)]
+        # Capture BEFORE resolving: a failure below must still leave
+        # the leak-guard something to kill — otherwise a failed
+        # assertion strands the exit-wedged worker in its 600s
+        # Finalize sleep and stalls the whole session.
+        procs = list(pool._processes.values())
+        assert procs
+        results = [f.result(timeout=60) for f in futs]
+        assert results == [i * i for i in range(4)]  # results integrity
+        os.close(w)  # parent's copy; only workers hold it now
+        w = -1  # closed marker for the failure-path finally below
+        t0 = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            _shutdown_pool_clean(pool, grace_s=0.5)
+        assert _wait_dead(procs, 10.0), "exit-wedged worker survived"
+        assert time.monotonic() - t0 < 20.0
+        assert "clean drain" in caplog.text
+        assert str(procs[0].pid) in caplog.text
+        assert procs[0].exitcode in (-signal.SIGTERM, -signal.SIGKILL)
+        ready, _w_, _x = select.select([r], [], [], 10.0)
+        assert ready, "pipe still held open — orphan holds the write end"
+        assert os.read(r, 1) == b""  # true EOF, not data
+    finally:
+        os.close(r)
+        if w >= 0:  # failure before the happy-path close above
+            os.close(w)
+        for p in procs:  # leak-guard for assertion failures above
+            if p.is_alive():
+                p.kill()
+
+
 _INIT_ARGS = (Path("."), [], True, {}, False, None, None, None)
 
 

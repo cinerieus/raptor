@@ -282,9 +282,6 @@ def _shutdown_pool_nowait(
     and this degrades to the plain non-blocking shutdown — hung
     threads cannot be killed, only abandoned.
     """
-    import time as _time
-    from multiprocessing import connection as _mp_connection
-
     procs = list((getattr(pool, "_processes", None) or {}).values())
     pool.shutdown(wait=False, cancel_futures=True)
     for proc in procs:
@@ -292,9 +289,31 @@ def _shutdown_pool_nowait(
             proc.terminate()
         except Exception:  # noqa: BLE001 — teardown must never raise
             pass
+    for proc in _await_worker_exit(procs, kill_grace_s):
+        # kill() no-ops on an already-reaped process (returncode set),
+        # so racing the manager thread's own join here is safe.
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+
+
+def _await_worker_exit(procs: list, grace_s: float) -> list:
+    """Wait up to ``grace_s`` for the given worker processes to exit;
+    return the survivors (empty on a full clean exit).
+
+    Waits on the process SENTINELS, not ``join()``: death is visible
+    on the sentinel no matter which thread reaps the process, so this
+    never races the executor manager thread's own join. Event-driven
+    — returns as soon as the last worker exits, so a prompt exit
+    costs milliseconds regardless of the grace value.
+    """
+    import time as _time
+    from multiprocessing import connection as _mp_connection
+
     if not procs:
-        return
-    deadline = _time.monotonic() + kill_grace_s
+        return []
+    deadline = _time.monotonic() + grace_s
     pending = {proc.sentinel: proc for proc in procs}
     while pending:
         remaining = deadline - _time.monotonic()
@@ -306,9 +325,69 @@ def _shutdown_pool_nowait(
             break
         for sentinel in ready:
             pending.pop(sentinel, None)
-    for proc in pending.values():
-        # kill() no-ops on an already-reaped process (returncode set),
-        # so racing the manager thread's own join here is safe.
+    return list(pending.values())
+
+
+def _shutdown_pool_clean(
+    pool: "ProcessPoolExecutor | ThreadPoolExecutor",
+    *,
+    grace_s: float = 10.0,
+) -> None:
+    """Shut down a pool whose futures have ALL resolved, without an
+    unbounded join on its workers.
+
+    The clean-completion counterpart of :func:`_shutdown_pool_nowait`.
+    ``shutdown(wait=True)`` here joins workers that have already
+    delivered every result — but a fork-context worker can wedge on a
+    fork-frozen lock ON ITS EXIT PATH, after its last result, and the
+    blocking join then hangs the whole build before any summary
+    prints. Results integrity is unaffected by construction: callers
+    invoke this only after the drain loop consumed every future, so
+    no result can be lost to an escalated kill — the workers hold
+    nothing the build still needs.
+
+    Same snapshot-before-shutdown order as the wedged-path helper
+    (``shutdown()`` nulls ``_processes`` before returning). Workers
+    get ``grace_s`` to exit NORMALLY off the shutdown sentinel first
+    — the wait is sentinel-event-driven, so the healthy path costs
+    milliseconds, not the grace value. Grace trade-off both ways:
+    longer tolerates a slow-but-healthy worker teardown on a loaded
+    host (exit is normally instant — the worker loop just returns);
+    shorter bounds how long a wedged exit path can delay the build's
+    completion. 10s is generous for "instant" and small next to the
+    60s stall window the in-flight path uses. Escalation past the
+    grace is terminate → ``kill_grace_s`` → SIGKILL, identical to the
+    wedged path, with a WARNING naming the wedged pids — a clean
+    drain that needed signals is a real anomaly worth a log line,
+    but it never fails the build.
+
+    Thread pools (the extractor fallback) take the plain blocking
+    shutdown: threads share the parent's locks normally — the
+    fork-frozen-lock wedge class cannot occur — and cannot be killed
+    anyway.
+    """
+    procs = list((getattr(pool, "_processes", None) or {}).values())
+    if not procs:
+        pool.shutdown(wait=True)
+        return
+    pool.shutdown(wait=False)
+    survivors = _await_worker_exit(procs, grace_s)
+    if not survivors:
+        return
+    logger.warning(
+        "inventory: %d extractor worker(s) still alive %.1fs after a "
+        "clean drain (pids: %s) — escalating terminate→kill; all "
+        "results were already collected, the build is unaffected",
+        len(survivors), grace_s,
+        ", ".join(str(p.pid) for p in survivors),
+    )
+    for proc in survivors:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001 — teardown must never raise
+            pass
+    for proc in _await_worker_exit(survivors, 5.0):
+        # Same reap-race safety note as _shutdown_pool_nowait.
         try:
             proc.kill()
         except Exception:  # noqa: BLE001 — teardown must never raise
@@ -436,7 +515,10 @@ def _retry_stalled_files(files, initargs, *, _on_retry_done, futures_map):
                 break
     finally:
         if pool is not None:
-            pool.shutdown(wait=True)
+            # Bounded, not shutdown(wait=True): the last retry future
+            # has resolved by here, but the retry worker can still
+            # wedge on its EXIT path — see _shutdown_pool_clean.
+            _shutdown_pool_clean(pool)
     return still_failed
 
 
@@ -850,7 +932,14 @@ def build_inventory(
                 # proceeds; the hung thread is abandoned.)
                 _shutdown_pool_nowait(pool)
             else:
-                pool.shutdown(wait=True)
+                # Clean drain: every future resolved (the loop above
+                # exhausted them), so the workers hold nothing the
+                # build still needs — but their EXIT paths can wedge
+                # on fork-frozen locks just like their task paths,
+                # and shutdown(wait=True) would then hang the build
+                # before any summary prints. Bounded shutdown with
+                # escalation instead; see _shutdown_pool_clean.
+                _shutdown_pool_clean(pool)
     else:
         for filepath in file_list:
             _collect_result(
