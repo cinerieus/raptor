@@ -50,6 +50,25 @@ OpenCode installations using another provider endpoint must add its hostname
 (hostname only, no scheme or path) to the comma-separated
 `RAPTOR_AGENT_CLI_PROXY_HOSTS` allowlist.
 
+OpenCode's built-in egress set includes its service and model-discovery hosts
+plus the supported OpenAI, Anthropic, and OpenRouter endpoints. The sandbox
+enforces that hostname set on port 443, but it does not narrow the set to the
+provider chosen for one call. This is required for session-default aliases and
+provider changes that OpenCode resolves internally. Inference children have no
+tools, plugins, hooks, MCP servers, or project instructions, which limits the
+remaining channel to the CLI's own model transport. Tool-enabled orchestration
+children can execute commands and can therefore reach any host in this set;
+operators scanning confidential source should configure only trusted providers
+and avoid adding broad domains through `RAPTOR_AGENT_CLI_PROXY_HOSTS`.
+
+OpenCode's operator configuration directory is granted read-only so the CLI can
+resolve aliases, provider endpoints, and custom-provider settings. Stored
+authentication is not read from that directory: RAPTOR copies `auth.json` into
+a private runtime data directory and grants only the copy. The bind-tree
+sandbox makes the configuration mount read-only; the reduced mountless tier
+relies on Landlock's write policy and carries the residual metadata limitations
+documented in `core/security/THREAT_MODEL.md`.
+
 Tool-enabled orchestration children also follow the selected host. This covers
 the agentic `/understand` and `/validate` companion passes, CodeQL build-flag
 inference, and web validation. Unlike finding-analysis calls, these children
