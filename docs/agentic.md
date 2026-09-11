@@ -101,6 +101,14 @@ marked *(flag)* only fire when explicitly requested:
 Cost is tracked in real time with an adaptive budget cutoff (default $10;
 override with `--max-cost-usd`).
 
+The dependency and rejection gates have a five-case labeled regression corpus
+covering confirmed, uncertain, disconnected, and rejected capability pairs.
+Against the previous capability-only selection rule, candidate precision in
+that corpus changes from 0.60 to 1.00, recall remains 1.00, and paid-review
+candidates fall from five to three. This is a synthetic regression measurement
+of chain-selection behavior, not a claim about real-world vulnerability
+detection rates. Individual finding analysis is unchanged by the gate.
+
 
 ### Analysis stages (A--D)
 

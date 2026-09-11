@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 _CAPABILITY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("command_execution", ("command_injection", "command execution", "cwe-78", "rce")),
+    ("command_execution", (
+        "command_execution", "command_injection", "command execution",
+        "cwe-78", "rce",
+    )),
     ("file_write", ("file_write", "arbitrary file write", "path traversal write", "cwe-73")),
     ("file_read", ("file_read", "lfi", "path_traversal", "cwe-22", "cwe-23")),
     ("network_fetch", ("ssrf", "server-side request", "cwe-918")),
