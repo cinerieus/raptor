@@ -4513,12 +4513,17 @@ class ClaudeCodeLLMProvider(LLMProvider):
         # converts into a `--system-prompt-file` flag).
         call_timeout = self._effective_timeout_s(kwargs.pop("timeout_s", None))
 
+        # Task-layer schemas may use RAPTOR's compact descriptive form
+        # (for example {"reasoning": "string"}).  The CLI accepts only
+        # JSON Schema, so normalize at this provider seam as the other
+        # structured transports do.
+        normalized_schema = _normalize_schema(schema)
         cc_config = CCDispatchConfig(
             claude_bin=self._claude_bin,
             tools="",                                # see generate() comment
             budget_usd=self._budget_usd,
             timeout_s=call_timeout,
-            json_schema=schema,
+            json_schema=normalized_schema,
             capture_json_envelope=False,
             stream_json=True,
             system_prompt=system_prompt,

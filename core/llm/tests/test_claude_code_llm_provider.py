@@ -432,6 +432,28 @@ def test_generate_structured_passes_schema_to_subprocess(monkeypatch) -> None:
     assert json.loads(raw)["answer"] == 42
 
 
+def test_generate_structured_normalizes_descriptive_schema(monkeypatch) -> None:
+    import core.llm.cc_adapter as _cc_adapter
+    captured: dict[str, Any] = {}
+
+    def fake_stream(cmd, prompt, *, env, timeout_s):
+        captured["cmd"] = cmd
+        return _stream_result({"reasoning": "checked", "is_exploitable": False})
+
+    monkeypatch.setattr(_cc_adapter, "run_cc_streaming", fake_stream)
+    p = ClaudeCodeLLMProvider(_config())
+    p.generate_structured("compute", {
+        "reasoning": "string",
+        "is_exploitable": "bool",
+    })
+
+    schema_idx = captured["cmd"].index("--json-schema") + 1
+    sent = json.loads(captured["cmd"][schema_idx])
+    assert sent["type"] == "object"
+    assert sent["properties"]["reasoning"]["type"] == "string"
+    assert sent["properties"]["is_exploitable"]["type"] == "boolean"
+
+
 def test_generate_structured_prefers_structured_output(monkeypatch) -> None:
     """CLI >= 2.1.x delivers --json-schema output via a StructuredOutput
     tool call: assistant text is empty, the object arrives on the result
