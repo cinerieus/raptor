@@ -5,6 +5,11 @@ Starting any of those CLIs directly from this checkout is a supported RAPTOR
 session. Each host exposes the same canonical RAPTOR command registry through
 its native command syntax.
 
+Explicit analysis flags, `models.json`, and API-backed provider configuration
+remain independent of the orchestration host. When none is configured,
+downstream model calls reuse the current host CLI and its stored subscription
+authentication.
+
 Before acting:
 
 1. Read `CLAUDE.md` in full. Despite its legacy filename, its execution, command dispatch, run lifecycle, project, security, output, and interaction rules are the shared RAPTOR agent contract.

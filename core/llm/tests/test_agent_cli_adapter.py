@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -173,9 +174,15 @@ def test_opencode_command_uses_run_and_stored_auth(monkeypatch) -> None:
     assert '"default_agent": "raptor-inference"' in config
     assert "api.opencode.ai" in captured["kwargs"]["proxy_hosts"]
     assert captured["staged_auth"] == "{}"
-    assert Path(captured["kwargs"]["env"]["XDG_DATA_HOME"]).parent == Path(
+    staged_data = Path(captured["kwargs"]["env"]["XDG_DATA_HOME"])
+    assert staged_data.parent == Path(
         captured["kwargs"]["target"]
     )
+    source_auth = Path(os.environ["XDG_DATA_HOME"]) / "opencode" / "auth.json"
+    assert str(source_auth) not in captured["kwargs"]["readable_paths"]
+    assert str(staged_data / "opencode" / "auth.json") in captured[
+        "kwargs"
+    ]["readable_paths"]
     config_home = Path(captured["kwargs"]["env"]["XDG_CONFIG_HOME"])
     assert config_home.name == "host-xdg-config"
     assert str(config_home / "opencode") in captured["kwargs"][

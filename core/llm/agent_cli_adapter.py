@@ -199,12 +199,12 @@ def _safe_diagnostic(value: object, limit: int = 500) -> str:
 
 def _auth_paths(agent: str, env: dict[str, str] | None = None) -> list[str]:
     home = Path.home()
+    values = env if env is not None else os.environ
     if agent == "codex":
-        values = env if env is not None else os.environ
         root = Path(values.get("CODEX_HOME", home / ".codex"))
         return [str(root / "auth.json"), str(root / "config.toml")]
-    data = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
-    config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    data = Path(values.get("XDG_DATA_HOME", home / ".local" / "share"))
+    config = Path(values.get("XDG_CONFIG_HOME", home / ".config"))
     return [
         str(data / "opencode" / "auth.json"),
         str(config / "opencode" / "opencode.json"),
