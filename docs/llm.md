@@ -87,7 +87,9 @@ RAPTOR skips the false-positive prefilter when its fast tier resolves to the
 same model as full analysis; every finding still receives full analysis. A
 distinct configured fast model keeps the prefilter path. Successful envelope
 probes for explicit Codex/OpenCode models are cached for 24 hours by exact CLI
-binary/version, model, and defense profile. `session-default` is always probed
+binary/version, model, defense profile, routing configuration, and non-secret
+routing environment. Config changes invalidate the cached success; unsafe or
+unreadable routing files disable caching. `session-default` is always probed
 because its exact model is not known before dispatch.
 
 RAPTOR uses large language models for vulnerability analysis, exploit generation, dataflow
