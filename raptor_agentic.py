@@ -1258,6 +1258,22 @@ def _should_run_mechanical_sca(sca_agent, deep_sca_requested: bool) -> bool:
     return bool(sca_agent) and not deep_sca_requested
 
 
+def _persist_redacted_sca_stderr(stderr: str, output_dir: Path) -> str:
+    """Persist and return the same redacted SCA diagnostic text."""
+    from core.security.redaction import redact_secrets
+
+    safe_stderr = redact_secrets(stderr)
+    retained_stderr = safe_stderr[-1024 * 1024:]
+    if len(retained_stderr) != len(safe_stderr):
+        retained_stderr = (
+            "[earlier SCA stderr truncated]\n" + retained_stderr
+        )
+    stderr_path = output_dir / "stderr.log"
+    stderr_path.write_text(retained_stderr, encoding="utf-8")
+    stderr_path.chmod(0o600)
+    return safe_stderr
+
+
 def _build_completion_manifest(orch_meta, import_result, import_sarif_files,
                                reanalyze_dir=None):
     manifest = {
@@ -3236,12 +3252,17 @@ Examples:
             # Route via sandbox egress proxy so SCA's HTTP calls are
             # hostname-allowlisted when --sandbox is active. The allowlist
             # is SCA_ALLOWED_HOSTS (vuln feeds + registries + archives).
-            rc, sca_stdout, _sca_stderr = run_sca_subprocess(
+            rc, sca_stdout, sca_stderr = run_sca_subprocess(
                 sca_agent,
                 original_repo_path,
                 sca_out,
                 sandbox_args=sandbox_passthrough,
             )
+            safe_stderr = ""
+            if sca_stderr:
+                safe_stderr = _persist_redacted_sca_stderr(
+                    sca_stderr, sca_out,
+                )
             if rc == 0:
                 sca_sarif = sca_out / "findings.sarif"
                 if sca_sarif.exists():
@@ -3301,6 +3322,12 @@ Examples:
                 except Exception:
                     logger.debug("SAGE SCA store skipped", exc_info=True)
             else:
+                detail = (
+                    safe_stderr.strip().splitlines()[-1]
+                    if safe_stderr.strip()
+                    else "no stderr"
+                )
+                logger.warning("SCA stderr: %s", detail)
                 logger.warning("SCA failed (rc=%d) — continuing without dep findings", rc)
                 sca_findings_count = 0
         except Exception as e:  # noqa: BLE001
