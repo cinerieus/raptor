@@ -85,6 +85,16 @@ def test_teardown_kills_sigterm_immune_worker_via_sigkill() -> None:
                 p.kill()
 
 
+# Nightly tier: the test's COST is grace-bound by design — a passing
+# run is sub-second (sentinel early-exit), but any regression or a
+# genuinely starved runner burns the injected 10s grace before the
+# verdict, past the default tier's RAPTOR_MAX_TEST_SECONDS budget.
+# Trade-off: a regression here surfaces nightly, not per-PR — accepted
+# because the same died-by-SIGTERM-promptly contract is pinned
+# default-tier by test_production_worker_sheds_inherited_salvage_handler
+# and test_production_worker_unblocks_inherited_sigterm_mask (identical
+# assertion, adversarial parent state).
+@pytest.mark.slow
 def test_teardown_lets_responsive_worker_die_on_sigterm() -> None:
     """A production-shaped worker dies to terminate() — no gratuitous
     SIGKILL inside the grace window.
@@ -179,6 +189,14 @@ def test_production_worker_unblocks_inherited_sigterm_mask() -> None:
                 p.kill()
 
 
+# Nightly tier: grace-bound cost like the responsive test above (a
+# broken snapshot order burns the 5s grace + the dead-wait before
+# failing). Trade-off: nightly-only surfacing is accepted because the
+# snapshot-order regression cannot pass the default tier unnoticed —
+# test_teardown_kills_sigterm_immune_worker_via_sigkill drives the
+# same helper end-to-end and its worker only dies at all when the
+# snapshot preceded shutdown().
+@pytest.mark.slow
 def test_teardown_snapshot_precedes_shutdown() -> None:
     """The regression itself: shutdown() nulls ``_processes``, so a
     post-shutdown snapshot sees nothing to kill and a plainly wedged
@@ -287,6 +305,17 @@ def test_clean_shutdown_prompt_exit_no_escalation(caplog) -> None:
                 p.kill()
 
 
+# Nightly tier: the escalation it forces pays the injected 0.5s grace
+# plus the helper's fixed 5s terminate→kill window by design; adverse
+# scheduling stacks on top of that genuine multi-second floor.
+# Trade-off: the clean-path escalation wiring (grace → terminate →
+# SIGKILL → warning, pipe released) surfaces regressions nightly, not
+# per-PR. Accepted with the residual stated precisely: the escalation
+# MECHANISM stays default-tier via the immune-worker test, and the
+# clean path's happy direction via
+# test_clean_shutdown_prompt_exit_no_escalation — only the
+# clean-path-escalation combination itself is nightly-only.
+@pytest.mark.slow
 def test_clean_shutdown_escalates_on_exit_wedge(caplog) -> None:
     """A worker wedged AFTER its last result must not hang the clean
     shutdown: every result is already in hand, escalation fires
