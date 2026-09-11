@@ -227,9 +227,20 @@ class ExploitTask(DispatchTask):
             evidence_blocks_for_finding,
         )
         si_blocks = evidence_blocks_for_finding(finding)
+        chain_blocks = ()
+        if finding.get("confirmed_attack_chains"):
+            from core.security.prompt_envelope import UntrustedBlock
+            chain_blocks = (UntrustedBlock(
+                content=json.dumps(
+                    finding["confirmed_attack_chains"], sort_keys=True,
+                ),
+                kind="confirmed-attack-chain-context",
+                origin=f"exploit:{finding.get('finding_id', 'unknown')}",
+            ),)
         budget = getattr(self._tls_budget, "tokens", 0) if hasattr(self, "_tls_budget") else 0
         bundle = build_exploit_prompt_bundle_from_finding(
-            finding, profile=self.profile, extra_blocks=tuple(si_blocks),
+            finding, profile=self.profile,
+            extra_blocks=tuple(si_blocks) + chain_blocks,
             budget_tokens=budget,
         )
         self._tls.nonce = bundle.nonce

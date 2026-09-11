@@ -15,6 +15,7 @@ from packages.llm_analysis.cc_dispatch import (
 from packages.llm_analysis.orchestrator import (
     CUTOFF_SKIP_CONSENSUS,
     CostTracker,
+    _cap_findings,
     _check_self_contradiction,
     _merge_results,
     _structural_grouping,
@@ -299,6 +300,80 @@ class TestOrchestrate:
         # Verify merged report was written
         out_file = tmp_path / "orch" / "orchestrated_report.json"
         assert out_file.exists()
+
+    def test_invariant_seed_survives_cap_and_final_merge(self, tmp_path):
+        source = tmp_path / "app.py"
+        source.write_text("safe = 1\nrun(user)\n", encoding="utf-8")
+        findings = [
+            _make_finding(f"scan-{index}", "py/sql-injection", f"db{index}.py", 1)
+            for index in range(3)
+        ]
+        report_path = tmp_path / "report.json"
+        report_path.write_text(json.dumps(_make_prep_report(findings=findings)))
+        context_map = {
+            "entry_points": [{"id": "EP-1", "file": "app.py", "line": 1}],
+            "sink_details": [{
+                "id": "SINK-1", "type": "shell_exec", "file": "app.py",
+                "line": 2, "reaches_from": ["EP-1"],
+            }],
+        }
+
+        def dispatch(task, items, *args, **kwargs):
+            if task.name == "analysis":
+                return [
+                    _make_cc_result(item["finding_id"], exploitable=False)
+                    for item in items
+                ]
+            return []
+
+        model = MagicMock(model_name="test-model", provider="ollama")
+        config = MagicMock(primary_model=model, fallback_models=[], max_cost_per_scan=0)
+        roles = {
+            "analysis_model": model, "analysis_models": [model],
+            "code_model": model, "consensus_models": [], "judge_models": [],
+            "aggregate_models": [], "fallback_models": [],
+        }
+        with patch(
+            "packages.llm_analysis.flow_context_inject.prepared_context_map",
+            return_value=context_map,
+        ), patch(
+            "packages.llm_analysis.flow_context_inject.prepare_flow_context",
+        ), patch(
+            "packages.llm_analysis.dispatch.dispatch_task", side_effect=dispatch,
+        ), patch(
+            "core.llm.config.resolve_model_roles", return_value=roles,
+        ), patch("core.llm.client.LLMClient"), patch(
+            "core.security.envelope_probe.probe_envelope_compatibility",
+        ) as probe:
+            probe.return_value.compatible = True
+            result = orchestrate(
+                prep_report_path=report_path, repo_path=tmp_path,
+                out_dir=tmp_path / "orch", max_findings=2,
+                llm_config=config, no_exploits=True, no_patches=True,
+                dataflow_validation_enabled=False,
+            )
+
+        assert result is not None
+        seeds = [
+            item for item in result["results"]
+            if item.get("metadata", {}).get("invariant_seed")
+        ]
+        assert len(seeds) == 1
+        assert seeds[0]["finding_id"] == "INV-SEED-0001"
+        assert seeds[0].get("cc_error") != "not dispatched"
+
+    def test_cap_reserves_bounded_slot_for_invariant_seed(self):
+        ordinary = [{"finding_id": f"F-{index}"} for index in range(3)]
+        seed = {
+            "finding_id": "INV-SEED-0001",
+            "metadata": {"invariant_seed": True},
+        }
+
+        selected = _cap_findings([*ordinary, seed], 2)
+
+        assert [item["finding_id"] for item in selected] == [
+            "F-0", "INV-SEED-0001",
+        ]
 
     def test_sloppy_response_normalised_through_pipeline(self, tmp_path):
         """Sloppy LLM output is normalised by response validation in cc_dispatch."""

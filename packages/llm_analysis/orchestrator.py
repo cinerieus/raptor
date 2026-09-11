@@ -237,21 +237,39 @@ def _classify_absent_consensus(
 
 
 def _cap_findings(findings: list, max_findings: int) -> list:
-    """Apply the max_findings cap, stamping the dropped tail with
-    ``skipped_over_budget`` at skip time. The dicts are the prep
-    report's own ``results`` entries, so the stamp survives into the
-    merged report and readers see the specific reason instead of a
-    generic post-hoc "skipped"."""
+    """Apply the cap while reserving a bounded share for mapped leads.
+
+    Invariant seeds are appended after scanner findings. A pure prefix cap
+    therefore made the architecture-map discovery path inert on normal runs.
+    Reserve at most 20 percent (at least one slot) for those leads and retain
+    scanner order within the remaining slots.
+    """
     if max_findings <= 0 or len(findings) <= max_findings:
         return findings
+    seeds = [
+        item for item in findings
+        if isinstance(item, dict)
+        and (item.get("metadata") or {}).get("invariant_seed") is True
+    ]
+    if seeds:
+        seed_slots = min(len(seeds), max(1, max_findings // 5))
+        seed_ids = {id(item) for item in seeds}
+        normal = [item for item in findings if id(item) not in seed_ids]
+        selected = normal[:max_findings - seed_slots]
+        selected.extend(seeds[:max_findings - len(selected)])
+    else:
+        selected = findings[:max_findings]
+    selected_ids = {id(item) for item in selected}
     from core.run.finding_status import SKIPPED_OVER_BUDGET, set_status
-    for dropped in findings[max_findings:]:
+    for dropped in findings:
+        if id(dropped) in selected_ids:
+            continue
         if isinstance(dropped, dict):
             set_status(
                 dropped, SKIPPED_OVER_BUDGET,
                 skip_reason="max_findings cap",
             )
-    return findings[:max_findings]
+    return selected
 
 
 def _finalize_results_for_emit(results: list) -> None:
@@ -763,6 +781,7 @@ def orchestrate(
         for seed in invariant_seeds:
             seed.setdefault("repo_path", str(repo_path))
         findings.extend(invariant_seeds)
+        report.setdefault("results", []).extend(invariant_seeds)
         if invariant_seeds:
             logger.info(
                 "invariant-first discovery added %d source-verified leads",
@@ -890,6 +909,7 @@ def orchestrate(
         CrossFamilyCheckTask,
         ExploitTask,
         JudgeTask,
+        GroupAnalysisTask,
         PatchTask,
         RetryTask,
     )
@@ -1690,6 +1710,19 @@ def orchestrate(
         n = len(groups)
         print(f"\n  Structural grouping: {n} group{'s' if n != 1 else ''} found")
 
+    group_task = GroupAnalysisTask(
+        results_by_id=results_by_id, findings=findings, profile=profile,
+    )
+    group_results = dispatch_task(
+        group_task, groups, dispatch_fn, role_resolution,
+        results_by_id, cost_tracker, max_parallel,
+    )
+    group_analyses = {
+        result["finding_id"]: result
+        for result in group_results
+        if result.get("finding_id") and "error" not in result
+    }
+
     # --- Reconcile dataflow validation ---
     # All per-finding analysis stages (consensus, judge, retry) have run.
     # Apply downgrades from the validation pass that were deferred to
@@ -1749,6 +1782,28 @@ def orchestrate(
         if result.get("finding_id") and "error" not in result
     }
 
+    # Confirmed chain context is an input to exploit generation, not merely
+    # report decoration. Keep it attached to each participating finding so the
+    # exploit task can construct a PoC that exercises the whole composition.
+    chains_by_id = {
+        chain["id"]: chain for chain in investigation["attack_chains"]
+    }
+    findings_by_id = {
+        finding.get("finding_id"): finding for finding in findings
+        if finding.get("finding_id")
+    }
+    for chain_id, analysis in chain_analyses.items():
+        if str(analysis.get("verdict") or "").lower() != "confirmed":
+            continue
+        chain = chains_by_id.get(chain_id)
+        if not chain:
+            continue
+        context = {"chain": chain, "analysis": analysis}
+        for finding_id in chain.get("finding_ids", []):
+            finding = findings_by_id.get(finding_id)
+            if finding is not None:
+                finding.setdefault("confirmed_attack_chains", []).append(context)
+
     # Generate artifacts only after mechanical dataflow reconciliation has
     # applied its final verdict. This avoids spending calls on findings that
     # the evidence layer has already refuted.
@@ -1785,6 +1840,8 @@ def orchestrate(
     merged["attack_chains"] = investigation["attack_chains"]
     if chain_analyses:
         merged["chain_analyses"] = chain_analyses
+    if group_analyses:
+        merged["group_analyses"] = group_analyses
     if dataflow_validation_enabled:
         merged["dataflow_validation"] = {
             **(validation_metrics or {}),
@@ -1846,7 +1903,7 @@ def orchestrate(
         "cross_family_disputes": cross_family_disputes,
         "low_confidence_retries": retries,
         "low_confidence_remaining": low_confidence,
-        "group_analyses": 0,
+        "group_analyses": len(group_analyses),
         "chain_analyses": len(chain_analyses),
         "correlation": correlation.get("summary") if correlation else None,
         "elapsed_seconds": round(elapsed, 1),

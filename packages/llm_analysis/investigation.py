@@ -155,6 +155,40 @@ def _decision_status(result: dict[str, Any]) -> str:
     return "needs_more_evidence"
 
 
+_EDGE_KEYS = frozenset({
+    "endpoint", "function", "id", "name", "path", "symbol",
+    "variable",
+})
+
+
+def _edge_refs(value: Any) -> set[str]:
+    """Extract exact structured references suitable for joining two flows."""
+    refs: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in _EDGE_KEYS and isinstance(item, (str, int)):
+                text = str(item).strip().lower()
+                if len(text) >= 3:
+                    refs.add(f"{key}:{text}")
+            if isinstance(item, (dict, list)):
+                refs.update(_edge_refs(item))
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_edge_refs(item))
+    return refs
+
+
+def _dependency_refs(first: dict[str, Any], second: dict[str, Any]) -> list[str]:
+    """Return concrete identifiers joining the first sink to second input."""
+    produced = _edge_refs(first.get("sink")) | _edge_refs(
+        first.get("confirmed_edges")
+    )
+    consumed = _edge_refs(second.get("source")) | _edge_refs(
+        second.get("steps")
+    ) | _edge_refs(second.get("confirmed_edges"))
+    return sorted(produced & consumed)
+
+
 def build_investigation_graph(
     findings: list[dict[str, Any]], results_by_id: dict[str, dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -223,6 +257,7 @@ def build_investigation_graph(
                 "evidence_pack": pack_id,
             })
 
+    packs_by_id = {pack["id"]: pack for pack in packs}
     chains: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for left_kind, right_kind, goal in _CHAIN_RULES:
@@ -231,6 +266,11 @@ def build_investigation_graph(
         for first in left:
             for second in right:
                 if first["finding_id"] == second["finding_id"]:
+                    continue
+                first_pack = packs_by_id[first["evidence_pack"]]
+                second_pack = packs_by_id[second["evidence_pack"]]
+                dependency_refs = _dependency_refs(first_pack, second_pack)
+                if not dependency_refs:
                     continue
                 key = (first["id"], second["id"], goal)
                 if key in seen:
@@ -249,8 +289,8 @@ def build_investigation_graph(
                         for item in (first, second)
                     ),
                     "blocked_by": blocked,
+                    "dependency_evidence": dependency_refs,
                     "missing_edges": [
-                        f"prove state produced by {first['id']} reaches {second['id']}",
                         "prove the attacker can satisfy every required precondition",
                     ],
                 })

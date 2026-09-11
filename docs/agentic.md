@@ -197,8 +197,10 @@ kill the run.  Existing project threat models are preserved unless
 
 Findings are dispatched for analysis in two contexts:
 
-- **Host-bound session** -- spawns the selected Claude Code, Codex, or
-  OpenCode CLI in separate processes. The selected host is authoritative.
+- **Host-bound session** -- explicit analysis flags, `models.json`, and
+  API/environment providers retain their existing precedence. If none supplies
+  an analysis model, RAPTOR spawns the selected Claude Code, Codex, or OpenCode
+  CLI as the keyless fallback.
 - **Standalone run** -- dispatches through the provider configured in
   `models.json` or environment variables, with Claude Code as the legacy
   no-key fallback.
@@ -322,6 +324,12 @@ The report carries one of three modes:
 
 Analysed findings include `is_exploitable`, `reasoning`, `exploit_code`, and
 `patch_code`.
+
+Existing same-file and same-rule group analysis remains in the orchestrated
+report. Chain candidates additionally require a shared structured flow
+reference between the producing sink and consuming source. Confirmed chain
+reviews are attached to participating findings and included in subsequent
+exploit-generation prompts.
 
 
 ## Flag reference
