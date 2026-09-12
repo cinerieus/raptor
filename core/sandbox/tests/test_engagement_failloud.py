@@ -235,11 +235,20 @@ class TestExecStatusPipe:
         assert _parse_setup_status(b"X:exec: file not found")[0] == "X"
 
     @requires_landlock
-    def test_mount_failure_degrades_to_landlock_and_runs(self, tmp_path):
-        # Force the mount-ns spawn path. On a mount-capable host it engages;
-        # on an AppArmor/nested host mount() is denied → status 'M' → degrade
-        # to Landlock-only. EITHER way the command must actually RUN (real
-        # output), never return a silent rc-126 empty result.
+    def test_mount_failure_retries_mountless_and_runs(self, tmp_path):
+        # Force the mount-ns spawn path. On a mount-capable host it
+        # engages; on an AppArmor/nested host the bind tree is denied →
+        # status 'M' → the ladder KEEPS the namespace backend and
+        # retries without the bind tree (mountless: Landlock + PID ns +
+        # fresh procfs where the kernel allows). EITHER way the command
+        # must actually RUN (real output), never return a silent rc-126
+        # empty result. The old 'M' → Landlock-only-subprocess demotion
+        # no longer exists: when the mountless retry cannot engage
+        # either, the designed outcome is a TYPED fail-loud
+        # SandboxSetupError (unit-covered by
+        # test_secure_namespace_retry_fails_closed) — treat that as the
+        # host lacking the lane, not as the silent-empty regression
+        # this test guards against.
         ok, _ = check_unshare_engages(["--user", "--pid", "--fork", "--ipc"])
         if not ok:
             pytest.skip("host cannot engage namespaces at all")
@@ -251,8 +260,15 @@ class TestExecStatusPipe:
         out.mkdir()
         (tgt / "f.txt").write_text("hi")
         tgt, out = str(tgt), str(out)
-        with sandbox(block_network=True, target=tgt, output=out) as run:
-            r = run(["/bin/echo", "ran-OK"], capture_output=True, text=True)
+        try:
+            with sandbox(block_network=True, target=tgt, output=out) as run:
+                r = run(["/bin/echo", "ran-OK"],
+                        capture_output=True, text=True)
+        except SandboxSetupError as e:
+            pytest.skip(
+                f"mountless namespace retry cannot engage on this host "
+                f"(typed fail-loud refusal, not a silent degrade): {e}"
+            )
         if r.returncode == -9:
             pytest.skip(
                 "subprocess degrade path hit EBADF (death-pipe fd "
@@ -260,6 +276,11 @@ class TestExecStatusPipe:
             )
         assert r.returncode == 0
         assert "ran-OK" in (r.stdout or "")
+        info = getattr(r, "sandbox_info", None) or {}
+        if info.get("mount_ns_degraded"):
+            # The 'M' retry actually fired: the run must record the
+            # mountless posture, not claim bind-tree isolation.
+            assert info.get("mount_ns_active") is not True
 
     def test_core_layer_apply_failure_fails_loud(self, monkeypatch, tmp_path):
         # If the spawn child reports a Landlock/seccomp/unshare APPLY failure
