@@ -143,8 +143,14 @@ def test_use_seatbelt_false_when_seatbelt_unavailable(reset_caches):
                             return_value=False):
         # Sandbox unavailable entirely → no backend; subprocess.run
         # path with rlimits only. Just verify no crash.
+        # block_network=False explicitly: the bare sandbox() default
+        # profile blocks network, and a network block with no
+        # enforcing layer now REFUSES on darwin too (see
+        # test_darwin_net_gate.py) — this test is about the backend
+        # dispatch, not the network gate.
         from core.sandbox.context import sandbox
-        with sandbox() as run, mock.patch("subprocess.run") as sub_run:
+        with sandbox(block_network=False) as run, \
+                mock.patch("subprocess.run") as sub_run:
             sub_run.return_value = mock.MagicMock(
                 returncode=0, stderr=b"", stdout=b"",
                 sandbox_info={},

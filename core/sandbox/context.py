@@ -1917,12 +1917,25 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
     # hits self-loopback IPC too (gradle daemon et al.) — mitigated by
     # the env nudge in run() and the degraded_net_deny=False opt-out.
     _degraded_tcp_deny = False
-    if (sys.platform != "darwin"
-            and not effectively_disabled
+    if (not effectively_disabled
             and degraded_net_deny
             and block_network
             and not use_sandbox):
-        _ll_net_capable = (check_landlock_available()
+        # darwin reaches this block too (pre-fix it was scoped
+        # != "darwin", so a trusted block_network=True run on a
+        # seatbelt-less Mac silently kept FULL host network behind the
+        # once-per-process "Sandbox unavailable" warning — while
+        # run()'s docstring promised the refusal). There is no
+        # Landlock lane on darwin at all, so _ll_net_capable is
+        # structurally False there and the flow lands on the same
+        # fail-closed arm with the same two acceptance levers. This
+        # is deliberately a capability-axis refusal in context, not a
+        # tier: the floor lattice (tiers.py) orders CONTAINMENT
+        # backends, and its design notes keep per-axis enforceability
+        # (Landlock ABI, seccomp presence, network layers) as refusal
+        # conditions here, never tiers.
+        _ll_net_capable = (sys.platform != "darwin"
+                           and check_landlock_available()
                            and _get_landlock_abi() >= 4)
         if _ll_net_capable and not allowed_tcp_ports:
             _degraded_tcp_deny = True
@@ -1963,34 +1976,50 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             #     accepted.
             # strict defers to its own gate below so that one abort
             # names EVERY unmet strict requirement, this one included.
+            if sys.platform == "darwin":
+                from .probes import SEATBELT_FAIL_INSTRUCTIONS
+                _no_layer_reason = (
+                    "seatbelt (sandbox-exec) is unavailable on this "
+                    "host and macOS has no fallback network-deny layer"
+                )
+                _no_layer_fix = SEATBELT_FAIL_INSTRUCTIONS
+                _ports_clause = (
+                    " The supplied allowed_tcp_ports allowlist is "
+                    "equally unenforceable (the SBPL port rules need "
+                    "the seatbelt backend)." if allowed_tcp_ports
+                    else "")
+            else:
+                from .probes import ENGAGE_FAIL_INSTRUCTIONS
+                _no_layer_reason = (
+                    "no namespace backend is available on this host "
+                    "AND Landlock ABI v4+ is missing"
+                )
+                _no_layer_fix = ENGAGE_FAIL_INSTRUCTIONS
+                _ports_clause = (
+                    " The supplied allowed_tcp_ports allowlist is "
+                    "equally unenforceable (Landlock TCP rules need "
+                    "ABI v4+)." if allowed_tcp_ports else "")
             _degraded_ok = os.environ.get(
                 "RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "",
             ).strip().lower() in ("1", "true", "yes", "on")
             if _degraded_ok:
                 if state.warn_once("_degraded_net_open_override_warned"):
                     logger.warning(
-                        "Sandbox: block_network requested but no "
-                        "namespace backend is available AND Landlock "
-                        "ABI v4+ is missing — "
+                        "Sandbox: block_network requested but %s — "
                         "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 accepts "
                         "running with NETWORK UNRESTRICTED on this "
                         "host%s.",
+                        _no_layer_reason,
                         (" (the allowed_tcp_ports allowlist is "
                          "unenforced too)" if allowed_tcp_ports else ""),
                     )
             else:
                 from .errors import SandboxSetupError
-                from .probes import ENGAGE_FAIL_INSTRUCTIONS
-                _ports_clause = (
-                    " The supplied allowed_tcp_ports allowlist is "
-                    "equally unenforceable (Landlock TCP rules need "
-                    "ABI v4+)." if allowed_tcp_ports else "")
                 raise SandboxSetupError(
-                    "Sandbox: block_network=True was requested, but no "
-                    "namespace backend is available on this host AND "
-                    "Landlock ABI v4+ is missing — no layer can enforce "
+                    "Sandbox: block_network=True was requested, but "
+                    + _no_layer_reason + " — no layer can enforce "
                     "the requested network block." + _ports_clause,
-                    ENGAGE_FAIL_INSTRUCTIONS + " Alternatively: choose "
+                    _no_layer_fix + " Alternatively: choose "
                     "a profile without the network block when the "
                     "workload genuinely needs egress (e.g. `--sandbox "
                     "target_run`, which keeps filesystem confinement), "
@@ -6692,8 +6721,10 @@ def run(cmd: list[str], block_network: bool = True, target: str | None = None,
     some layer can still enforce what the caller asked for; it too
     refuses (SandboxSetupError) when nothing can — a mount-ns demotion
     on a Landlock-less kernel with target/output/allowed_tcp_ports/
-    restrict_reads set, or block_network=True with neither the
-    namespace backend nor Landlock ABI v4+ available.
+    restrict_reads set, or block_network=True with no enforcing layer
+    left (Linux: neither the namespace backend nor Landlock ABI v4+;
+    macOS: seatbelt unavailable — there is no fallback network-deny
+    layer there at all).
     Applies get_safe_env(), resource limits, and namespace isolation
     automatically.
 
