@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 
@@ -240,12 +241,31 @@ def test_tmpdir_steered_into_output_scratch_under_write_isolation(
 
     # The steered TMPDIR must be covered by the OUTPUT write
     # exception already in the profile — no new write-exception
-    # entry, no /var/folders widening.
+    # entry, and in particular no widening to the host-shared
+    # per-user temp dir. Scope the assertions to the file-write*
+    # exception clauses: on a darwin host the output dir itself
+    # (pytest tmp_path) legitimately lives UNDER /var/folders, so a
+    # whole-profile substring check false-positives on the output
+    # subpath.
     profile = capture.read_text()
     out_real = os.path.realpath(str(out_dir))
-    assert f'(subpath "{out_real}")' in profile
-    assert expected_tmp.startswith(out_real + os.sep)
-    assert "/var/folders" not in profile
+    write_denies = [line for line in profile.splitlines()
+                    if line.startswith("(deny file-write*")]
+    assert len(write_denies) == 1, profile
+    subpaths = re.findall(r'\(subpath "([^"]*)"\)', write_denies[0])
+    # Exactly the /private/tmp baseline seed + the output dir — the
+    # steer rides the existing output exception and adds nothing.
+    assert sorted(subpaths) == sorted(["/private/tmp", out_real]), (
+        subpaths
+    )
+    # The steered value resolves to a path under that output
+    # exception, and the host-default temp dir the child arrived
+    # with is NOT among the write exceptions.
+    assert os.path.realpath(expected_tmp) == os.path.join(out_real,
+                                                          ".tmp")
+    assert not any(p.startswith("/var/folders/zz/host-default")
+                   or p.startswith("/private/var/folders/zz/host-default")
+                   for p in subpaths), subpaths
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only")
