@@ -27,6 +27,9 @@ they mean to test; the ambient family is noise here.
 """
 
 import os
+import shutil
+import tempfile
+from collections.abc import Iterator
 
 import pytest
 
@@ -53,6 +56,51 @@ _OPERATOR_PROXY_ENV = {
 def _scrub_ambient_env(monkeypatch):
     for var in (*_PROXY_ENV_FAMILY, *_AWS_ENV_FAMILY):
         monkeypatch.delenv(var, raising=False)
+
+
+# AF_UNIX hermeticity: every real-dispatcher test binds two Unix
+# sockets under a ``tempfile.mkdtemp(prefix="raptor-llm-<run_id>-")``
+# dir, and Linux caps a socket path at 108 bytes (sun_path, incl. NUL).
+# The session-wide TMPDIR containment (root conftest) nests scratch
+# one level deeper, and on hosts whose ambient TMPDIR is itself a
+# nested per-session dir the combined prefix pushes
+# ``.../raptor-llm-<run_id>-XXXXXXXX/llm-child.sock`` past the cap —
+# every dispatcher construction then dies with "AF_UNIX path too
+# long" while short-/tmp hosts (CI) pass. Budget below the cap for
+# the dispatcher's own suffix: "/raptor-llm-" + run_id (headroom 40;
+# longest in this dir is 31) + "-XXXXXXXX" + "/llm-child.sock".
+_AF_UNIX_PATH_MAX = 107  # usable bytes (108 incl. the trailing NUL)
+_SOCKET_SUFFIX_BUDGET = len("/raptor-llm-") + 40 + len("-XXXXXXXX") + len(
+    "/llm-child.sock")
+_SAFE_TMP_LEN = _AF_UNIX_PATH_MAX - _SOCKET_SUFFIX_BUDGET
+
+
+@pytest.fixture(autouse=True)
+def _af_unix_safe_tmp(monkeypatch) -> Iterator[None]:
+    """Re-root scratch at a short ``/tmp`` dir when the contained
+    TMPDIR would blow the AF_UNIX path cap.
+
+    No-op on short-tmp hosts, so the session containment (and its
+    kill-leak story) is preserved there; on long-tmp hosts this is
+    the root conftest's documented AF_UNIX exception (sites that must
+    not be contained anchor at ``dir="/tmp"``). Cleanup is the
+    ``finally`` rmtree below; a SIGKILLed session leaks the dir, and
+    on exactly these deep-TMPDIR hosts core/run/tmp_reaper.py does
+    NOT reclaim it — the sweep covers only ``tempfile.gettempdir()``,
+    which here is the deep dir, not ``/tmp``. The ``raptor-llm-``
+    prefix listing only helps when some later session runs with
+    ``gettempdir() == /tmp`` (CI, short-tmp hosts) and sweeps it up.
+    """
+    if len(tempfile.gettempdir()) <= _SAFE_TMP_LEN:
+        yield
+        return
+    short_tmp = tempfile.mkdtemp(prefix="raptor-llm-sock-", dir="/tmp")
+    monkeypatch.setenv("TMPDIR", short_tmp)
+    monkeypatch.setattr(tempfile, "tempdir", short_tmp)
+    try:
+        yield
+    finally:
+        shutil.rmtree(short_tmp, ignore_errors=True)
 
 
 @pytest.fixture
