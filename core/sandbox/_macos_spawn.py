@@ -174,12 +174,21 @@ def is_available() -> bool:
 # snapshot can no longer attribute it — from that point it is
 # indistinguishable from an unrelated process. Callers therefore pass a
 # snapshot captured while the tree was still alive (the timeout path
-# snapshots BEFORE killing; the shim keeps a periodic one); a
-# descendant that forked, setsid'd, and was orphaned entirely between
-# snapshots escapes attribution. The mirrored sweep in
+# snapshots BEFORE killing; the shim accumulates a cumulative lineage
+# ledger across its periodic snapshots — pids AND the process groups
+# attributed descendants lead after a setsid); a descendant that
+# forked, setsid'd, and was orphaned entirely within one snapshot
+# interval escapes attribution (documented residual — it stays inside
+# the inherited seatbelt profile, so confinement holds; the leak is
+# persistence, not escape). The mirrored sweep in
 # libexec/raptor-seatbelt-shim (keep the logic in sync — the shim runs
 # `python -I` with no repo on sys.path and cannot import this module)
-# owns the normal-completion path, where it can still see the live tree.
+# owns the normal-completion path, where it can still see the live
+# tree; this parent's sweeps are the backstop for a shim that died
+# without sweeping, attributing through the shim's G sandbox-group
+# report on the status pipe. launchd-submitted jobs sit outside every
+# ppid/pgid universe (children of launchd); the hardened profiles'
+# mach-lookup allowlist-deny closes that submission vector instead.
 
 # Candidate absolute paths first (macOS pins ps at /bin/ps); bare "ps"
 # as a last resort for unusual PATH layouts.
