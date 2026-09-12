@@ -17,11 +17,24 @@ Design notes:
 
 * ``ContainmentTier`` is an ``IntEnum`` — ``>=`` IS the lattice. The
   order is total *within a platform*: Linux uses 0..40, macOS uses
-  {0, 100}. Each Linux step up delivers a strict superset of
-  isolation: MOUNTLESS_NS adds fresh procfs + the full ``os.unshare``
-  flag set + the proxy-netns tier over NS_NOMOUNT; NS_NOMOUNT adds
-  user/pid/ipc/net namespaces over LANDLOCK_ONLY; LANDLOCK_ONLY adds
-  Landlock + seccomp over BARE.
+  {0, 100}. MOUNTLESS_NS delivers a superset of NS_NOMOUNT (it adds
+  the Landlock policy layer; on the fresh-procfs axis NS_NOMOUNT is
+  fail-closed while MOUNTLESS_NS is best-effort for non-contract
+  callers, stamped ``pidns_proc_mount_unavailable`` on the hosts
+  where it degrades), and MOUNT_NS a strict superset of MOUNTLESS_NS
+  (it adds the pivot_root bind tree). NS_NOMOUNT vs
+  LANDLOCK_ONLY is the one rung where the axes differ rather than
+  nest: NS_NOMOUNT trades Landlock's filesystem/TCP *policy* scoping
+  for kernel *containment* — user/pid/ipc/cgroup(+net) namespaces, a
+  fresh pid-ns procfs, and seccomp. It sits above LANDLOCK_ONLY
+  because the order grades what the floor contract exists to protect:
+  isolation of the host's process table, procfs (the same-UID environ
+  credential channel), IPC, and network from attacker-derived code.
+  Requested-policy enforceability (can Landlock actually restrict the
+  writes/reads/ports this caller asked for?) is deliberately NOT part
+  of the order — it is a per-axis refusal condition in ``context.py``
+  (the construction-time Landlock refusal and the per-call recheck),
+  exactly like the Landlock-ABI and seccomp axes below.
 * Cross-platform comparability is refused, not fudged: seatbelt has
   no procfs concept, scopes reads/writes like Landlock, and denies
   process-info like a pid namespace — it is not "between" any two
@@ -55,9 +68,22 @@ class ContainmentTier(IntEnum):
 
     BARE = 0            # rlimits only (operator-disabled / no seatbelt)
     LANDLOCK_ONLY = 10  # Landlock+seccomp+rlimits, host namespaces
-    NS_NOMOUNT = 20     # unshare-CLI namespaces, host procfs visible
+    # NS_NOMOUNT: namespace containment without a filesystem-policy
+    # layer — the modern spawn backend's Landlock-absent mode: full
+    # unshare namespace set (user+pid+ipc+cgroup[+net]), a FRESH
+    # pid-ns procfs (fail-closed 'F' on this lane — an upgrade over
+    # the deleted unshare-CLI lane, which left the HOST procfs
+    # visible), seccomp, and rlimits. No Landlock: filesystem writes
+    # and TCP connects are not policy-scoped, which is why the tier
+    # sits below MOUNTLESS_NS. The value (20) and label ("ns-only")
+    # are kept from the legacy lane the enum slot used to describe —
+    # the slot's DELIVERY is upgraded, not its position (see the
+    # module docstring for why it still orders above LANDLOCK_ONLY).
+    NS_NOMOUNT = 20
     MOUNTLESS_NS = 30   # full ns set + fresh procfs + Landlock, no bind tree
-    MOUNT_NS = 40       # pivot_root bind tree (rootfs= variant included)
+    MOUNT_NS = 40       # pivot_root bind tree (rootfs= variant included);
+    #                     the tree, not Landlock, is the tier's defining
+    #                     filesystem enforcement (ro binds + tmpfs masks)
     SEATBELT = 100      # macOS SBPL; deliberately not comparable to Linux
 
 

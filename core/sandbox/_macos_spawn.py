@@ -560,6 +560,11 @@ def run_sandboxed(cmd: list[str], *,
                   # of host-procfs degrade). macOS has no procfs;
                   # Seatbelt provides the process-info contract.
                   require_fresh_procfs=False,
+                  # landlock_required: Linux-only floor plumbing (the
+                  # Landlock-absent tolerance mode). macOS has no
+                  # Landlock layer at all; accepted + ignored for
+                  # signature parity.
+                  landlock_required=True,
                   # rootfs: Linux-only — mount-ns pivot into an unpacked
                   # container-image tree. Accepted for signature parity
                   # but NOT ignored like the kwargs above: those are

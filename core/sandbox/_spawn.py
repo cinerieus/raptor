@@ -1063,6 +1063,7 @@ def run_sandboxed(
     skip_pid_ns: bool = False,
     skip_mount_ns: bool = False,
     require_fresh_procfs: bool = False,
+    landlock_required: bool = True,
     proxy_unix_socket: str | None = None,
     proxy_forwarder_port: int | None = None,
     extra_unix_bridges: Sequence[tuple[int, str]] | None = None,
@@ -1071,6 +1072,23 @@ def run_sandboxed(
     rootfs: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run `cmd` inside a fully-isolated sandbox.
+
+    landlock_required: containment-floor plumbing, set ONLY by
+    ``context.run()`` from the call's resolved floor (never a caller
+    choice — ``run()``/``sandbox()`` expose no kwarg for it). True
+    (default): current behaviour — when the requested policy builds a
+    Landlock ruleset, an install failure (including a kernel without
+    the Landlock ABI) aborts the spawn fail-closed ('L'). False: the
+    resolved floor admits NS_NOMOUNT, so on a kernel WITHOUT Landlock
+    the layer is skipped instead of aborting — the spawn delivers the
+    ns-only tier (namespaces + fresh procfs + seccomp + rlimits). On
+    a kernel WITH Landlock the flag is inert: the ruleset is built
+    and an install failure still aborts 'L' (tolerating *absence* is
+    consented by the floor; tolerating a *failed install* on a
+    capable kernel never is). Everything the ns-only tier does
+    promise stays fail-closed regardless: namespace setup ('U'),
+    seccomp install ('S'), and — when the caller demands it via
+    require_fresh_procfs — the fresh procfs mount ('F').
 
     child_pid_callback: optional callable invoked in the PARENT with
     the pid of the sandbox SETUP child (the root of the whole sandbox
@@ -1676,13 +1694,36 @@ def run_sandboxed(
             )
             persona = None
         landlock_fn = None
+        # Floor-consented Landlock-absence tolerance (see the
+        # landlock_required docstring): on a kernel without the
+        # Landlock ABI, a floor that admits NS_NOMOUNT skips the layer
+        # instead of aborting 'L' in the grandchild — the ns-only tier
+        # this spawn then delivers is declared (and capped) by the
+        # caller's checked dispatch, so the floor comparison, not this
+        # module, decides admission. Scoped strictly to kernel absence:
+        # with Landlock present the ruleset is built below exactly as
+        # for landlock_required=True.
+        _landlock_absent_tolerated = (
+            not landlock_required and not _ll_avail()
+        )
+        if _landlock_absent_tolerated and (
+                writable_paths or allowed_tcp_ports
+                or (readable_paths and restrict_reads)):
+            logger.debug(
+                "_spawn: Landlock unavailable on this kernel and the "
+                "call's containment floor admits the ns-only tier — "
+                "running without the Landlock policy layer "
+                "(namespaces + fresh procfs + seccomp still "
+                "fail-closed).",
+            )
         # readable_paths under restrict_reads is a POLICY too: a
         # read-restricted spawn with no writable paths and no TCP
         # ports (skip_mount_ns + exclude_tmp_baseline shapes) must
         # still build the Landlock read allowlist — the preexec-path
         # twin of this gate already includes it.
-        if (writable_paths or allowed_tcp_ports
-                or (readable_paths and restrict_reads)):
+        if (not _landlock_absent_tolerated
+                and (writable_paths or allowed_tcp_ports
+                     or (readable_paths and restrict_reads))):
             effective_paths = list(writable_paths) if writable_paths else []
             if (target or output or rootfs) and not skip_mount_ns:
                 # This spawn builds the mount tree (same predicate as
