@@ -1047,7 +1047,14 @@ class TestProvenanceUnavailable:
         xdg = tmp_path / "xdg"
         keydir = xdg / "raptor"
         keydir.mkdir(parents=True)
-        (keydir / "telemetry-mac.key").write_bytes(b"short")  # wrong length
+        # Stable SHORT content at healthy 0600 perms: the one
+        # operator-side unusable shape that is NOT auto-recovered
+        # (tamper shapes — mode flips, symlinks, over-length — are
+        # quarantined and re-keyed, and land in telemetry_tampering
+        # via failed verification instead).
+        key = keydir / "telemetry-mac.key"
+        key.write_bytes(b"short")  # wrong length
+        key.chmod(0o600)
         monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
 
     def test_unusable_key_is_notable_not_tampering(
