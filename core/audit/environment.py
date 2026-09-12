@@ -44,8 +44,12 @@ book against (edge review runs during prep; concept discovery takes
 none) stop on the conclusion flag; the unconditional terminal sweep
 at the end of the run body guarantees the booking even when every
 later rails-polling pass is conditionally skipped.
-The study consumer thread still observes the guard only through
-``_check_budget`` (stops on conclusion, never paused mid-batch). The
+The study consumer thread ticks at its top-of-iteration budget poll
+and again before each batch's study call — a pause defers the next
+study batch, a conclusion stops the drain with the stop booked, and
+a stop request arriving during a paused gate is re-checked when the
+gate returns — while holding nothing the main pass could block on
+(its low-priority character). The
 suspicious-promotion sweep is deliberately NOT gated: it dispatches
 no LLM calls — its per-item work is local mechanical tooling whose
 failures never feed the breaker — and it carries no per-item budget

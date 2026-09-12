@@ -13324,6 +13324,20 @@ def _study_consumer_loop(
 
     _requeue_pending_study(config, study_queue)
 
+    # Environment gate: the tick pauses new batch dequeues under
+    # resource pressure, and its stop check BOOKS a conclusion — the
+    # consumer can outlive every rails-polling pass (post-loop drain),
+    # so a conclusion observed only here must not leave the run
+    # reporting complete. The tick holds no lock across its pause —
+    # the consumer keeps its low-priority character: while paused it
+    # holds no throttle slot, no queue lock, nothing the main pass
+    # could block on. (``result`` is rebound by the re-review calls
+    # below; the late-binding closure books against the current one.)
+    _env_gate = _make_dispatch_gate(
+        config,
+        stop_check=lambda: _environment_stop_booked(config, result),
+    )
+
     while not study_queue.is_done():
         # Idle at the top of every iteration: the drain path uses the
         # working flag to tell "mid-batch, let it finish" apart from
@@ -13340,6 +13354,8 @@ def _study_consumer_loop(
         # results (a four-segment run got zero study output this way
         # — every segment's supervisor bound was spent before the
         # consumer's first batch). Cost caps stay absolute.
+        if _env_gate is not None:
+            _env_gate()
         if _check_budget(
             config, start_time, result,
             skip_max_seconds=not study_queue.producer_done(),
@@ -13539,6 +13555,33 @@ def _study_consumer_loop(
                 "study-run",
             )
             break
+        # Second gate at the batch's own LLM dispatch point: the
+        # top-of-iteration tick ran before dedup/flush/prep, so a
+        # fault arising during those steps would otherwise still buy
+        # this batch's study call.
+        if _env_gate is not None:
+            if _env_gate():
+                logger.info(
+                    "study-consumer: environment guard concluded — "
+                    "exiting before study-run",
+                )
+                break
+            # The gate may have paused for minutes: a drain-
+            # abandonment stop (or a budget/SIGTERM trip) arriving
+            # DURING that pause was invisible to the checkpoint above,
+            # and nothing else re-checks before the paid study call —
+            # a full batch then dispatched after the run was over.
+            # Guard-scoped, so guard-less runs keep the pre-existing
+            # path byte-for-byte.
+            if study_queue.stop_requested or _check_budget(
+                config, start_time, result,
+                skip_max_seconds=not study_queue.producer_done(),
+            ):
+                logger.info(
+                    "study-consumer: stop arrived during the "
+                    "environment gate — exiting before study-run",
+                )
+                break
         n_before = len(dm.get("concepts", [])) if dm else 0
         try:
             from core.concepts.study import run_study

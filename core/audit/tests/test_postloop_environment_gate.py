@@ -1263,3 +1263,198 @@ class TestRunLevelGateBindings:
         )
         result, guard = _binding_run(tmp_path, monkeypatch)
         assert ("_gate", "_do_ls_review") in guard.tick_callers
+
+
+# ── Study consumer ───────────────────────────────────────────────────
+
+
+class TestStudyConsumerGate:
+    def test_pause_defers_batch_and_conclusion_stops_drain(
+        self, tmp_path,
+    ):
+        """A paused guard blocks the consumer BEFORE it dequeues a new
+        study batch (queued work stays queued, nothing dispatches);
+        concluding the guard while paused stops the drain through the
+        environment rails without touching the batch."""
+        from core.audit.orchestrator import (
+            StudyQueue,
+            StudyRequest,
+            _study_consumer_loop,
+        )
+
+        guard = _StubGuard()
+        guard.pause()
+        config = _run_config(tmp_path, guard)
+        result = OrchestratorResult()
+        queue = StudyQueue()
+        queue.enqueue(StudyRequest("what is sk_buff?", "a.c", "f"))
+
+        def run() -> None:
+            _study_consumer_loop(
+                queue, config, SimpleNamespace(domain_model={}),
+                lambda ctx, cfg: _rv_outcome("clean"),
+                SimpleNamespace(), result,
+                checklist={}, context_map=None, evidence_index={},
+                sarif_cache=None, entry_points=set(),
+                start_time=time.monotonic(), on_progress=None,
+            )
+
+        t = threading.Thread(target=run)
+        t.start()
+        # The consumer blocks inside the paused tick before its first
+        # dequeue — the queued request is still there and no study
+        # work has started.
+        t.join(timeout=0.3)
+        assert t.is_alive()
+        _progress, queue_empty, working = queue.drain_state()
+        assert not queue_empty
+        assert not working
+
+        guard.concluded = True
+        guard.resume()
+        t.join(timeout=10.0)
+        assert not t.is_alive()
+        # The drain stopped on the environment rails; the batch was
+        # never dequeued, let alone dispatched — and the stop is
+        # booked with the fault reason.
+        assert result.terminated_by == "environment"
+        assert result.environment_fault == guard.conclude_reason
+        assert len(queue.dequeue_batch(max_items=10, timeout=0.05)) == 1
+
+
+class _NthTickPauseGuard:
+    """Blocks only on the Nth tick (the pre-batch gate), releasable —
+    models a pause that begins after the top-of-iteration checkpoints
+    already passed."""
+
+    conclude_reason = "stub environment fault"
+
+    def __init__(self, pause_on_tick: int) -> None:
+        self.ticks = 0
+        self.concluded = False
+        self._pause_on = pause_on_tick
+        self.paused = threading.Event()
+        self.release = threading.Event()
+
+    def tick(self) -> None:
+        self.ticks += 1
+        if self.ticks == self._pause_on:
+            self.paused.set()
+            assert self.release.wait(timeout=15.0), "test guard stuck"
+
+
+class TestStudyConsumerPreBatchGate:
+    """The pre-batch gate sits between the stop_requested checkpoint
+    and the paid study call. Tick 1 is the top-of-iteration gate,
+    tick 2 is the pre-batch gate — a pause there models a fault
+    arising during dedup/flush/prep."""
+
+    def _drive(self, tmp_path, monkeypatch, *, on_paused):
+        import json
+
+        from core.audit.orchestrator import (
+            StudyQueue,
+            StudyRequest,
+            _study_consumer_loop,
+        )
+
+        target = tmp_path / "target"
+        target.mkdir()
+        out = tmp_path / "out"
+        out.mkdir()
+        study_list = out / "study-list.json"
+        study_list.write_text(json.dumps({"concepts": []}),
+                              encoding="utf-8")
+
+        config = OrchestratorConfig(target_path=target, out_dir=out)
+        guard = _NthTickPauseGuard(pause_on_tick=2)
+        config.environment_guard_state = guard
+
+        study_ran = threading.Event()
+
+        import core.concepts.study as _study_mod
+
+        def fake_run_study(*a, **kw):
+            study_ran.set()
+            raise RuntimeError("test: stop after recording")
+
+        monkeypatch.setattr(_study_mod, "run_study", fake_run_study)
+        monkeypatch.setattr(
+            _orch, "_run_llm_client", lambda cfg: SimpleNamespace(),
+        )
+        monkeypatch.setattr(
+            _orch, "_client_class_cost", lambda client, cls: 0.0,
+        )
+        monkeypatch.setattr(
+            _orch, "_resolve_multilang_requests", lambda *a, **kw: {},
+        )
+
+        queue = StudyQueue()
+        queue.enqueue(StudyRequest("what is sk_buff?", "a.c", "f"))
+        queue.signal_producer_done()
+        result = OrchestratorResult()
+
+        def run() -> None:
+            _study_consumer_loop(
+                queue, config, SimpleNamespace(domain_model={}),
+                lambda ctx, cfg: None,
+                SimpleNamespace(), result,
+                checklist={}, context_map=None, evidence_index={},
+                sarif_cache=None, entry_points=set(),
+                start_time=time.monotonic(), on_progress=None,
+                state={
+                    "study_list_built": True,
+                    "study_list_path": study_list,
+                },
+            )
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        assert guard.paused.wait(timeout=10.0), (
+            "consumer never reached the pre-batch gate"
+        )
+        on_paused(queue, guard)
+        guard.release.set()
+        t.join(timeout=10.0)
+        assert not t.is_alive()
+        return study_ran, result, guard
+
+    def test_stop_during_prebatch_pause_skips_the_batch(
+        self, tmp_path, monkeypatch,
+    ):
+        """A drain-abandonment stop arriving while the pre-batch gate
+        is paused must be honoured when the gate returns — pre-fix the
+        paid study batch dispatched after the run was over."""
+        def on_paused(queue, guard):
+            queue.request_stop()
+
+        study_ran, _result, _guard = self._drive(
+            tmp_path, monkeypatch, on_paused=on_paused,
+        )
+        assert not study_ran.is_set()
+
+    def test_conclusion_during_prebatch_pause_books_and_stops(
+        self, tmp_path, monkeypatch,
+    ):
+        def on_paused(queue, guard):
+            guard.concluded = True
+
+        study_ran, result, guard = self._drive(
+            tmp_path, monkeypatch, on_paused=on_paused,
+        )
+        assert not study_ran.is_set()
+        assert result.terminated_by == "environment"
+        assert result.environment_fault == guard.conclude_reason
+
+    def test_healthy_gate_still_dispatches_the_batch(
+        self, tmp_path, monkeypatch,
+    ):
+        """Positive control (and the binding for the pre-batch gate:
+        reaching tick 2 IS the wiring): with nothing stopping it, the
+        released gate lets the batch's study call dispatch."""
+        study_ran, result, guard = self._drive(
+            tmp_path, monkeypatch, on_paused=lambda queue, guard: None,
+        )
+        assert study_ran.is_set()
+        assert guard.ticks >= 2
+        assert result.terminated_by == "complete"
