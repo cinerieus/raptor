@@ -201,3 +201,68 @@ class TestSiblingRunDirsWrongTypedManifest:
         dirs = sibling_run_dirs(me, target_path=target)
         assert good in dirs
         assert bad not in dirs
+
+
+class TestEnrichJoernEvidenceBatchedSinkArgs:
+    """enrich_joern_evidence queries every sink's arg indices in ONE
+    batched submission (per-sink round trips re-paid the REPL's
+    compilation overhead per name)."""
+
+    def test_one_batched_call_deduped_and_validated(self, monkeypatch):
+        import core.analysis.reachability_gates as rg
+        from core.audit.joern_backend import enrich_joern_evidence
+        from core.evidence import EvidenceRecord
+
+        rec = EvidenceRecord(
+            file="a.c", function="fn",
+            # Truthy → the unguarded-sinks query is skipped; only the
+            # sink-arg path is under test.
+            joern_unguarded_sinks=[{"sink": "memcpy"}],
+        )
+
+        calls: list[tuple[str, list[str]]] = []
+
+        def fake_batch(function_name, sink_names, server):
+            calls.append((function_name, list(sink_names)))
+            return [
+                {"sink": "memcpy", "arg_index": 2, "source_param": "buf"},
+                {"sink": "memcpy", "arg_index": 2, "source_param": "buf"},
+                {"sink": "system", "arg_index": 1, "source_param": "cmd"},
+            ]
+
+        monkeypatch.setattr(rg, "query_sink_arg_indices", fake_batch)
+
+        enrich_joern_evidence(
+            {"a.c:fn": rec}, "a.c:fn", "fn",
+            # Duplicate + dotted + invalid names: one deduped,
+            # tail-segment, validated list reaches the batch.
+            ["memcpy", "os.system", "memcpy", "bad;sink"],
+            object(),
+        )
+
+        assert calls == [("fn", ["memcpy", "system"])]
+        # Record-level dedupe preserved from the per-sink loop.
+        assert rec.joern_sink_args == [
+            {"sink": "memcpy", "arg_index": 2, "source_param": "buf"},
+            {"sink": "system", "arg_index": 1, "source_param": "cmd"},
+        ]
+
+    def test_prefilled_sink_args_skip_the_query(self, monkeypatch):
+        import core.analysis.reachability_gates as rg
+        from core.audit.joern_backend import enrich_joern_evidence
+        from core.evidence import EvidenceRecord
+
+        rec = EvidenceRecord(
+            file="a.c", function="fn",
+            joern_unguarded_sinks=[{"sink": "memcpy"}],
+            joern_sink_args=[{"sink": "memcpy", "arg_index": 2}],
+        )
+
+        def boom(*args):
+            raise AssertionError("sink-arg query must not fire")
+
+        monkeypatch.setattr(rg, "query_sink_arg_indices", boom)
+        enrich_joern_evidence(
+            {"a.c:fn": rec}, "a.c:fn", "fn", ["memcpy"], object(),
+        )
+        assert rec.joern_sink_args == [{"sink": "memcpy", "arg_index": 2}]

@@ -1737,12 +1737,20 @@ class JoernServer:
         *,
         timeout: int | None = None,
         max_call_depth: int = 2,
+        errors_out: list | None = None,
     ) -> list[TaintFlow]:
         """Run multiple source→sink taint queries in a single REPL submission.
 
         Each pair is (source_method, sink_call).  Saves ~3-5s per pair by
         avoiding repeated Scala compilation overhead — imports are already
         in the persistent REPL session from warmup.
+
+        ``errors_out``: optional caller-supplied list that receives the
+        underlying query errors — same contract as
+        :meth:`run_taint_query`: an empty flow list is AMBIGUOUS without
+        it ("no taint path" and "the batch never ran" both return
+        ``[]``), and a verdict-bearing caller must not book a degraded
+        batch as a refutation.
         """
         if timeout is None:
             timeout = self._query_timeout_s
@@ -1839,6 +1847,8 @@ class JoernServer:
         )
         if result.errors:
             logger.warning("batch taint query errors: %s", result.errors)
+            if errors_out is not None:
+                errors_out.extend(result.errors)
         return result.flows
 
     def _submit_query(

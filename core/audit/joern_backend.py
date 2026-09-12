@@ -344,10 +344,108 @@ def joern_live_query(
     if max_call_depth is not None:
         depth_kwargs["max_call_depth"] = max_call_depth
 
+    sink_names: list[str] = []
     for sink in sinks:
         sink_name = sink.split(".")[-1] if "." in sink else sink
         if not _validate_substitution_value(sink_name):
             continue
+        # Duplicate names would only re-run identical dataflow work in
+        # the same submission; first occurrence keeps the caller order.
+        if sink_name not in sink_names:
+            sink_names.append(sink_name)
+    if not sink_names:
+        return []
+
+    batch_fn = getattr(server, "run_taint_queries_batch", None)
+    if batch_fn is None:
+        # Duck-typed servers without the batch API (test doubles,
+        # minimal stand-ins) keep the historical per-sink behaviour.
+        return _joern_live_query_per_sink(
+            server, function_name, sink_names, timeout,
+            depth_kwargs, errors_out,
+        )
+
+    batch_error = False
+    try:
+        query_errors: list = []
+        # One REPL submission for every sink of this hypothesis, under
+        # a SUBLINEAR budget — base × ceil(sqrt(N)) — rather than the
+        # loop's N× or a flat 1×. Linear re-inherits the single-
+        # hypothesis monopoly of the shared single-threaded REPL the
+        # batch exists to avoid, and a batch timeout is dearer than a
+        # per-sink one (it costs a server restart + CPG reload for
+        # every pair at once); flat starves wide menus (11-sink
+        # dispatch entries exist) whose per-pair engine work is real
+        # even with compilation paid once.
+        flows = batch_fn(
+            [(function_name, s) for s in sink_names],
+            timeout=timeout * _sqrt_ceil(len(sink_names)),
+            errors_out=query_errors,
+            **depth_kwargs,
+        )
+        if flows:
+            if query_errors and errors_out is not None:
+                # Partial degradation (flows AND errors in one batch):
+                # the flows are the answer, but the error tier must
+                # still see that part of the batch went unanswered.
+                errors_out.append(
+                    f"{function_name}->[{','.join(sink_names)}]: "
+                    + "; ".join(str(e) for e in query_errors[:3])
+                )
+            logger.info(
+                "joern live query: %s → [%s] = %d flow(s)",
+                function_name, ",".join(sink_names), len(flows),
+            )
+            # All sinks' flows, not just the first sink with a hit —
+            # strictly more evidence than the historical
+            # first-hit-wins loop; consumers gate on truthiness.
+            return sorted(flows, key=_flow_sort_key)
+        batch_error = bool(query_errors)
+    except Exception:
+        logger.debug(
+            "joern live batch query failed: %s → [%s]",
+            function_name, ",".join(sink_names), exc_info=True,
+        )
+        batch_error = True
+
+    if batch_error:
+        # One-shot per-sink recovery pass: a degraded batch (timeout /
+        # restart / transport) must not cost every joern:live
+        # confirmation of the hypothesis at once — the loop can still
+        # answer sink-by-sink against the restarted server. Error
+        # accounting is delegated wholly to the loop: its verdicts
+        # (flows / clean / degraded) supersede the batch's failure,
+        # which would otherwise mislabel a loop-proven clean result
+        # as "unanswered".
+        logger.info(
+            "joern live batch degraded for %s — falling back to the "
+            "per-sink loop", function_name,
+        )
+        return _joern_live_query_per_sink(
+            server, function_name, sink_names, timeout,
+            depth_kwargs, errors_out,
+        )
+
+    return []
+
+
+def _sqrt_ceil(n: int) -> int:
+    """ceil(sqrt(n)) for n >= 1 — the batch-budget scale factor."""
+    import math
+
+    return math.isqrt(max(n, 1) - 1) + 1
+
+
+def _joern_live_query_per_sink(
+    server,
+    function_name: str,
+    sink_names: list[str],
+    timeout: int,
+    depth_kwargs: dict[str, int],
+    errors_out: list | None,
+) -> list[Any]:
+    """Historical per-sink loop: first sink with flows wins."""
+    for sink_name in sink_names:
         try:
             query_errors: list = []
             flows = server.run_taint_query(
@@ -395,7 +493,7 @@ def enrich_joern_evidence(
         return
 
     from core.analysis.reachability_gates import (
-        query_sink_arg_index,
+        query_sink_arg_indices,
         query_unguarded_sinks,
     )
 
@@ -406,11 +504,20 @@ def enrich_joern_evidence(
 
     if not rec.joern_sink_args:
         from packages.joern.runner import _validate_substitution_value
+        sink_names: list[str] = []
         for sink in sinks:
             sink_name = sink.split(".")[-1] if "." in sink else sink
             if not _validate_substitution_value(sink_name):
                 continue
-            args = query_sink_arg_index(function_name, sink_name, joern_server)
+            if sink_name not in sink_names:
+                sink_names.append(sink_name)
+        if sink_names:
+            # One batched submission for the whole sink list (records
+            # come back ordered by the caller's sink order, matching
+            # the per-sink loop this replaces).
+            args = query_sink_arg_indices(
+                function_name, sink_names, joern_server,
+            )
             if args:
                 rec.joern_sink_args.extend(args)
         if rec.joern_sink_args:

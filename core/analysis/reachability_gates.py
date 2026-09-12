@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+from math import isqrt
 from pathlib import Path
 from typing import Any
 
@@ -495,11 +496,31 @@ def query_sink_arg_index(
     For memcpy(dst, src, len), knowing arg 2 (src) vs arg 3 (len) is
     tainted changes the vulnerability class.
     """
+    return query_sink_arg_indices(function_name, [sink_name], joern_server)
+
+
+def query_sink_arg_indices(
+    function_name: str,
+    sink_names: list[str],
+    joern_server,
+) -> list[dict[str, Any]]:
+    """Batched :func:`query_sink_arg_index`: every sink in ONE submission.
+
+    A per-sink loop pays the REPL's Scala compilation overhead once per
+    sink; the batched template loops over the sink list inside one
+    query. Records carry their own ``sink`` name and come back ordered
+    by the caller's sink order (then arg index, then source param) —
+    the same order the per-sink loop produced.
+    """
     if joern_server is None or not joern_server.is_alive():
         return []
     if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", function_name):
         return []
-    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", sink_name):
+    valid_sinks = [
+        s for s in sink_names
+        if re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", s or "")
+    ]
+    if not valid_sinks:
         return []
 
     query_path = _QUERIES_DIR / "sink_arg_index.sc"
@@ -509,31 +530,74 @@ def query_sink_arg_index(
     query = (
         query_path.read_text()
         .replace("__FUNCTION__", function_name)
-        .replace("__SINK__", sink_name)
+        .replace("__SINK_NAMES__", _scala_string_list(tuple(valid_sinks)))
     )
     try:
-        result = joern_server.query(query, timeout=30, validate=False)
+        # Sublinear batch budget — 30s × ceil(sqrt(N)), not N×30 and
+        # not a flat 30: linear re-inherits the per-enrichment
+        # monopoly of the shared single-threaded REPL the batch
+        # avoids, while a flat budget starves wide sink menus whose
+        # per-sink dataflow work is real even with compilation paid
+        # once. A degraded batch falls back to one per-sink pass below
+        # instead of costing the whole enrichment.
+        n = len(valid_sinks)
+        budget = 30 * (isqrt(n - 1) + 1)
+        result = joern_server.query(query, timeout=budget, validate=False)
         if result.errors:
-            return []
+            # result.errors can carry transport parse noise on some
+            # REPL echoes (same transport class the
+            # query_unguarded_sinks parse note documents), so this
+            # fallback occasionally fires on a phantom — one redundant
+            # per-sink pass, strictly better than the silent [] a
+            # degraded batch returned before.
+            return _sink_arg_indices_per_sink_fallback(
+                function_name, valid_sinks, joern_server,
+            )
         # Transport-tolerant parse — same doctrine as
         # query_unguarded_sinks.
         records, _decode_errors = parse_marker_records(
             result.raw_output or "", "JOERN_SINK_ARG:",
         )
         args = [r for r in records if isinstance(r, dict)]
-        # Deterministic order — same doctrine as query_unguarded_sinks.
+        # Deterministic order — same doctrine as query_unguarded_sinks;
+        # caller sink order first so the batch matches the loop it
+        # replaced.
+        sink_order = {name: i for i, name in enumerate(valid_sinks)}
         args.sort(key=lambda a: (
-            str(a.get("sink") or ""),
+            sink_order.get(str(a.get("sink") or ""), len(sink_order)),
             a.get("arg_index") if isinstance(a.get("arg_index"), int) else -1,
             str(a.get("source_param") or ""),
         ))
         return args
     except Exception:
         logger.debug(
-            "sink arg index query failed for %s→%s",
-            function_name, sink_name, exc_info=True,
+            "sink arg index query failed for %s→[%s]",
+            function_name, ",".join(valid_sinks), exc_info=True,
         )
+        return _sink_arg_indices_per_sink_fallback(
+            function_name, valid_sinks, joern_server,
+        )
+
+
+def _sink_arg_indices_per_sink_fallback(
+    function_name: str,
+    valid_sinks: list[str],
+    joern_server,
+) -> list[dict[str, Any]]:
+    """One-shot per-sink recovery when the batched query degrades.
+
+    Each single-sink call is the pre-batch query shape (a one-element
+    batch); only multi-sink batches fall back, so a degraded
+    single-sink query stays a single failure, never a recursion.
+    """
+    if len(valid_sinks) <= 1:
         return []
+    combined: list[dict[str, Any]] = []
+    for sink in valid_sinks:
+        combined.extend(
+            query_sink_arg_indices(function_name, [sink], joern_server),
+        )
+    return combined
 
 
 # ─── Composite gate verdicts ─────────────────────────────────────────────────

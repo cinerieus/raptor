@@ -3593,17 +3593,19 @@ class TestJoernLiveQuery:
             source_method="parse_header", source_param="buf",
             sink_call="memcpy", sink_arg_idx=0,
         )
-        server.run_taint_query.return_value = [flow]
+        server.run_taint_queries_batch.return_value = [flow]
 
         result = _joern_live_query(server, "parse_header", ["memcpy"])
         assert len(result) == 1
         assert result[0].sink_call == "memcpy"
-        server.run_taint_query.assert_called_once()
-        call_args = server.run_taint_query.call_args
-        assert call_args[0] == ("parse_header", "memcpy")
+        server.run_taint_queries_batch.assert_called_once()
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[0][0] == [("parse_header", "memcpy")]
         assert call_args[1]["timeout"] == 30
 
-    def test_live_query_short_circuits_on_first_hit(self):
+    def test_live_query_batches_all_sinks_in_one_submission(self):
+        """One batched call covers every sink; the budget scales
+        sublinearly with batch width (base x ceil(sqrt(N)))."""
         from unittest.mock import MagicMock
 
         from packages.joern.models import TaintFlow
@@ -3613,21 +3615,69 @@ class TestJoernLiveQuery:
             source_method="fn", source_param="x",
             sink_call="strcpy", sink_arg_idx=0,
         )
-        server.run_taint_query.return_value = [flow]
+        server.run_taint_queries_batch.return_value = [flow]
 
         result = _joern_live_query(server, "fn", ["strcpy", "memcpy"])
         assert len(result) == 1
-        server.run_taint_query.assert_called_once()
+        server.run_taint_queries_batch.assert_called_once()
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[0][0] == [("fn", "strcpy"), ("fn", "memcpy")]
+        assert call_args[1]["timeout"] == 60  # 30 x ceil(sqrt(2))
+
+    def test_live_query_budget_sublinear_on_wide_menus(self):
+        """11 sinks (the widest dispatch menu) gets 4x the base, not
+        11x (per-sink loop) and not 1x (flat batch)."""
+        from unittest.mock import MagicMock
+
+        server = MagicMock()
+        server.run_taint_queries_batch.return_value = []
+        sinks = [f"sink_{i}" for i in range(11)]
+        _joern_live_query(server, "fn", sinks)
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[1]["timeout"] == 120  # 30 x ceil(sqrt(11))
+
+    def test_live_query_single_sink_keeps_base_budget(self):
+        from unittest.mock import MagicMock
+
+        server = MagicMock()
+        server.run_taint_queries_batch.return_value = []
+        _joern_live_query(server, "fn", ["memcpy"])
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[1]["timeout"] == 30
+
+    def test_live_query_multi_sink_returns_all_flows_sorted(self):
+        """The batch returns every sink's flows (the per-sink loop's
+        first-hit-wins returned only the first) in deterministic
+        order — strictly more evidence, same truthiness."""
+        from unittest.mock import MagicMock
+
+        from packages.joern.models import TaintFlow
+
+        strcpy_flow = TaintFlow(
+            source_method="fn", source_param="x",
+            sink_call="strcpy", sink_arg_idx=0,
+        )
+        memcpy_flow = TaintFlow(
+            source_method="fn", source_param="x",
+            sink_call="memcpy", sink_arg_idx=0,
+        )
+        server = MagicMock()
+        server.run_taint_queries_batch.return_value = [
+            strcpy_flow, memcpy_flow,
+        ]
+
+        result = _joern_live_query(server, "fn", ["strcpy", "memcpy"])
+        assert [f.sink_call for f in result] == ["memcpy", "strcpy"]
 
     def test_live_query_empty_when_no_flows(self):
         from unittest.mock import MagicMock
 
         server = MagicMock()
-        server.run_taint_query.return_value = []
+        server.run_taint_queries_batch.return_value = []
 
         result = _joern_live_query(server, "fn", ["memcpy", "strcpy"])
         assert result == []
-        assert server.run_taint_query.call_count == 2
+        server.run_taint_queries_batch.assert_called_once()
 
     def test_live_query_rejects_invalid_function_name(self):
         from unittest.mock import MagicMock
@@ -3635,26 +3685,173 @@ class TestJoernLiveQuery:
         server = MagicMock()
         result = _joern_live_query(server, "not valid!", ["memcpy"])
         assert result == []
-        server.run_taint_query.assert_not_called()
+        server.run_taint_queries_batch.assert_not_called()
 
     def test_live_query_skips_invalid_sink(self):
         from unittest.mock import MagicMock
 
         server = MagicMock()
-        server.run_taint_query.return_value = []
+        server.run_taint_queries_batch.return_value = []
         _joern_live_query(server, "fn", ["bad;sink", "memcpy"])
-        assert server.run_taint_query.call_count == 1
-        call_args = server.run_taint_query.call_args
-        assert call_args[0][1] == "memcpy"
+        server.run_taint_queries_batch.assert_called_once()
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[0][0] == [("fn", "memcpy")]
 
-    def test_live_query_handles_exception(self):
+    def test_live_query_all_sinks_invalid_never_queries(self):
         from unittest.mock import MagicMock
 
         server = MagicMock()
-        server.run_taint_query.side_effect = RuntimeError("timeout")
-
-        result = _joern_live_query(server, "fn", ["memcpy"])
+        result = _joern_live_query(server, "fn", ["bad;sink"])
         assert result == []
+        server.run_taint_queries_batch.assert_not_called()
+
+    def test_live_query_handles_exception(self):
+        """Batch-level failure falls back to a one-shot per-sink pass;
+        the loop's own error accounting is what reaches errors_out."""
+        from unittest.mock import MagicMock
+
+        server = MagicMock()
+        server.run_taint_queries_batch.side_effect = RuntimeError("timeout")
+        server.run_taint_query.side_effect = RuntimeError("still down")
+
+        errors: list = []
+        result = _joern_live_query(
+            server, "fn", ["memcpy"], errors_out=errors,
+        )
+        assert result == []
+        assert errors and "RuntimeError" in errors[0]
+
+    def test_live_query_batch_failure_recovers_via_per_sink_pass(self):
+        """A slow-CPG batch timeout must not cost every joern:live
+        confirmation — the fallback loop still answers per sink."""
+        from unittest.mock import MagicMock
+
+        from packages.joern.models import TaintFlow
+
+        flow = TaintFlow(
+            source_method="fn", source_param="x",
+            sink_call="memcpy", sink_arg_idx=0,
+        )
+        server = MagicMock()
+        server.run_taint_queries_batch.side_effect = RuntimeError("timeout")
+        server.run_taint_query.return_value = [flow]
+
+        errors: list = []
+        result = _joern_live_query(
+            server, "fn", ["memcpy", "strcpy"], errors_out=errors,
+        )
+        assert len(result) == 1
+        # First-hit-wins loop semantics in the fallback.
+        server.run_taint_query.assert_called_once()
+        # The loop answered — the batch's failure must not read as
+        # "unanswered" next to a real verdict.
+        assert errors == []
+
+    def test_live_query_batch_errors_fall_back_then_account(self):
+        """A degraded batch is 'unanswered', never a refutation: the
+        per-sink recovery pass runs, and when IT also degrades its
+        per-sink accounting is what reaches errors_out."""
+        from unittest.mock import MagicMock
+
+        server = MagicMock()
+
+        def fake_batch(pairs, *, timeout=None, errors_out=None, **kw):
+            if errors_out is not None:
+                errors_out.append("timeout (async poll)")
+            return []
+
+        def fake_single(fn, sink, *, timeout=None, errors_out=None, **kw):
+            if errors_out is not None:
+                errors_out.append("server is restarting")
+            return []
+
+        server.run_taint_queries_batch.side_effect = fake_batch
+        server.run_taint_query.side_effect = fake_single
+
+        errors: list = []
+        result = _joern_live_query(
+            server, "fn", ["memcpy", "strcpy"], errors_out=errors,
+        )
+        assert result == []
+        assert errors == [
+            "fn->memcpy: server is restarting",
+            "fn->strcpy: server is restarting",
+        ]
+
+    def test_live_query_partial_batch_keeps_flows_and_reports_errors(self):
+        """Flows AND errors in one batch: the flows are returned (no
+        fallback pass) and the partial degradation stays visible to
+        the error tier through errors_out."""
+        from unittest.mock import MagicMock
+
+        from packages.joern.models import TaintFlow
+
+        flow = TaintFlow(
+            source_method="fn", source_param="x",
+            sink_call="memcpy", sink_arg_idx=0,
+        )
+        server = MagicMock()
+
+        def fake_batch(pairs, *, timeout=None, errors_out=None, **kw):
+            if errors_out is not None:
+                errors_out.append("truncated response")
+            return [flow]
+
+        server.run_taint_queries_batch.side_effect = fake_batch
+
+        errors: list = []
+        result = _joern_live_query(
+            server, "fn", ["memcpy", "strcpy"], errors_out=errors,
+        )
+        assert len(result) == 1
+        server.run_taint_query.assert_not_called()
+        assert errors == ["fn->[memcpy,strcpy]: truncated response"]
+
+    def test_live_query_batch_error_then_clean_loop_is_a_refutation(self):
+        """When the recovery pass completes cleanly with no flows, the
+        result is a genuine negative — the batch's earlier degradation
+        must not linger in errors_out and mislabel it 'unanswered'."""
+        from unittest.mock import MagicMock
+
+        server = MagicMock()
+
+        def fake_batch(pairs, *, timeout=None, errors_out=None, **kw):
+            if errors_out is not None:
+                errors_out.append("timeout (async poll)")
+            return []
+
+        server.run_taint_queries_batch.side_effect = fake_batch
+        server.run_taint_query.return_value = []
+
+        errors: list = []
+        result = _joern_live_query(
+            server, "fn", ["memcpy", "strcpy"], errors_out=errors,
+        )
+        assert result == []
+        assert errors == []
+        assert server.run_taint_query.call_count == 2
+
+    def test_live_query_without_batch_api_falls_back_to_loop(self):
+        """Duck-typed servers without run_taint_queries_batch keep the
+        historical per-sink first-hit-wins loop."""
+        from packages.joern.models import TaintFlow
+
+        calls: list[tuple[str, str]] = []
+        flow = TaintFlow(
+            source_method="fn", source_param="x",
+            sink_call="strcpy", sink_arg_idx=0,
+        )
+
+        class _LoopOnlyServer:
+            def run_taint_query(self, source, sink, **kwargs):
+                calls.append((source, sink))
+                return [flow] if sink == "strcpy" else []
+
+        result = _joern_live_query(
+            _LoopOnlyServer(), "fn", ["strcpy", "memcpy"],
+        )
+        assert len(result) == 1
+        assert calls == [("fn", "strcpy")]
 
     def test_tool_chain_joern_live_fallback(self, tmp_path: Path):
         """When pre-sweep has no hit and server is available, fires live query."""
@@ -3667,7 +3864,7 @@ class TestJoernLiveQuery:
             source_method="fn", source_param="buf",
             sink_call="memcpy", sink_arg_idx=0,
         )
-        server.run_taint_query.return_value = [flow]
+        server.run_taint_queries_batch.return_value = [flow]
 
         chain = [{"type": "joern", "config": {"sinks": ["memcpy"]}}]
         config = OrchestratorConfig(target_path=tmp_path, out_dir=tmp_path)
@@ -3702,7 +3899,7 @@ class TestJoernLiveQuery:
             joern_server=server,
         )
         assert "joern:pre_sweep" in confirmed
-        server.run_taint_query.assert_not_called()
+        server.run_taint_queries_batch.assert_not_called()
 
     def test_tool_chain_joern_no_server_skips(self, tmp_path: Path):
         """When no server and no pre-sweep hit, joern is skipped."""
@@ -3720,11 +3917,11 @@ class TestJoernLiveQuery:
         from unittest.mock import MagicMock
 
         server = MagicMock()
-        server.run_taint_query.return_value = []
+        server.run_taint_queries_batch.return_value = []
 
         _joern_live_query(server, "fn", ["os.system"])
-        call_args = server.run_taint_query.call_args
-        assert call_args[0][1] == "system"
+        call_args = server.run_taint_queries_batch.call_args
+        assert call_args[0][0] == [("fn", "system")]
 
 
 @pytest.mark.slow
@@ -5882,6 +6079,9 @@ class TestJoernLiveErrorAccounting:
         from unittest.mock import MagicMock
 
         server = MagicMock()
+        server.run_taint_queries_batch.side_effect = RuntimeError("timeout")
+        # The recovery pass is equally down — its per-sink accounting
+        # is what lands in errors_out.
         server.run_taint_query.side_effect = RuntimeError("timeout")
         errors: list = []
         result = _joern_live_query(
@@ -5895,12 +6095,18 @@ class TestJoernLiveErrorAccounting:
 
         server = MagicMock()
 
-        def _query(fn, sink, timeout=30, errors_out=None, **kw):
+        def _batch(pairs, timeout=30, errors_out=None, **kw):
             if errors_out is not None:
                 errors_out.append("server is restarting")
             return []
 
-        server.run_taint_query.side_effect = _query
+        def _single(fn, sink, timeout=30, errors_out=None, **kw):
+            if errors_out is not None:
+                errors_out.append("server is restarting")
+            return []
+
+        server.run_taint_queries_batch.side_effect = _batch
+        server.run_taint_query.side_effect = _single
         errors: list = []
         result = _joern_live_query(
             server, "fn", ["memcpy"], errors_out=errors)
@@ -5911,7 +6117,7 @@ class TestJoernLiveErrorAccounting:
         from unittest.mock import MagicMock
 
         server = MagicMock()
-        server.run_taint_query.return_value = []
+        server.run_taint_queries_batch.return_value = []
         errors: list = []
         result = _joern_live_query(
             server, "fn", ["memcpy"], errors_out=errors)
@@ -5938,9 +6144,9 @@ class TestJoernLiveErrorAccounting:
         c = _flow("a.c", 2)
 
         server = MagicMock()
-        server.run_taint_query.return_value = [b, a, c]
+        server.run_taint_queries_batch.return_value = [b, a, c]
         first = _joern_live_query(server, "fn", ["memcpy"])
-        server.run_taint_query.return_value = [a, c, b]
+        server.run_taint_queries_batch.return_value = [a, c, b]
         second = _joern_live_query(server, "fn", ["memcpy"])
         assert first == second
         assert [f.steps[0].file for f in first] == ["a.c", "a.c", "b.c"]

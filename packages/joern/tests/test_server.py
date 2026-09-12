@@ -329,6 +329,46 @@ class TestJoernServerRunTaintQuery:
         assert flows == []
 
 
+class TestRunTaintQueriesBatchErrorsOut:
+    """The batch API honours run_taint_query's errors_out contract."""
+
+    def _server(self, result):
+        srv = JoernServer()
+        srv._cpg_loaded = True
+        srv.query = lambda q, **kw: result  # instance seam
+        return srv
+
+    def test_errors_forwarded_to_errors_out(self):
+        from packages.joern.models import JoernResult
+
+        srv = self._server(
+            JoernResult(query="q", errors=["timeout (async poll)"]),
+        )
+        errors_out: list[str] = []
+        flows = srv.run_taint_queries_batch(
+            [("src_fn", "sink_fn")], errors_out=errors_out,
+        )
+        assert flows == []
+        assert errors_out == ["timeout (async poll)"]
+
+    def test_clean_batch_leaves_errors_out_empty(self):
+        from packages.joern.models import JoernResult, TaintFlow
+
+        flow = TaintFlow(
+            source_method="src_fn", source_param="p0",
+            sink_call="sink_fn", sink_arg_idx=0,
+        )
+        srv = self._server(
+            JoernResult(query="q", flows=[flow], raw_output="ok"),
+        )
+        errors_out: list[str] = []
+        flows = srv.run_taint_queries_batch(
+            [("src_fn", "sink_fn")], errors_out=errors_out,
+        )
+        assert len(flows) == 1
+        assert errors_out == []
+
+
 class TestJoernServerContextManager:
     @patch.object(JoernServer, "start")
     @patch.object(JoernServer, "stop")

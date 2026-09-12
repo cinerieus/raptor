@@ -614,6 +614,135 @@ class TestQuerySinkArgIndex:
         }]
 
 
+class _RecordingSinkArgServer(_FakeJoernServer):
+    """Fake server that also records the rendered queries."""
+
+    def __init__(self, raw_output="", errors=None, alive=True):
+        super().__init__(raw_output=raw_output, errors=errors, alive=alive)
+        self.queries: list[str] = []
+
+    def query(self, cpgql, *, timeout=30, validate=False):
+        self.queries.append(cpgql)
+        return super().query(cpgql, timeout=timeout, validate=validate)
+
+
+class TestQuerySinkArgIndices:
+    """Batched variant: every sink in ONE REPL submission."""
+
+    def test_none_server(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        assert query_sink_arg_indices("fn", ["memcpy"], None) == []
+
+    def test_all_sinks_in_one_submission(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        server = _RecordingSinkArgServer()
+        query_sink_arg_indices("fn", ["memcpy", "strcpy"], server)
+        assert len(server.queries) == 1
+        assert 'List("memcpy", "strcpy")' in server.queries[0]
+
+    def test_invalid_sink_dropped_valid_kept(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        server = _RecordingSinkArgServer()
+        query_sink_arg_indices("fn", ["sink; bad", "memcpy"], server)
+        assert len(server.queries) == 1
+        assert 'List("memcpy")' in server.queries[0]
+
+    def test_all_sinks_invalid_never_queries(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        server = _RecordingSinkArgServer()
+        assert query_sink_arg_indices("fn", ["sink; bad"], server) == []
+        assert server.queries == []
+
+    def test_budget_scales_sublinearly_with_sink_count(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        class _TimeoutRecorder(_FakeJoernServer):
+            def __init__(self):
+                super().__init__()
+                self.timeouts: list[int] = []
+
+            def query(self, cpgql, *, timeout=30, validate=False):
+                self.timeouts.append(timeout)
+                return super().query(cpgql, timeout=timeout,
+                                     validate=validate)
+
+        server = _TimeoutRecorder()
+        query_sink_arg_indices("fn", ["memcpy"], server)
+        query_sink_arg_indices("fn", ["s1", "s2"], server)
+        query_sink_arg_indices(
+            "fn", [f"s{i}" for i in range(11)], server,
+        )
+        # 30 x ceil(sqrt(N)): base for one sink, 2x for two, 4x for
+        # the widest dispatch menus.
+        assert server.timeouts == [30, 60, 120]
+
+    def test_batch_error_falls_back_to_per_sink_pass(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        record = (
+            'JOERN_SINK_ARG:{"sink":"memcpy","arg_index":2,'
+            '"arg_code":"src","source_param":"buf"}'
+        )
+
+        class _BatchFailsSinglesWork(_FakeJoernServer):
+            def __init__(self):
+                super().__init__()
+                self.queries: list[str] = []
+
+            def query(self, cpgql, *, timeout=30, validate=False):
+                self.queries.append(cpgql)
+
+                class _R:
+                    pass
+
+                r = _R()
+                if 'List("memcpy", "strcpy")' in cpgql:
+                    r.errors = ["query timed out after 60s"]
+                    r.raw_output = ""
+                else:
+                    r.errors = []
+                    r.raw_output = record if '"memcpy"' in cpgql else ""
+                return r
+
+        server = _BatchFailsSinglesWork()
+        args = query_sink_arg_indices("fn", ["memcpy", "strcpy"], server)
+        # Batch degraded -> one per-sink pass recovered memcpy's record.
+        assert len(server.queries) == 3
+        assert [a["sink"] for a in args] == ["memcpy"]
+
+    def test_single_sink_error_does_not_recurse(self):
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        server = _RecordingSinkArgServer(errors=["boom"])
+        assert query_sink_arg_indices("fn", ["memcpy"], server) == []
+        assert len(server.queries) == 1
+
+    def test_records_ordered_by_caller_sink_order(self):
+        # Caller order first (matching the per-sink loop this
+        # replaces), then arg index, then source param.
+        from core.analysis.reachability_gates import query_sink_arg_indices
+
+        stdout = (
+            'JOERN_SINK_ARG:{"sink":"memcpy","arg_index":3,'
+            '"arg_code":"n","source_param":"len"}\n'
+            'JOERN_SINK_ARG:{"sink":"strcpy","arg_index":2,'
+            '"arg_code":"s","source_param":"buf"}\n'
+            'JOERN_SINK_ARG:{"sink":"memcpy","arg_index":2,'
+            '"arg_code":"src","source_param":"buf"}\n'
+        )
+        server = _FakeJoernServer(raw_output=stdout)
+        args = query_sink_arg_indices(
+            "fn", ["strcpy", "memcpy"], server,
+        )
+        assert [(a["sink"], a["arg_index"]) for a in args] == [
+            ("strcpy", 2), ("memcpy", 2), ("memcpy", 3),
+        ]
+
+
 # ─── _joern_find_callers reads its query from _QUERIES_DIR ───────────────────
 
 
