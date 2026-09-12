@@ -312,7 +312,8 @@ def build_profile(*,
           * (deny signal) + (allow signal (target self))
           * (deny nvram*)
           * mach-lookup allowlist-deny (MACOS_BASE_MACH_SERVICES)
-          * sysctl-read allowlist-deny (MACOS_SYSCTL_READ_*)
+          * (deny sysctl-read) + allow clauses for the
+            MACOS_SYSCTL_READ_* allowlist
           * POSIX-shm read/write + SysV IPC denies
           * (deny darwin-notification-post)
           * (deny appleevent-send)
@@ -670,22 +671,33 @@ def build_profile(*,
                 f"(deny mach-lookup (require-not (require-any "
                 f"{_mach_names})))"
             )
-            # sysctl-read allowlist-deny: closes KERN_PROCARGS2 (the
-            # same-UID argv/environment credential channel) and
-            # kern.proc.* host process-table reads while keeping the
-            # hardware/OS-identity names runtimes actually consult.
-            # A denied sysctl surfaces its NAME in the kernel's
-            # violation log — see the allowlist commentary above.
-            _sysctl_clauses = " ".join(
-                [f"(sysctl-name-prefix {_quote_sbpl(p)})"
-                 for p in MACOS_SYSCTL_READ_PREFIX_ALLOWLIST]
-                + [f"(sysctl-name {_quote_sbpl(n)})"
-                   for n in MACOS_SYSCTL_READ_NAME_ALLOWLIST]
+            # sysctl-read allowlist-deny: closes kern.proc.* host
+            # process-table reads while keeping the hardware/
+            # OS-identity names runtimes actually consult. A denied
+            # sysctl surfaces its NAME in the kernel's violation log
+            # — see the allowlist commentary above.
+            #
+            # Clause SHAPE is load-bearing: the earlier
+            # `(deny sysctl-read (require-not (require-any ...)))`
+            # form never matched its exceptions live on current macOS
+            # — EVERY named sysctl was denied, allowlist included
+            # (uname(3) broke despite kern.hostname being listed).
+            # Apple's own profiles express this family as a bare deny
+            # followed by filtered allows (later allow wins for this
+            # family, like network* and unlike file-*); multiple
+            # filters on one allow rule OR together (Apple uses the
+            # same multi-filter idiom for user-preference-read).
+            parts.append("(deny sysctl-read)")
+            _sysctl_prefixes = " ".join(
+                f"(sysctl-name-prefix {_quote_sbpl(x)})"
+                for x in MACOS_SYSCTL_READ_PREFIX_ALLOWLIST
             )
-            parts.append(
-                f"(deny sysctl-read (require-not (require-any "
-                f"{_sysctl_clauses})))"
+            parts.append(f"(allow sysctl-read {_sysctl_prefixes})")
+            _sysctl_names = " ".join(
+                f"(sysctl-name {_quote_sbpl(n)})"
+                for n in MACOS_SYSCTL_READ_NAME_ALLOWLIST
             )
+            parts.append(f"(allow sysctl-read {_sysctl_names})")
             # POSIX/SysV shared memory is NOT mediated by file-write*
             # (shm_open of another same-UID process's segment succeeds
             # under every write-isolated shape — confirmed on current

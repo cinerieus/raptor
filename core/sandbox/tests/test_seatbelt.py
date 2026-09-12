@@ -647,7 +647,17 @@ def test_full_profile_sysctl_read_allowlist_deny():
     on current macOS. The deny closes it while the allowlist keeps
     the hardware/OS-identity names runtimes consult at startup."""
     p = seatbelt.build_profile(seccomp_profile="full")
-    assert "(deny sysctl-read (require-not (require-any" in p
+    # Clause shape is load-bearing: the require-not exception form
+    # never matched live on current macOS (every named sysctl was
+    # denied, allowlist included) — the attested Apple shape is a
+    # bare deny followed by filtered allows, later allow wins.
+    assert "(deny sysctl-read)" in p
+    assert "(deny sysctl-read (require-not" not in p
+    lines = [line.strip() for line in p.splitlines() if line.strip()]
+    d = lines.index("(deny sysctl-read)")
+    allows = [i for i, line in enumerate(lines)
+              if line.startswith("(allow sysctl-read ")]
+    assert allows and all(i > d for i in allows), (d, allows)
     for prefix in seatbelt.MACOS_SYSCTL_READ_PREFIX_ALLOWLIST:
         assert f'(sysctl-name-prefix "{prefix}")' in p
     for name in seatbelt.MACOS_SYSCTL_READ_NAME_ALLOWLIST:
@@ -755,7 +765,9 @@ def test_untrusted_default_shape_carries_full_hardening():
         "(allow signal (target self))",
         "(deny nvram*)",
         "(deny mach-lookup (require-not (require-any",
-        "(deny sysctl-read (require-not (require-any",
+        "(deny sysctl-read)",
+        "(allow sysctl-read (sysctl-name-prefix",
+        "(allow sysctl-read (sysctl-name ",
         "(deny ipc-posix-shm-write*)",
         "(deny ipc-sysv*)",
         "(deny darwin-notification-post)",
