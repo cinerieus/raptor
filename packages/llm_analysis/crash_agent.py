@@ -978,6 +978,9 @@ FULL LLM RESPONSE:
         return shape — any of these leave ``execute_outcome=None``
         and the witness ends up ``NOT_RUN`` as if execution had
         been opted out. The exploit file on disk is unaffected.
+        One deliberate exception: a ``SandboxFloorError`` (containment
+        floor unmet) stamps the structured unverifiable-environment
+        verdict on the crash record and re-raises (record-then-raise).
         """
         from packages.llm_analysis.exploit_verify import compile_and_execute
 
@@ -987,15 +990,28 @@ FULL LLM RESPONSE:
                 ":", 1
             )[0]
 
-        compiled, errors, outcome, detail = compile_and_execute(
-            exploit_code,
-            target_file_path,
-            crash_context.crash_id,
-            target_binary_path=self.binary,
-            timeout=self.execute_timeout,
-            logger=logger,
-            sanitizers=self.execute_sanitizers,
-        )
+        from core.sandbox import SandboxFloorError
+        from core.witness import WitnessOutcome, refusal_detail
+
+        try:
+            compiled, errors, outcome, detail = compile_and_execute(
+                exploit_code,
+                target_file_path,
+                crash_context.crash_id,
+                target_binary_path=self.binary,
+                timeout=self.execute_timeout,
+                logger=logger,
+                sanitizers=self.execute_sanitizers,
+            )
+        except SandboxFloorError as exc:
+            # Record-then-raise: stamp the structured unverifiable-
+            # environment verdict on THIS crash's record (UNKNOWN =
+            # "couldn't even run the sandbox" — an environment
+            # verdict, never a negative result), then re-raise so the
+            # host misconfiguration fails the run loudly exactly once.
+            crash_context.execute_outcome = WitnessOutcome.UNKNOWN.value
+            crash_context.execute_detail = refusal_detail(exc) or {}
+            raise
         crash_context.exploit_compiled = compiled
         crash_context.exploit_compile_errors = errors
         if outcome is not None:

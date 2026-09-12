@@ -1846,19 +1846,35 @@ class AutonomousSecurityAgentV2:
         observed outcome.
 
         Failures are non-fatal — any error path leaves
-        ``execute_outcome=None`` and behaves like compile-only.
+        ``execute_outcome=None`` and behaves like compile-only — with
+        one deliberate exception: a ``SandboxFloorError`` (containment
+        floor unmet) stamps the structured unverifiable-environment
+        verdict on the finding and re-raises (record-then-raise).
         """
+        from core.sandbox import SandboxFloorError
+        from core.witness import WitnessOutcome, refusal_detail
+
         from packages.llm_analysis.exploit_verify import compile_and_execute
 
-        compiled, errors, outcome, detail = compile_and_execute(
-            exploit_code,
-            vuln.file_path,
-            vuln.finding_id,
-            target_binary_path=None,
-            timeout=self.execute_timeout,
-            logger=logger,
-            sanitizers=self.execute_sanitizers,
-        )
+        try:
+            compiled, errors, outcome, detail = compile_and_execute(
+                exploit_code,
+                vuln.file_path,
+                vuln.finding_id,
+                target_binary_path=None,
+                timeout=self.execute_timeout,
+                logger=logger,
+                sanitizers=self.execute_sanitizers,
+            )
+        except SandboxFloorError as exc:
+            # Record-then-raise: stamp the structured unverifiable-
+            # environment verdict on THIS finding (UNKNOWN = "couldn't
+            # even run the sandbox" — an environment verdict, never a
+            # negative result), then re-raise so the host
+            # misconfiguration fails the run loudly exactly once.
+            vuln.execute_outcome = WitnessOutcome.UNKNOWN.value
+            vuln.execute_detail = refusal_detail(exc) or {}
+            raise
         vuln.exploit_compiled = compiled
         vuln.exploit_compile_errors = errors
         if outcome is not None:
