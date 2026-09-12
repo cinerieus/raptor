@@ -5,8 +5,8 @@
    and /run are fresh EMPTY tmpfs — nothing populated their subtrees,
    so a file bind beneath them skipped mount-point-stub creation and
    failed with ENOENT at mount(2). Real-world shape: a RAPTOR checkout
-   living under /tmp couldn't bind its own libexec helpers
-   (raptor-pid1-shim) and every sandboxed r2 invocation exited 126.
+   living under /tmp couldn't bind its own libexec helpers and every
+   sandboxed r2 invocation exited 126.
 
 2. Inherited TMPDIR under /tmp: the child inherits TMPDIR from the
    host; a custom value (operator TMPDIR, nested pytest basetemp)

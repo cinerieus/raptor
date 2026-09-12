@@ -1,15 +1,15 @@
-"""The seatbelt read allowlist must not carry the pid1-shim path.
+"""The seatbelt read allowlist must never carry a RAPTOR libexec path.
 
-The pid1-shim read grant exists for the Linux unshare fallback lane
-(Landlock must allow exec of the shim there); the seatbelt lane never
-runs it. The mount-ns lane already filters the entry as a pure
-framework/install-location tell — on darwin the leak is worse: every
-readable path is embedded verbatim in the SBPL profile text, which
-rides ``sandbox-exec -p`` in the never-exec'd watcher shim's argv for
-the whole run. The hardened profiles' sysctl-read allowlist-deny
-closes the in-sandbox KERN_PROCARGS2 read of that argv; same-UID
-observers outside the sandbox can still ``ps`` it, so the RAPTOR
-checkout path must simply never appear in the profile.
+Historically the restricted read allowlist granted the Linux pid1-shim
+file (the unshare fallback lane needed to exec it) and the seatbelt
+lane filtered the entry back out; both the grant and the filter died
+with that lane. This pins the resulting invariant from the outside:
+no ``libexec/`` framework path may appear in the seatbelt-bound
+allowlist — on darwin every readable path is embedded verbatim in the
+SBPL profile text, which rides ``sandbox-exec -p`` in the never-exec'd
+watcher shim's argv for the whole run, and same-UID observers can
+``ps`` it, so the RAPTOR checkout path must simply never appear in
+the profile.
 """
 
 from __future__ import annotations
@@ -51,24 +51,21 @@ def _captured_backend_kwargs(tmp_path, **run_kwargs):
     return captured
 
 
-def test_pid1_shim_entry_filtered_from_seatbelt_reads(tmp_path):
+def test_no_libexec_entry_in_seatbelt_reads(tmp_path):
     kwargs = _captured_backend_kwargs(tmp_path, restrict_reads=True)
     readable = kwargs.get("readable_paths") or []
     # The restricted allowlist is otherwise intact...
     assert any(p == "/usr" for p in readable), readable
     assert str(tmp_path) in readable  # target stays readable
-    # ...but the framework tell is gone (the mount lane's filter,
-    # mirrored).
-    assert not any(p.endswith("/libexec/raptor-pid1-shim")
-                   for p in readable), readable
+    # ...and carries no framework install-location tell.
+    assert not any("/libexec/raptor-" in p for p in readable), readable
 
 
-def test_caller_readable_paths_survive_the_filter(tmp_path):
+def test_caller_readable_paths_survive(tmp_path):
     extra = tmp_path / "toolchain"
     extra.mkdir()
     kwargs = _captured_backend_kwargs(
         tmp_path, restrict_reads=True, readable_paths=[str(extra)])
     readable = kwargs.get("readable_paths") or []
     assert str(extra) in readable
-    assert not any(p.endswith("/libexec/raptor-pid1-shim")
-                   for p in readable)
+    assert not any("/libexec/raptor-" in p for p in readable)

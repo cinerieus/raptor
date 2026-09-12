@@ -518,12 +518,11 @@ class RaptorConfig:
         # were invoked from a trusted parent (bin/raptor, bin/cve-diff,
         # or Claude Code). Pure boolean flags; not shell-interpreted.
         # Must propagate through get_safe_env() because the sandbox
-        # spawns its own libexec scripts (raptor-pid1-shim,
-        # raptor-run-sandboxed) using this env. Untrusted TARGETS do
-        # not see them: run_untrusted()/run_untrusted_networked()
-        # strip both from the target-bound env (strip_trust_markers
-        # in core/sandbox/context.py), and the pid1 shim strips them
-        # before exec on the unshare path. RAPTOR's own Claude Code
+        # spawns its own libexec scripts (raptor-run-sandboxed)
+        # using this env. Untrusted TARGETS do not see them: the
+        # sandbox strips the whole TARGET_ENV_STRIP_SET from the
+        # target-bound env by default (core/sandbox/context.py's
+        # target-env staging). RAPTOR's own Claude Code
         # skill dispatches opt out via keep_trust_markers=True (see
         # run_untrusted_networked) — those children drive libexec/
         # helpers on the operator-approved run and need the marker.
@@ -573,8 +572,8 @@ class RaptorConfig:
     # spawn-mode processes): trust markers a hostile child could
     # replay against the libexec trust gate, and the session
     # credential. Consumed by core/sandbox/context.py,
-    # libexec/raptor-pid1-shim (keep the shim's tuple in sync — it
-    # cannot import this module inside the namespace), and
+    # libexec/raptor-seatbelt-shim (keep the shim's tuple in sync —
+    # the isolated `python3 -I` shim cannot import this module), and
     # packages/fuzzing/env_hygiene.py; the strip regression harness is
     # table-driven off this constant.
     #

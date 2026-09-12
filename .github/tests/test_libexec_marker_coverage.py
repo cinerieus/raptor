@@ -224,9 +224,9 @@ SYSPATH_VARIANTS = {
     ),
 }
 
-# The two `python3 -I` sandbox shims: isolated mode, no repo imports,
+# The `python3 -I` sandbox shim: isolated mode, no repo imports,
 # no sys.path mutation, no process_init — by design.
-NO_SYSPATH_PREAMBLE = {"raptor-pid1-shim", "raptor-seatbelt-shim"}
+NO_SYSPATH_PREAMBLE = {"raptor-seatbelt-shim"}
 
 # ─── faulthandler ────────────────────────────────────────────────────
 
@@ -234,10 +234,10 @@ NO_SYSPATH_PREAMBLE = {"raptor-pid1-shim", "raptor-seatbelt-shim"}
 # SyspathPreambleIdentityTests already requires on every python script
 # enables faulthandler and registers the SIGUSR1 stack dump (with the
 # stderr-fileno guard the deleted inline copies lacked). The only
-# permitted carriers are the two `python3 -I` sandbox shims — isolated
-# mode means no repo sys.path, so they cannot import
-# core.startup.process_init and keep the stanza inline by design.
-FAULTHANDLER_INLINE_SHIMS = {"raptor-pid1-shim", "raptor-seatbelt-shim"}
+# permitted carrier is the `python3 -I` sandbox shim — isolated
+# mode means no repo sys.path, so it cannot import
+# core.startup.process_init and keeps the stanza inline by design.
+FAULTHANDLER_INLINE_SHIMS = {"raptor-seatbelt-shim"}
 
 FAULTHANDLER_STANZA = '''faulthandler.enable()
 if hasattr(signal, "SIGUSR1"):
@@ -453,8 +453,7 @@ class LibexecMarkerCoverageTests(unittest.TestCase):
         ``sys.path`` is mutated (if any) and before non-stdlib imports.
 
         Heuristic: the sentinel must appear within the first 100 lines.
-        That's loose enough to permit long module docstrings (raptor-
-        pid1-shim has a 60-line one and lands at line ~80) but tight
+        That's loose enough to permit long module docstrings but tight
         enough to catch a check accidentally pushed to the bottom of
         the file.
         """

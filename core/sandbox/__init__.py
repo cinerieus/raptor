@@ -123,8 +123,8 @@ Sanitised host fingerprint (sanitise_host_fingerprint=True):
   lists, `/proc/version` (trimmed to `Linux version
   <host-release>`), and uname() nodename / domainname (via
   CLONE_NEWUTS + sethostname). /proc/self/cgroup reads "0::/" on
-  both namespace lanes (CLONE_NEWCGROUP on the fork lane; `unshare
-  --cgroup` on the subprocess lane where util-linux supports it),
+  every namespace lane (CLONE_NEWCGROUP in the fork backend — the
+  only namespace lane since the unshare-CLI fallback was deleted),
   persona or not; the no-namespace last-resort fallback keeps the
   host cgroup path visible.
   All hide-intent values — no "sandbox" / "raptor" / "Generic CPU"
@@ -266,10 +266,21 @@ Threat model — what the sandbox DOES protect against:
 - `kill()` of host processes — PID namespace hides host PIDs; attacker
   inside sandbox sees ns-local PIDs only.
 - SysV IPC cross-process access — IPC namespace isolates shm/sem/msg.
-- Fork bombs — RLIMIT_NPROC=1024 applied via `prlimit --nproc` wrapper
-  inside the user namespace (ns-local UID nobody has zero pre-existing
-  processes so the limit bounds the sandbox without affecting host
-  work). Configurable via `~/.config/raptor/sandbox.json`.
+- Nested `unshare(CLONE_NEWUSER|CLONE_NEWNS)` — denied at the
+  seccomp layer on every execution lane (unshare / clone with any
+  CLONE_NEW* flag / setns; clone3 → ENOSYS): the fork backend's
+  grandchild filter and the subprocess lanes' preexec both carry the
+  rules now that no lane bootstraps through the `unshare` CLI under
+  its own filter. Requires an engaged seccomp profile + libseccomp
+  (the strict profile refuses without them). Defence in depth behind
+  it: Landlock rules bind to dentries (not paths) and inherit into
+  nested namespaces, and NO_NEW_PRIVS blocks seccomp drop.
+- Fork bombs — RLIMIT_NPROC=1024 applied inside the user namespace
+  (the spawn grandchild's setrlimit; the ns-local UID has zero
+  pre-existing processes so the limit bounds the sandbox without
+  affecting host work); the no-namespace fallback bounds growth
+  relative to current same-UID usage. Configurable via
+  `~/.config/raptor/sandbox.json`.
 - Privilege escalation via setuid binaries (PR_SET_NO_NEW_PRIVS).
 - Core-dump credential exfil — RLIMIT_CORE=0 suppresses core dumps; a
   crashed child can't leak the contents of files it read into its
@@ -281,9 +292,9 @@ Threat model — what the sandbox DOES protect against:
   instrumented binaries reserve ~56 TiB of shadow-memory VA on
   x86_64, and any finite limit breaks them. Memory containment
   belongs to an external cgroup v2 `memory.max`.
-- PATH hijack of the sandbox's own setup binaries — `unshare`,
-  `prlimit`, `/bin/sh`, `mount`, `mkdir` are resolved against a
-  hardcoded safe bin-dir list (`/usr/sbin`, `/usr/bin`, `/sbin`,
+- PATH hijack of the sandbox's own setup binaries — `unshare` (the
+  engagement probe), `newuidmap`/`newgidmap`, `/bin/sh`, `mount`,
+  `mkdir` are resolved against a hardcoded safe bin-dir list (`/usr/sbin`, `/usr/bin`, `/sbin`,
   `/bin`, `/usr/local/bin`), NOT the inherited PATH. Closes the
   "malicious .envrc poisons PATH before the sandbox builds itself"
   class of bypass. A missing binary is a HARD FAIL
@@ -321,9 +332,9 @@ Threat model — what the sandbox DOES protect against:
   vector without breaking legitimate pipe-based stdin passing.
 - `shell=True` misuse — rejected with TypeError. subprocess with
   shell=True reinterprets argv into `sh -c argv[0] argv[1:]`, which
-  silently mangles our `unshare ... -- cmd` list construction AND
-  is a shell-injection surface for any caller whose argv contains
-  attacker-influenced strings.
+  breaks deterministic argv construction AND is a shell-injection
+  surface for any caller whose argv contains attacker-influenced
+  strings.
 - Controlling-tty keystroke-sniff — `run_untrusted()` defaults
   `start_new_session=True` so the child is a new session leader
   with no controlling tty, and `stdin=subprocess.DEVNULL` so fd 0
@@ -370,15 +381,6 @@ What the sandbox does NOT protect against:
   that write predictable `/tmp` paths without O_NOFOLLOW can be
   symlink-raced. Mount-ns mounts a fresh tmpfs at `/tmp` inside the
   sandbox and closes this; Landlock-only mode does not.
-- Nested `unshare(CLONE_NEWUSER|CLONE_NEWNS)` on distros WITHOUT the
-  `kernel.apparmor_restrict_unprivileged_userns=1` sysctl — we can't
-  block unshare/setns/mount at the seccomp layer because our own
-  bootstrap uses the `unshare` CLI AFTER seccomp is installed in
-  preexec. A child on such a distro can create a nested user-ns
-  with CAP_SYS_ADMIN-in-ns and experiment with bind-mount tricks.
-  Landlock rules bind to dentries (not paths) and inherit into
-  nested namespaces, so bind-mounts don't grant new dentry access;
-  NO_NEW_PRIVS blocks seccomp drop. Bounded but not ironclad.
 - UDP outbound when `block_network=False` AND no egress proxy —
   Landlock's network rule is TCP-connect only. For full network-off
   set `block_network=True` (the `full` profile default). For

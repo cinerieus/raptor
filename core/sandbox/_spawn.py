@@ -1871,11 +1871,10 @@ def run_sandboxed(
             # namespace the sandbox itself needs already exists — an
             # install point where denying namespace creation to the
             # target costs nothing and closes the nested-userns
-            # kernel attack surface. The unshare-CLI subprocess lane
-            # must NOT set this (its filter precedes the unshare
-            # bootstrap); the PLAIN subprocess lane sets it too
-            # (context selects the ns-blocking preexec variant when
-            # the command is not unshare-wrapped).
+            # kernel attack surface. The subprocess lanes carry the
+            # same rules unconditionally in their preexec (nothing
+            # they exec legitimately unshares since the unshare-CLI
+            # bootstrap lane was deleted).
             block_ns_creation=True,
         ) if seccomp_profile else None
 
@@ -2922,7 +2921,14 @@ def run_sandboxed(
                     with contextlib.suppress(OSError):
                         os.close(_tgt_wstat_r)
                     with contextlib.suppress(ValueError):
-                        _tgt_status = int(_wbuf.decode("ascii", "replace"))
+                        _parsed = int(_wbuf.decode("ascii", "replace"))
+                        # Bound to the C wait-status domain: an
+                        # oversized integer would OverflowError inside
+                        # the WIFSIGNALED macro below. Unreachable from
+                        # the trusted waiter (it writes a real wait
+                        # status); robustness against a future writer.
+                        if 0 <= _parsed < 2 ** 32:
+                            _tgt_status = _parsed
                 if (_tgt_status is not None and _tgt_status >= 0
                         and os.WIFSIGNALED(_tgt_status)
                         and os.WIFEXITED(status)):
@@ -3343,8 +3349,8 @@ def run_sandboxed(
                 # consistency. Interpreter lockdown comes from the
                 # hand-crafted 2-key env below, not from `-I` — see
                 # the note ahead of tracer_env for why isolated mode
-                # is deliberately not used here (unlike
-                # raptor-pid1-shim, which can afford it).
+                # is deliberately not used here (unlike the isolated
+                # `python3 -I` seatbelt shim, which can afford it).
                 try:
                     raptor_dir = os.environ.get("RAPTOR_DIR")
                     if raptor_dir is None:

@@ -1677,7 +1677,6 @@ def case_ci_gates(ctx: Ctx) -> None:
 # --help and asserts no Python traceback (import rot still surfaces).
 _ALLOW_NO_HELP = {
     # exec-only wrappers: argv IS the command to run
-    "raptor-pid1-shim": "pid-1 reaper shim; execs its argv verbatim",
     "raptor-seatbelt-shim": "macOS sandbox-exec watcher; execs its argv",
     # bash gates / installers with usage-on-misuse only
     "raptor-cc-trust-check": "trust gate; usage on unknown flag, exit 3",

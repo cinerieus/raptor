@@ -1464,9 +1464,9 @@ def _idle_wait_for_sigchld(tick_s: float) -> None:
     used a plain ``time.sleep(0.05)`` when no event was ready. A
     tracee stopped by SCMP_ACT_TRACE stays FROZEN until the tracer
     wakes and PTRACE_CONTs it, so every traced syscall cost up to one
-    full tick — ~20 syscalls/sec. The Landlock-only spawn path wraps
-    commands in the Python pid1-shim whose interpreter startup alone
-    is ~200 traced syscalls: 10+ seconds of wall clock for
+    full tick — ~20 syscalls/sec. A Python interpreter startup alone
+    is ~200 traced syscalls (observed with the since-deleted Python
+    pid1-shim wrapper): 10+ seconds of wall clock for
     ``/usr/bin/true``, blowing every caller timeout and presenting as
     "drain never sees pipe EOF". sigtimedwait keeps the bounded-tick
     watchdog behaviour while making event wakeups immediate.

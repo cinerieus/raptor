@@ -384,12 +384,14 @@ def test_no_bare_executor_calls_outside_the_checked_dispatch():
 
 
 def test_lane_registry_covers_every_lane_and_matches_the_lattice():
+    """The deleted unshare-CLI lane must never resurface as a registry
+    entry: NS_NOMOUNT is delivered only as a ``cap=`` on the mountless
+    spawn (the Landlock-absent mode), never by a lane of its own."""
     from core.sandbox import context as _ctx
     expected = {
         "seatbelt spawn": ContainmentTier.SEATBELT,
         "mount-ns spawn": ContainmentTier.MOUNT_NS,
         "mountless namespace backend": ContainmentTier.MOUNTLESS_NS,
-        "unshare-CLI subprocess": ContainmentTier.NS_NOMOUNT,
         "Landlock-only subprocess": ContainmentTier.LANDLOCK_ONLY,
     }
     assert _ctx._LANE_TIERS == expected
@@ -441,11 +443,11 @@ def test_future_below_floor_lane_is_caught_by_the_dispatch_assert(
         raise injected
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
-    # The "future lane": the ladder's fallback dispatch now claims to
-    # deliver only LANDLOCK_ONLY (e.g. a rewritten fallback that lost
-    # its namespaces). The floor must catch it all the same.
-    monkeypatch.setitem(_ctx._LANE_TIERS, "unshare-CLI subprocess",
-                        ContainmentTier.LANDLOCK_ONLY)
+    # The "future lane": with the unshare-CLI namespace fallback
+    # deleted, the ladder's only fallback IS a below-floor lane
+    # (Landlock-only). A future rewrite that re-tagged it stronger
+    # would be caught by the registry pin; here the floor must refuse
+    # the demotion outright.
     with pytest.raises(SandboxFloorError) as excinfo:
         _ctx.run_untrusted(["touch", str(sentinel)],
                            target=str(tmp_path), output=str(tmp_path),
@@ -470,6 +472,12 @@ def test_mount_and_mountless_lanes_stamp_the_same_posture_surface(
     mount_ns_active flips."""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
+    # Pin the Landlock probe: the parity under test is the mount vs
+    # mountless POSTURE surface; on a Landlock-less matrix lane the
+    # tolerance mode would (correctly) re-cap the mountless lane at
+    # ns-only, which is the ported lane's own contract, covered in
+    # test_landlock_absent_ns_lane.
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
     calls: list[dict] = []
     fail_first = [False]
 
@@ -558,9 +566,11 @@ def test_skip_pid_ns_caps_spawn_lane_tier_and_warning(
     """skip_pid_ns keeps the HOST procfs on both spawn lanes (the
     fresh-proc remount rides the pid-ns grandchild fork), so the
     declared tier, the posture stamp, AND the consented-degrade
-    warning must all treat such a run as ns-only — a mountless-ns
-    label would overstate delivery and silence the per-call warning
-    on a genuinely host-procfs-visible waived run."""
+    warning must all cap such a run at the POLICY-LAYER tier
+    (landlock) — under the redefined ns-only tier, which PROMISES a
+    fresh procfs, even an ns-only label would overstate delivery,
+    and a mountless-ns label would silence the per-call warning on a
+    genuinely host-procfs-visible waived run."""
     import logging as _logging
     import subprocess as _subprocess
 
@@ -572,24 +582,28 @@ def test_skip_pid_ns_caps_spawn_lane_tier_and_warning(
                                             stdout="", stderr="")
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
+    # Pin the Landlock probe: the skip_pid_ns cap is landlock/none
+    # keyed on it, and this test's subject is the CAP logic, which
+    # must behave identically on Landlock-less matrix lanes.
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
     try:
         trusted = _ctx.run(["true"], target=str(tmp_path),
                            output=str(tmp_path), timeout=60,
                            skip_mount_ns=True, skip_pid_ns=True)
     except BaseException as e:  # noqa: BLE001 — host capability gate
         pytest.skip(f"spawn lane unavailable: {e}")
-    assert trusted.sandbox_info["containment_tier"] == "ns-only"
+    assert trusted.sandbox_info["containment_tier"] == "landlock"
 
     # Waived untrusted-class shape on the same lane: the capped
-    # delivered tier sits at/below ns-only, so the per-call HOST
-    # process table warning must fire.
+    # delivered tier sits BELOW ns-only (host procfs visible), so the
+    # per-call HOST process table warning must fire.
     monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
     with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
         waived = _ctx.run(["true"], target=str(tmp_path),
                           output=str(tmp_path), timeout=60,
                           skip_mount_ns=True, skip_pid_ns=True,
                           require_fresh_procfs=False)
-    assert waived.sandbox_info["containment_tier"] == "ns-only"
+    assert waived.sandbox_info["containment_tier"] == "landlock"
     assert waived.sandbox_info["floor_source"] == "env"
     assert any("HOST process table" in rec.getMessage()
                for rec in caplog.records), caplog.text
@@ -741,8 +755,6 @@ def test_future_below_floor_lane_caught_on_constrained_hosts(
         raise injected
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
-    monkeypatch.setitem(_ctx._LANE_TIERS, "unshare-CLI subprocess",
-                        ContainmentTier.LANDLOCK_ONLY)
     with pytest.raises(SandboxFloorError) as excinfo:
         _ctx.run_untrusted(["touch", str(sentinel)],
                            target=str(tmp_path), output=str(tmp_path),

@@ -488,9 +488,9 @@ def _run_python_harness(
 
 
 # Exit codes the spawn layers re-encode a failed exec of the target as
-# (shell/util-linux convention, shared by the sandbox's pid1-shim, the
-# in-sandbox exec lane and the Landlock-only retry): 127 file not
-# found, 126 found but not executable, 125 catch-all exec errno.
+# (shell/util-linux convention, shared by the in-sandbox exec lane
+# and the Landlock-only retry): 127 file not found, 126 found but not
+# executable, 125 catch-all exec errno.
 _EXEC_FAILURE_RETURNCODES = frozenset({125, 126, 127})
 
 

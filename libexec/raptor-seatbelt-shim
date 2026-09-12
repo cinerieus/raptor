@@ -55,8 +55,8 @@ permit /bin/sh; see seatbelt.build_profile.) A python trampoline would add
 stdlib-read dependencies the target lacks, creating a false-failure mode
 under restrict_reads.
 
-This is the macOS analogue of `raptor-pid1-shim` (the Linux subprocess
-path) and the `_spawn.py` exec-status pipe (the Linux mount-ns path).
+This is the macOS analogue of the `_spawn.py` exec-status pipe (the
+Linux fork-backend path).
 """
 
 from __future__ import annotations
@@ -413,8 +413,8 @@ def main() -> int:
         return 2
 
     # --keep-trust-markers (from the spawn side ONLY): keep the trust
-    # markers in the target env, mirroring raptor-pid1-shim's contract
-    # on Linux. run_untrusted_networked(keep_trust_markers=True) — the
+    # markers in the target env — the keep-trust dispatch contract.
+    # run_untrusted_networked(keep_trust_markers=True) — the
     # sole sanctioned keep-trust minting site, used for RAPTOR's own
     # claude -p skill dispatches — needs the dispatched child to keep
     # _RAPTOR_TRUSTED/CLAUDECODE so it can drive libexec/ helpers past
@@ -523,7 +523,7 @@ def main() -> int:
                 os._exit(_PIN_VIOLATION_EXIT)
         # Keep this tuple in sync with core.config's TARGET_ENV_STRIP_SET
         # (this shim runs `python -I` with no repo on sys.path and cannot
-        # import core), matching raptor-pid1-shim: trust markers, the
+        # import core): trust markers, the
         # session credential, and the framework-identity tells (checkout
         # path, output layout, target-kind override — pure "inside
         # RAPTOR" fingerprints no target legitimately consumes) never

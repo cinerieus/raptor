@@ -32,7 +32,6 @@ from . import probes as _probes
 from . import errors as _errors
 from . import tiers as _tiers
 from ._env_quarantine import ENV_RESTORE_KEY as _ENV_RESTORE_KEY
-from ._env_quarantine import quarantine_loader_env as _quarantine_loader_env
 from . import seccomp as _seccomp
 from . import state
 
@@ -816,11 +815,17 @@ _UNSET = object()
 # (skip_pid_ns keeps host procfs on the mount lane; a Landlock-less
 # kernel reduces the plain-subprocess lane to rlimits+seccomp) are
 # applied at the call sites via the check's ``cap=``.
+#
+# The former "unshare-CLI subprocess" lane (NS_NOMOUNT via the
+# unshare/prlimit/pid1-shim chain, HOST procfs visible) is deleted:
+# every namespace-needing shape now routes through the modern spawn
+# backend, whose Landlock-absent mode delivers the redefined
+# NS_NOMOUNT tier (namespaces + FRESH procfs + seccomp) as a ``cap=``
+# on the mountless lane rather than as a separate registry entry.
 _LANE_TIERS: "dict[str, _tiers.ContainmentTier]" = {
     "seatbelt spawn": _tiers.ContainmentTier.SEATBELT,
     "mount-ns spawn": _tiers.ContainmentTier.MOUNT_NS,
     "mountless namespace backend": _tiers.ContainmentTier.MOUNTLESS_NS,
-    "unshare-CLI subprocess": _tiers.ContainmentTier.NS_NOMOUNT,
     "Landlock-only subprocess": _tiers.ContainmentTier.LANDLOCK_ONLY,
 }
 
@@ -876,16 +881,18 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
     """Context manager for sandboxed subprocess execution.
 
     Each run() call inside the context runs the target command with the
-    isolation configured here. When `block_network=True` or mount
-    isolation is active, each run() launches its subprocess inside a
-    fresh user namespace via `unshare`; Landlock-only runs do NOT use
-    namespaces and execute in the calling process's namespace (Landlock
-    is applied in the child via preexec_fn). Resource rlimits always
-    apply.
+    isolation configured here. When `block_network=True`, mount
+    isolation, or a read restriction is active, each run() launches its
+    command through the fork-based spawn backend inside fresh user/pid/
+    ipc/cgroup(+net) namespaces (with the pivot_root bind tree when
+    target/output engage it, mountlessly otherwise); Landlock-only runs
+    do NOT use namespaces and execute in the calling process's
+    namespace (Landlock is applied in the child via preexec_fn).
+    Resource rlimits always apply.
 
     Args:
-        block_network: If True, block all network access via user namespace
-                      (`unshare --user --net`). Overridden by profile=
+        block_network: If True, block all network access via a fresh
+                      network namespace. Overridden by profile=
                       and by --sandbox/--no-sandbox CLI flags.
         target: Path to target repo. Engages Landlock. Under Landlock, the
                path is an engagement marker only (Landlock does not restrict
@@ -2318,26 +2325,58 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
     # engaged — confusing and Linux-flavoured.
     if (not effectively_disabled and not use_mount and not use_seatbelt
             and (target or output or allowed_tcp_ports
-                 or restrict_reads)):
+                 or restrict_reads or extra_writable_paths)):
         # restrict_reads is part of the declared policy too: a
         # read-restricted caller without target/output (possible under
         # skip-mount / helper shapes) would otherwise silently lose
-        # its read restriction here instead of failing closed.
+        # its read restriction here instead of failing closed. So are
+        # caller-supplied writable_paths extras — a write-scoping
+        # request with nothing to enforce it used to slip past this
+        # predicate and run silently unconfined.
         if not check_landlock_available():
-            from .errors import SandboxSetupError
-            msg = (
-                "Sandbox: target/output/allowed_tcp_ports/restrict_reads "
-                "were set but "
-                "Landlock is unavailable on this kernel — filesystem writes "
-                "and TCP ports would NOT be restricted."
-            )
-            raise SandboxSetupError(
-                msg,
-                "Upgrade to kernel 5.13+ for Landlock, pass "
-                "--sandbox network-only to keep namespace/network isolation "
-                "without filesystem restriction, or --sandbox none to "
-                "disable all isolation.",
-            )
+            # Acceptance lever, mirroring the degraded-net-deny arm
+            # above: RAPTOR_ALLOW_DEGRADED_UNTRUSTED is the documented
+            # host-wide acceptance of degraded containment tiers, and
+            # on a Landlock-less kernel it converts this refusal into
+            # a loud warning so the namespace lanes can still serve
+            # the workload — the modern spawn backend's ns-only tier
+            # (namespaces + fresh procfs + seccomp, floor-checked at
+            # dispatch) is what such a host has left, and refusing at
+            # construction made that tier unreachable for exactly the
+            # consented runs the waiver exists for. Filesystem-write /
+            # TCP-port / read-allowlist policy is genuinely unenforced
+            # under the acceptance, and the per-call floor comparison
+            # still refuses every unconsented untrusted call.
+            _degraded_ll_ok = not untrusted_fresh_procfs_required()
+            if _degraded_ll_ok:
+                if state.warn_once("_degraded_landlock_override_warned"):
+                    logger.warning(
+                        "Sandbox: target/output/writable_paths/"
+                        "allowed_tcp_ports/restrict_reads were set "
+                        "but Landlock is unavailable on this kernel — "
+                        "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 accepts "
+                        "running WITHOUT filesystem-write/TCP/read "
+                        "policy enforcement; namespace containment "
+                        "(fresh procfs, pid/ipc/net isolation) still "
+                        "applies where a namespace lane engages, and "
+                        "the containment floor still gates every "
+                        "dispatch.",
+                    )
+            else:
+                from .errors import SandboxSetupError
+                msg = (
+                    "Sandbox: target/output/writable_paths/"
+                    "allowed_tcp_ports/restrict_reads were set but "
+                    "Landlock is unavailable on this kernel — filesystem writes "
+                    "and TCP ports would NOT be restricted."
+                )
+                raise SandboxSetupError(
+                    msg,
+                    "Upgrade to kernel 5.13+ for Landlock, pass "
+                    "--sandbox network-only to keep namespace/network isolation "
+                    "without filesystem restriction, or --sandbox none to "
+                    "disable all isolation.",
+                )
         else:
             abi = _get_landlock_abi()
             # Each ABI level adds a restriction mask bit. Warn once per
@@ -2416,18 +2455,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             paths.remove("/etc")
             paths.extend(
                 p for p in _ETC_MINIMAL_READS if os.path.exists(p))
-        # The pid-1 shim file ONLY (not the whole libexec/ dir).
-        # Without this, execvp of the shim fails with EACCES (rc=126)
-        # and every run_untrusted() call under restrict_reads=True
-        # errors out before the target even starts. Narrowing to the
-        # single file keeps the rest of libexec/ (other RAPTOR
-        # helpers that have no business being visible to a sandboxed
-        # target) out of the read allowlist. Landlock supports
-        # file-granularity rules via path_beneath with an O_PATH fd.
-        from pathlib import Path as _Path
-        _shim = _Path(__file__).resolve().parents[2] / "libexec" / "raptor-pid1-shim"
-        if _shim.is_file():
-            paths.append(str(_shim))
         if target:
             paths.append(target)
         if readable_paths:
@@ -2480,11 +2507,19 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
     # teardown, lost death watch for A). The fork inherits the calling
     # thread's slot, so _reaper_split's post-fork read is per-run by
     # construction (one run() per thread at a time).
+    # Minted for every Linux context that could dispatch on the plain
+    # subprocess lane. That used to exclude namespace-triggering
+    # shapes (their lane was the unshare-CLI chain, whose pid-ns
+    # cascade made the sweeper redundant); with that lane deleted, a
+    # namespace-shaped call whose spawn backend fails mid-setup
+    # demotes to the plain lane per call — the sweeper must exist for
+    # it. The cell is inert on runs that stay on the spawn lanes (the
+    # sweeper only forks inside the subprocess-lane preexec), and the
+    # teardown_sweep posture stamp below is scoped to runs that
+    # actually executed there.
     _reaper_cell: dict | None = None
     if (sys.platform == "linux" and not use_seatbelt
-            and not effectively_disabled
-            and not (use_sandbox
-                     and (block_network or use_mount or restrict_reads))):
+            and not effectively_disabled):
         _reaper_cell = {"death_local": threading.local()}
         _nproc_budget = int(effective_limits.get("nproc", 0) or 0)
         if _nproc_budget > 0:
@@ -2525,18 +2560,15 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         host_nproc_cap=_host_nproc_cap,
         reaper_cell=_reaper_cell,
     )
-    preexec = _make_preexec_fn(effective_limits, **_preexec_build_kwargs)
-    # Plain-subprocess variant with the namespace-creation deny rules
+    # Plain-subprocess preexec with the namespace-creation deny rules
     # (unshare/clone CLONE_NEW*, setns; clone3→ENOSYS). The fork
-    # backend's grandchild always installs these; the subprocess lanes
-    # could not take them blanket because the unshare-CLI lane's
-    # filter precedes its own `unshare` bootstrap. run() selects this
-    # variant exactly when the command is NOT unshare-wrapped
-    # (need_unshare False), so the plain lane stops being the one
-    # lane where a sandboxed payload can still reach the kernel's
-    # namespace-creation surface. Two closures, not a mutable flag: a
-    # preexec fn is fork-inherited, and a flag flipped per-run would
-    # race concurrent run() calls on this context.
+    # backend's grandchild always installs these, and with the
+    # unshare-CLI lane deleted the plain subprocess lane is the ONLY
+    # lane that still execs through a preexec — its payload never
+    # legitimately unshares, so the deny rules apply blanket. (The
+    # legacy lane could not take them because its own `unshare`
+    # bootstrap ran under the filter — the documented residual that
+    # died with the lane.)
     preexec_ns_blocked = _make_preexec_fn(
         effective_limits, seccomp_block_ns_creation=True,
         **_preexec_build_kwargs)
@@ -2815,22 +2847,21 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         allow_path_divergence = kwargs.pop("allow_path_divergence", False)
         # ``strip_trust_markers``: opt-in from run_untrusted() /
         # run_untrusted_networked(). CLAUDECODE / _RAPTOR_TRUSTED pass
-        # through get_safe_env() because the sandbox setup chain
-        # (raptor-pid1-shim on the unshare fallback) needs a marker to
-        # run — but an untrusted TARGET holding them could invoke
-        # libexec scripts as a "trusted caller". When set, the env
-        # handed to any path that execs the target directly (fork
-        # backend, seatbelt, Landlock-only subprocess) has both
-        # markers removed; the shim-bearing unshare path keeps them
-        # because the shim itself strips both before exec'ing the
-        # target (see raptor-pid1-shim). RAPTOR_DIR is stripped on
-        # the same contract (direct paths here; shim path via the
-        # --strip-raptor-dir argv flag): the libexec trust gate never
-        # accepted it, in-tree sandboxed children self-anchor via
-        # __file__, and to an untrusted target it is a pure "inside
-        # RAPTOR at <path>" tell. Dispatch children keep it alongside
-        # the markers (keep_trust_markers_for_dispatch).
-        strip_trust_markers = kwargs.pop("strip_trust_markers", False)
+        # through get_safe_env(), but an untrusted TARGET holding them
+        # could invoke libexec scripts as a "trusted caller". Every
+        # lane execs the target directly (fork backend, seatbelt,
+        # Landlock-only subprocess — the shim-bearing unshare chain is
+        # deleted), so the env handed to the target has both markers
+        # removed. RAPTOR_DIR is stripped on the same contract: the
+        # libexec trust gate never accepted it, in-tree sandboxed
+        # children self-anchor via __file__, and to an untrusted
+        # target it is a pure "inside RAPTOR at <path>" tell.
+        # Dispatch children keep it alongside the markers
+        # (keep_trust_markers_for_dispatch).
+        # Popped for API compatibility; the strip is the default now
+        # (see the target-env staging below), so the flag's only
+        # remaining meaning is "do not warn about the subsumed kwarg".
+        kwargs.pop("strip_trust_markers", False)
         # ``keep_trust_markers_for_dispatch``: the ONLY sanctioned way
         # to keep CLAUDECODE/_RAPTOR_TRUSTED in a sandboxed target's
         # env (RAPTOR's own Claude Code skill dispatches — see
@@ -2872,6 +2903,20 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # flag from untrusted_fresh_procfs_required() and the operator
         # waiver is in force, so the call is untrusted-class work
         # running at the waived floor rather than a trusted call.
+        # ``landlock_required`` is the BACKEND's floor-plumbing
+        # parameter, never a caller kwarg: the Landlock-absent
+        # tolerance mode is reachable ONLY via the resolved
+        # containment floor below. Refuse loudly instead of letting
+        # the name ride the loose **kwargs surface into (silent)
+        # nothing — a caller writing it believed it did something.
+        if "landlock_required" in kwargs:
+            msg_0 = (
+                "sandbox run() does not accept landlock_required= — "
+                "the Landlock-absent tolerance is derived from the "
+                "resolved containment floor, never from a caller "
+                "kwarg."
+            )
+            raise TypeError(msg_0)
         _rfp_kwarg = kwargs.pop("require_fresh_procfs", None)
         if _rfp_kwarg is not None:
             # Normalise truthy/falsy literals (0/1, "" ...) at the
@@ -2909,6 +2954,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # waiver must not banner/warn in the waiver's name).
             waiver_active=not untrusted_fresh_procfs_required(),
         )
+
         if (_floor_source == _tiers.FLOOR_SOURCE_ENV
                 and sys.platform == "linux"
                 and state.warn_once("_floor_lowered_banner_warned")):
@@ -2936,10 +2982,92 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             )
             raise _errors.SandboxFloorError(
                 msg, "",
-                achievable=_tiers.ContainmentTier.NS_NOMOUNT,
+                # skip_pid_ns keeps the HOST procfs, which the
+                # redefined ns-only tier explicitly negates — the
+                # honest achievable claim is the policy-layer tier.
+                achievable=_tiers.ContainmentTier.LANDLOCK_ONLY,
                 floor=_floor,
             )
         from ._spawn import mount_ns_available as _mount_ns_avail
+
+        # ---- Landlock-absent tolerance (the ported ns-only mode) ----
+        # On a kernel WITHOUT Landlock, the spawn backend may run
+        # without the Landlock layer WHEN the call's resolved floor
+        # admits the ns-only tier — floor resolution is the ONLY way
+        # to reach the mode (run()/sandbox() expose no kwarg for it;
+        # _spawn's landlock_required is set exclusively from this
+        # flag). With the mount tree engaged the lane keeps its
+        # MOUNT_NS declaration (the tree, not Landlock, is that
+        # tier's filesystem enforcement); without the tree the lane
+        # is capped to what the redefined NS_NOMOUNT tier honestly
+        # promises, computed by _ported_ns_tier below.
+        _landlock_tolerated = (
+            sys.platform == "linux"
+            and not effectively_disabled
+            and not check_landlock_available()
+            and _floor <= _tiers.ContainmentTier.NS_NOMOUNT
+        )
+
+        def _ported_ns_tier() -> "_tiers.ContainmentTier":
+            """Tier the spawn backend delivers WITHOUT the mount tree
+            and WITHOUT Landlock on this host + call shape.
+
+            NS_NOMOUNT promises namespaces + a FRESH pid-ns procfs +
+            seccomp; when any of those is unavailable up front the
+            lane must not claim the tier — it collapses to BARE
+            (understating the namespaces that may still engage is
+            safe; overstating never is). The entry-time probe verdict
+            here is advisory ordering; delivery stays fail-closed in
+            the child ('U'/'S'/'F' status bytes — the checked
+            dispatch passes require_fresh_procfs through whenever
+            this returns NS_NOMOUNT)."""
+            if not (seccomp_profile and check_seccomp_available()):
+                return _tiers.ContainmentTier.BARE
+            if _skip_pid_ns:
+                # Host procfs by caller declaration — the exact
+                # posture the tier negates.
+                return _tiers.ContainmentTier.BARE
+            from .probes import check_pidns_fresh_proc_available
+            if not check_pidns_fresh_proc_available():
+                return _tiers.ContainmentTier.BARE
+            return _tiers.ContainmentTier.NS_NOMOUNT
+
+        # Whether a mountless spawn in the tolerance mode must treat
+        # the fresh procfs mount as MANDATORY ('F' fail-closed): yes
+        # exactly when the lane declares NS_NOMOUNT — a tier that
+        # promises fresh procfs may not deliver the host view.
+        _ported_hard_fresh = (
+            _landlock_tolerated
+            and _ported_ns_tier() is _tiers.ContainmentTier.NS_NOMOUNT)
+
+        def _spawn_tier_cap(
+                without_mount: bool,
+        ) -> "_tiers.ContainmentTier | None":
+            """Per-call cap on the spawn lanes' declared tier.
+
+            * skip_pid_ns keeps the HOST procfs on both spawn lanes
+              (the fresh-proc remount rides the pid-ns grandchild
+              fork) — under the redefined NS_NOMOUNT (which promises
+              a FRESH procfs) the honest cap is the policy-layer tier
+              (LANDLOCK_ONLY), or BARE on a Landlock-less kernel.
+              Caps may understate delivered isolation; they must
+              never overstate it.
+            * The Landlock-absent tolerance caps a MOUNTLESS spawn to
+              what the ported ns-only tier honestly promises
+              (_ported_ns_tier). The mount lane keeps MOUNT_NS — the
+              bind tree, not Landlock, is that tier's filesystem
+              enforcement.
+            """
+            cap: "_tiers.ContainmentTier | None" = None
+            if _skip_pid_ns:
+                cap = (_tiers.ContainmentTier.LANDLOCK_ONLY
+                       if check_landlock_available()
+                       else _tiers.ContainmentTier.BARE)
+            if _landlock_tolerated and without_mount:
+                ported = _ported_ns_tier()
+                cap = ported if cap is None else min(cap, ported)
+            return cap
+
         if _floor > _tiers.ContainmentTier.BARE:
             # Highest tier this call can INTEND on this host + shape.
             # Deliberately coarse — per-command demotions (B fallback,
@@ -2965,11 +3093,24 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 # actually routes the run) — they cache independently,
                 # and the subprocess fallback engages whenever the
                 # LATTER is false.
-                _intended = (_tiers.ContainmentTier.MOUNTLESS_NS
-                             if _skip_mount_ns
-                             else _tiers.ContainmentTier.MOUNT_NS)
+                if _skip_mount_ns:
+                    _intended = (_ported_ns_tier() if _landlock_tolerated
+                                 else _tiers.ContainmentTier.MOUNTLESS_NS)
+                else:
+                    _intended = _tiers.ContainmentTier.MOUNT_NS
+            elif ((block_network or use_mount or restrict_reads)
+                  and _mount_ns_avail()):
+                # Namespace-needing shape without the mount tier
+                # (no target/output, or the mount capability probe
+                # refused): the modern spawn backend serves it
+                # mountlessly — MOUNTLESS_NS with Landlock, the
+                # ported ns-only tier without it.
+                _intended = (_ported_ns_tier() if _landlock_tolerated
+                             else _tiers.ContainmentTier.MOUNTLESS_NS)
             elif block_network or use_mount or restrict_reads:
-                _intended = _tiers.ContainmentTier.NS_NOMOUNT
+                # uidmap helpers missing: no spawn backend at all —
+                # the plain subprocess lane is all this host offers.
+                _intended = _tiers.ContainmentTier.LANDLOCK_ONLY
             else:
                 _intended = _tiers.ContainmentTier.LANDLOCK_ONLY
             if _intended < _floor:
@@ -3030,21 +3171,61 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             if cap is not None and cap < delivered:
                 delivered = cap
             _tiers.assert_floor(
-                delivered, _floor, lane=lane, cause=cause, detail=detail,
+                delivered, _floor, lane=lane, cause=cause,
+                detail=detail,
                 remedy=remedy or _floor_remedy(),
                 setup_category=setup_category,
             )
+            if (_landlock_tolerated
+                    and _floor_source != _tiers.FLOOR_SOURCE_ENV
+                    and delivered <= _tiers.ContainmentTier.NS_NOMOUNT
+                    and (target or output or allowed_tcp_ports
+                         or restrict_reads or extra_writable_paths)
+                    and state.warn_once(
+                        "_tolerated_policy_unenforced_warned")):
+                # Trusted-floor tolerance bite: the call REQUESTED a
+                # filesystem/TCP policy, the kernel has no Landlock,
+                # and this lane has no mount tree — the policy is not
+                # enforced. The consented (env) case warns per call
+                # below; the trusted case must not be silent either
+                # (pre-port the spawn shapes aborted 'L' here).
+                logger.warning(
+                    "Sandbox: Landlock is unavailable on this kernel "
+                    "and this call runs on the %s lane without a "
+                    "mount tree — the requested filesystem/TCP "
+                    "policy (target/output/writable_paths/"
+                    "allowed_tcp_ports/restrict_reads) is NOT "
+                    "enforced for it. Upgrade to a kernel with "
+                    "Landlock (5.13+) to restore enforcement. "
+                    "(Warned once per process.)",
+                    lane,
+                )
             if (_floor_source == _tiers.FLOOR_SOURCE_ENV
                     and sys.platform == "linux"
                     and delivered <= _tiers.ContainmentTier.NS_NOMOUNT):
+                # Consented-degrade warning, per call. The exposure
+                # named must match what the admitted lane actually
+                # leaves open: the redefined ns-only tier keeps a
+                # fresh pid-ns procfs (its exposure is the missing
+                # Landlock policy layer); everything below it leaves
+                # the HOST process table itself visible.
+                if delivered >= _tiers.ContainmentTier.NS_NOMOUNT:
+                    _waived_exposure = (
+                        "WITHOUT Landlock filesystem/TCP policy "
+                        "enforcement (namespace containment and a "
+                        "fresh procfs still apply)")
+                else:
+                    _waived_exposure = (
+                        "with the HOST process table visible to the "
+                        "untrusted target")
                 logger.warning(
                     "sandbox: RAPTOR_ALLOW_DEGRADED_UNTRUSTED waives the "
                     "untrusted containment floor and %s — proceeding on "
-                    "the %s lane with the HOST process table visible to "
-                    "the untrusted target.",
+                    "the %s lane %s.",
                     detail or ("the mount-ns backend cannot engage for "
                                "this call"),
                     lane,
+                    _waived_exposure,
                 )
             _executed = executor()
             # Runtime dominance stamp: run()'s epilogue refuses any
@@ -3349,19 +3530,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 )
             kwargs["env"].setdefault("NX_DAEMON", "false")
 
-        # The pid1 shim requires _RAPTOR_TRUSTED to run.  Only inject on
-        # the unshare path (where the shim is used); the shim strips it
-        # before exec'ing the target so it never leaks. Copy-on-write:
-        # kwargs["env"] may still BE the caller's dict (the proxy /
-        # fake-home / degraded-net paths rebuild it, but only when
-        # those features are active) — mutating it in place would leak
-        # the trust marker into the caller's dictionary and from there
-        # into later non-sandbox subprocesses that must not carry it.
-        if (use_sandbox and not use_seatbelt
-                and (block_network or use_mount or restrict_reads)
-                and "_RAPTOR_TRUSTED" not in kwargs["env"]):
-            kwargs["env"] = {**kwargs["env"], "_RAPTOR_TRUSTED": "1"}
-
         # Target-bound env view — the ONE seam every direct-exec
         # backend (fork, seatbelt, Landlock-only subprocess) hands to
         # the child, and the named extension point for the sandbox
@@ -3375,10 +3543,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # fork backend. The keep-trust dispatch path (RAPTOR's own
         # claude -p skill children, which drive libexec helpers and
         # need both the markers and the session credential) is the
-        # ONLY exception, signalled by _RAPTOR_KEEP_TRUST_MARKERS.
-        # kwargs["env"] itself keeps the markers so the unshare+shim
-        # fallback (which needs one to pass the shim's own trust gate,
-        # and strips the set before the target exec) still works.
+        # ONLY exception, signalled by the sanctioned call kwarg.
         # The legacy strip_trust_markers kwarg is still accepted —
         # marker-stripping is now a subset of the default, and the
         # flag additionally drops RAPTOR_DIR on untrusted-target
@@ -3469,21 +3634,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             )
             return _mountless_call_writable, _env_for_target
 
-        def _shim_hop_env() -> dict:
-            # Env for the unshare/prlimit/pid1-shim BOOTSTRAP hops on
-            # the no-mount-ns fallback lane. Those processes' execve-
-            # time environ is readable by the target (host procfs is
-            # visible on that lane and the hops share the target's
-            # user namespace), so the pre-strip kwargs["env"] must
-            # never ride them — the session credential would be one
-            # /proc read away from any sandboxed payload. Hand the
-            # already-stripped target view plus the single constant
-            # the shim's trust gate requires (a public marker, not a
-            # secret). Dispatch runs keep the real markers because
-            # their _env_for_target retains them by contract.
-            if keep_trust_markers_for_dispatch:
-                return dict(_env_for_target)
-            return {**_env_for_target, "_RAPTOR_TRUSTED": "1"}
 
         # Force FD close at fork. Python defaults close_fds=True on POSIX
         # but we reject explicit overrides — inheriting FDs from RAPTOR
@@ -3705,32 +3855,35 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # expect the raise to gate their build steps).
         _check_requested = bool(kwargs.pop("check", False))
 
-        # `need_unshare` is computed BEFORE the preexec selection below
-        # because the two must agree: the ns-creation-blocking preexec
-        # variant is only safe when the command is NOT wrapped in the
-        # `unshare` CLI bootstrap (the filter would refuse the
-        # bootstrap's own unshare). See the block comment further down
-        # for what the predicate means.
+        # `need_unshare`: this call's policy wants NAMESPACE isolation
+        # (network block, mount tier, or a read restriction whose
+        # /proc-credential closure needs a pid-ns). The modern spawn
+        # backend is the only namespace lane — the legacy unshare-CLI
+        # chain is deleted — so the predicate now steers spawn
+        # eligibility (mountless mode when the mount tier isn't in
+        # play) and the per-call fallback rechecks, never a
+        # subprocess bootstrap.
         need_unshare = (use_sandbox
                         and not use_seatbelt
                         and (block_network or use_mount or restrict_reads))
 
-        # Always set resource limits via preexec_fn. The plain
-        # subprocess lane (no unshare bootstrap) takes the variant
-        # that additionally denies namespace creation — the payload
-        # execs directly under the filter there, and nothing it
-        # legitimately runs unshares; the unshare-wrapped lane keeps
-        # the permissive variant (its bootstrap must unshare, and the
-        # fork backend covers ns-blocking for the namespace lanes).
-        _lane_preexec = preexec if need_unshare else preexec_ns_blocked
+        # Always set resource limits via preexec_fn. Only the plain
+        # subprocess lane execs through it (the spawn backends run
+        # their own child-side chain), and its payload never
+        # legitimately unshares — so every subprocess-lane child gets
+        # the variant that additionally denies namespace creation
+        # (unshare/clone CLONE_NEW*, setns; clone3→ENOSYS). The
+        # legacy unshare-CLI lane was the one lane that could not
+        # take these rules (its bootstrap had to unshare under the
+        # filter); that documented residual died with the lane.
         existing_preexec = kwargs.pop("preexec_fn", None)
         if existing_preexec:
             def combined() -> None:
-                existing_preexec()  # Caller's setup first (may open FDs)
-                _lane_preexec()     # Our limits + Landlock last (restricts from here on)
+                existing_preexec()      # Caller's setup first (may open FDs)
+                preexec_ns_blocked()    # Our limits + Landlock last
             kwargs["preexec_fn"] = combined
         else:
-            kwargs["preexec_fn"] = _lane_preexec
+            kwargs["preexec_fn"] = preexec_ns_blocked
 
         # Missing-tool resolution check, BEFORE any lane dispatch. A
         # command that resolves NOWHERE — not on the caller's PATH, not
@@ -3773,47 +3926,41 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 raise FileNotFoundError(
                     errno.ENOENT, os.strerror(errno.ENOENT), _cmd0)
 
-        # Only use unshare when we need network / mount / PID isolation.
-        # Landlock filesystem isolation works without unshare, BUT in
-        # Landlock-only mode (no PID namespace) a compromised child
-        # running under the host pid-ns can read /proc/<host_pid>/environ
-        # for any same-UID host process — including the parent RAPTOR
-        # process's env, which is how ANTHROPIC_API_KEY / SSH credentials
-        # leak. Narrowing /proc in the read allowlist doesn't work
-        # (Landlock path_beneath binds to a specific inode, so
-        # subprocesses in the sandbox get their OWN /proc/<pid>/ inode
-        # denied, breaking ASAN/IFUNC/etc.). The fix is a PID namespace:
-        # the kernel enforces ns-level access to /proc/<pid>/ entries
-        # independently of the /proc mount, so host-ns pids are EACCES
-        # even though their dentries are visible through the shared
-        # /proc. Trigger an unshare whenever restrict_reads is on — PID
-        # ns + IPC ns + user ns, without network ns unless block_network
-        # is also set (the egress proxy needs the shared net ns to be
-        # reachable on loopback).
-        # `need_unshare` gates the Linux user-namespace bootstrap
-        # (`unshare` + `prlimit` + pid1 shim). On macOS, isolation
-        # comes from sandbox-exec / SBPL — there is no `unshare`
-        # binary to resolve, and the seatbelt path runs through
-        # _macos_spawn instead. Without the use_seatbelt veto, an
-        # ineligible-for-spawn macOS call (or even a fully eligible
-        # one, since the unshare_cmd is built unconditionally below)
-        # tries to resolve `unshare` and crashes the sandbox call.
-        # (Assigned above, before the preexec selection that must
-        # agree with it.)
+        # Namespace isolation is wanted whenever network / mount / read
+        # policy is in play. Landlock filesystem isolation works
+        # without namespaces, BUT in Landlock-only mode (no PID
+        # namespace) a compromised child running under the host pid-ns
+        # can read /proc/<host_pid>/environ for any same-UID host
+        # process — including the parent RAPTOR process's env, which
+        # is how ANTHROPIC_API_KEY / SSH credentials leak. Narrowing
+        # /proc in the read allowlist doesn't work (Landlock
+        # path_beneath binds to a specific inode, so subprocesses in
+        # the sandbox get their OWN /proc/<pid>/ inode denied,
+        # breaking ASAN/IFUNC/etc.). The fix is a PID namespace: the
+        # kernel enforces ns-level access to /proc/<pid>/ entries
+        # independently of the /proc mount. Trigger the namespace lane
+        # whenever restrict_reads is on — PID ns + IPC ns + user ns,
+        # without network ns unless block_network is also set (the
+        # egress proxy needs the shared net ns to be reachable on
+        # loopback). All namespace shapes run through the fork-based
+        # spawn backend (mount tree when target/output engage it,
+        # mountless otherwise); on macOS isolation comes from
+        # sandbox-exec / SBPL via _macos_spawn (use_seatbelt vetoes
+        # need_unshare above).
 
-        # Representative engagement gate. The availability probes that set
-        # `use_sandbox` test a NARROWER op (`unshare --user --net`) than the
-        # command below actually performs (`unshare --user --pid --fork
-        # --ipc [--net]`). On rootless podman / distrobox (nested userns)
-        # the narrow probe can pass while the full flag-set fails: the
-        # wrapper exits BEFORE exec, the target never runs, and the call
-        # would return empty output that a consumer reads as "0 findings".
-        # Verify the EXACT flag-set engages (cached per flag-set) and fail
-        # LOUD if it doesn't — RAPTOR does not silently downgrade; the
-        # operator picks `--sandbox network-only`/`none`. Covers the
-        # subprocess `unshare` path here AND the _spawn fork path (same
-        # userns/pidns/ipcns/netns kernel capability); the mount-ns layer
-        # is additionally gated by check_mount_available() upstream.
+        # Representative engagement gate. The availability probes that
+        # set `use_sandbox` test a NARROWER op (`unshare --user
+        # --net`) than the spawn backend's os.unshare flag set
+        # (user+pid+ipc[+net][+cgroup]+mount). On rootless podman /
+        # distrobox (nested userns) the narrow probe can pass while
+        # the full flag-set fails: the child dies BEFORE exec and the
+        # call would surface as a late setup failure. Verify the full
+        # flag-set engages (cached per flag-set, probed via the
+        # unshare CLI as a stand-in for the same kernel capability)
+        # and fail LOUD if it doesn't — RAPTOR does not silently
+        # downgrade; the operator picks `--sandbox network-only`/
+        # `none`. The mount-ns layer is additionally gated by
+        # check_mount_available() upstream.
         if need_unshare:
             from .errors import SandboxSetupError
             from .probes import (
@@ -3821,14 +3968,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 check_unshare_engages,
             )
             _engage_flags = ["--user", "--pid", "--fork", "--ipc"]
-            # Same inherit_netns gate as the real unshare command below:
-            # the probe must test the EXACT flag-set the run will use.
+            # Same inherit_netns gate as the spawn backend's ns_flags:
+            # the probe must test the flag-set the run will use.
             if block_network and not _inherit_netns:
                 _engage_flags.append("--net")
-            # --cgroup joins the real command below when the CLI
-            # supports it — the engagement probe must test the same
-            # flag-set, or a kernel/policy that refuses CLONE_NEWCGROUP
-            # slips past the gate and the wrapper exits pre-exec.
+            # CLONE_NEWCGROUP joins the spawn backend's flag set
+            # unconditionally; probe it when the CLI can express it —
+            # a kernel/policy that refuses CLONE_NEWCGROUP must not
+            # slip past the gate.
             from .probes import unshare_supports_cgroup
             if unshare_supports_cgroup():
                 _engage_flags.append("--cgroup")
@@ -3872,12 +4019,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             layers.append("tcp:deny-all")
         if seccomp_profile and check_seccomp_available():
             layers.append(f"seccomp:{seccomp_profile}")
-        # NPROC enforcement via prlimit wrapper, only meaningful when
-        # unshare creates a fresh user-ns (ns-UID nobody has 0 existing
-        # processes). Applied per-run() because need_unshare is per-call.
+        # NPROC enforcement (spawn grandchild setrlimit), only
+        # meaningful when the fresh user-ns makes the ns-UID's process
+        # count start at zero. Per-run() because need_unshare is
+        # per-call.
         nproc_limit = effective_limits.get("nproc", 0)
-        apply_nproc_wrapper = need_unshare and nproc_limit > 0
-        if apply_nproc_wrapper:
+        if need_unshare and nproc_limit > 0:
             layers.append(f"nproc:{nproc_limit}")
         layers.append("limits")
         # Sanitise cmd_display before it reaches any logger. cmd args
@@ -3892,136 +4039,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             " ".join(cmd[:_CMD_DISPLAY_MAX_ARGS]) or "<empty cmd>"
         )
         logger.debug("Sandbox (%s): %s", "+".join(layers), cmd_display)
-
-        if need_unshare:
-            # --pid --fork: new PID namespace hides host processes from
-            # kill()/ptrace (target PIDs don't exist in the child's ns).
-            # --fork is required because the child must be PID 1 in the
-            # new ns; the command itself runs as PID 1. (When use_mount
-            # is active we bypass this subprocess chain entirely and go
-            # through _spawn.run_sandboxed, which handles ns+pid setup
-            # via os.fork() + os.unshare directly.)
-            # --ipc: new SysV IPC namespace. Without this, a compromised
-            # sandboxed process shares the host's SysV shm/sem/msg-queue
-            # namespace with every other process on the machine — letting
-            # it DoS via IPC exhaustion or read same-UID apps' shm segments.
-            # Absolute paths for unshare and prlimit defeat PATH hijacking:
-            # a polluted PATH could otherwise shadow these with attacker
-            # binaries that run under our Landlock+seccomp but skip the
-            # actual unshare, leaving the child in the host's net/pid/ipc
-            # namespaces (= full outbound network).
-            from .probes import (
-                _resolve_sandbox_binary,
-                unshare_supports_cgroup,
-                unshare_supports_kill_child,
-            )
-            unshare_cmd = [_resolve_sandbox_binary("unshare"),
-                           "--user", "--fork", "--ipc"]
-            if not _skip_pid_ns:
-                unshare_cmd.append("--pid")
-            # inherit_netns (netns_coordinator paired-isolation runs):
-            # the caller already sits in the shared coordinator netns
-            # and the child must stay there to reach its peer's
-            # loopback listener. Appending --net here anyway gave the
-            # child a fresh EMPTY netns — the coordinator's listener
-            # became invisible and paired isolation silently reported
-            # listen_observed=false. Same gate as the fork lane
-            # (_spawn: `block_network and not inherit_netns`).
-            if block_network and not _inherit_netns:
-                unshare_cmd.append("--net")
-            # Fresh cgroup ns: /proc/self/cgroup reads "0::/" instead
-            # of the orchestrator's host cgroup path (a systemd session
-            # scope names the operator's uid + login session). Mirrors
-            # CLONE_NEWCGROUP on the fork-based spawn lane; gated on a
-            # cached capability probe like --kill-child.
-            if unshare_supports_cgroup():
-                unshare_cmd.append("--cgroup")
-            # Belt-and-braces orphan teardown: if `unshare` is killed
-            # directly (orchestrator still alive), --kill-child SIGKILLs the
-            # pid-1 shim → kernel cascades the pid-ns. The PRIMARY teardown
-            # (orchestrator hard-killed mid-run) is the death-pipe the shim
-            # watches; see the `need_unshare` block at the subprocess.run
-            # call. Gated on a cached capability probe (older util-linux
-            # lacks the flag) so we never feed `unshare` an unknown option.
-            if unshare_supports_kill_child():
-                unshare_cmd.append("--kill-child=SIGKILL")
-            # prlimit wrapper: sits INSIDE the unshare chain so
-            # RLIMIT_NPROC counts against the ns-local UID (nobody =
-            # zero existing processes). prlimit is part of util-linux
-            # (same package as unshare), so always available when
-            # unshare is. Bounds fork bombs to `nproc` total per sandbox.
-            prlimit_wrapper = (
-                [_resolve_sandbox_binary("prlimit"),
-                 f"--nproc={nproc_limit}", "--"]
-                if apply_nproc_wrapper else []
-            )
-            # Mount-ns runs through _spawn.run_sandboxed below (fork +
-            # newuidmap + ctypes mount ops + pivot_root + Landlock +
-            # seccomp + pid-ns) — not through this subprocess chain.
-            # full_cmd here is only used when mount-ns ISN'T active:
-            # either use_mount=False, or _spawn raised at runtime and
-            # we dropped mount-ns for the fallback. Either way,
-            # Landlock-only is the right construction.
-            if map_root:
-                unshare_cmd.append("--map-root-user")
-            # pid-1 shim: unshare --fork makes the forked child pid-1
-            # of the new pid-ns and that child execs whatever argv
-            # comes next. If we put the user's cmd there directly,
-            # the target IS pid-1 — and Linux's pid-ns policy drops
-            # signals sent to pid-1 via raise() / kill(self,...)
-            # without an installed handler (man pid_namespaces).
-            # Nested-ns setups (Docker-in-CI, systemd-nspawn) can
-            # also drop synchronous-exception signals to pid-1 in
-            # some kernel/util-linux combinations, breaking crash
-            # observability. Interpose libexec/raptor-pid1-shim so
-            # the TARGET runs as pid-3 (via a double-fork for setsid
-            # permission) and only the shim is pid-1; the shim reaps,
-            # forwards signals, and mirrors the target's exit via
-            # the 128+sig convention (the same pid-1 filter prevents
-            # the shim re-raising the signal on itself, so we exit
-            # with 128+WTERMSIG — observe._interpret_result decodes
-            # both rc<0 and 128+sig to the same crashed=True state).
-            from pathlib import Path as _Path
-            shim_path = str(
-                _Path(__file__).resolve().parents[2] / "libexec" / "raptor-pid1-shim"
-            )
-            # --netns-lo: ask the shim to bring lo up (best-effort).
-            # On this path the netns comes from the unshare CLI and the
-            # exec into the shim drops capabilities, so the bringup
-            # only succeeds when a uid mapping kept them (map_root) —
-            # see the shim's _ensure_loopback_up for why the unmapped
-            # case cannot be fixed without breaking the ns-nobody NPROC
-            # containment. The spawn path (core/sandbox/_spawn) brings
-            # lo up unconditionally; this flag is only passed when
-            # --net is in the chain (a nested netns would ADD isolation
-            # nobody asked for and break inherit_netns coordinator
-            # runs).
-            _shim_argv = [shim_path]
-            # Matches the --net gate above: on inherit_netns runs there
-            # is no fresh netns in the chain, lo is already up in the
-            # coordinator's namespace, and the comment above documents
-            # the flag as valid only when --net was added.
-            if block_network and not _inherit_netns:
-                _shim_argv.append("--netns-lo")
-            # Keep-trust decision travels OUT-OF-BAND (shim argv), not
-            # through the environment: the shim used to honour a
-            # _RAPTOR_KEEP_TRUST_MARKERS key from its inherited env,
-            # which any RAPTOR-side caller could (accidentally or via a
-            # poisoned env dict) carry in — preserving _RAPTOR_TRUSTED/
-            # CLAUDECODE for untrusted code. Only run() itself may make
-            # that call, keyed on the wrapper-level strip_trust_markers
-            # contract (run_untrusted_networked(keep_trust_markers=
-            # True) is the sole legitimate minting site).
-            # Untrusted-target contract: RAPTOR_DIR strip decision
-            # travels out-of-band like the keep decision — flag order
-            # matters (the shim parses --strip-raptor-dir first).
-            if strip_trust_markers and not keep_trust_markers_for_dispatch:
-                _shim_argv.append("--strip-raptor-dir")
-            if keep_trust_markers_for_dispatch:
-                _shim_argv.append("--keep-trust-markers")
-            full_cmd = unshare_cmd + ["--"] + prlimit_wrapper + _shim_argv + cmd
-        else:
-            full_cmd = cmd
 
         # Register this run with the proxy BEFORE the subprocess so every
         # tunnel event generated during the call is fanned into a per-run
@@ -4099,7 +4116,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # credential-bearing command lines). pass_fds remains the one
         # disqualifier (real multi-fd plumbing, no caller on the
         # untrusted contract).
-        if (sys.platform != "darwin" and use_mount
+        if (sys.platform != "darwin" and (use_mount or need_unshare)
                 and kwargs.get("input") is not None
                 and not kwargs.get("pass_fds")):
             # subprocess.run's own contract, enforced here because the
@@ -4149,7 +4166,13 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # child dup2s the fd before exec), and CPython closes the
             # unlinked spool at frame exit — no path ever exists for
             # any principal to race, and nothing leaks.
-        spawn_eligible = ((use_mount or use_seatbelt)
+        # need_unshare joins the eligibility predicate: with the
+        # unshare-CLI lane deleted, the fork-based spawn backend is
+        # the ONLY namespace lane, so every namespace-needing shape —
+        # including no-target/output block_network runs and
+        # restrict_reads on mount-incapable hosts — routes through it
+        # (mountlessly when the mount tier isn't in play).
+        spawn_eligible = ((use_mount or use_seatbelt or need_unshare)
                           and (_kwarg_plumb_native
                                or (not kwargs.get("pass_fds")
                                    and kwargs.get("input") is None)))
@@ -4481,24 +4504,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 for _tp in (tool_paths or []):
                     if _tp and _tp not in _mac_readable:
                         _mac_readable.append(_tp)
-                # The pid1-shim read grant exists for the Linux
-                # UNSHARE fallback lane only (Landlock must allow exec
-                # of the shim there) — the seatbelt lane never runs
-                # it. The mount-ns lane already filters the entry as
-                # "a pure framework/install-location tell"; here the
-                # leak is WORSE than a mount view: every readable path
-                # is embedded verbatim in the SBPL profile text, which
-                # rides `sandbox-exec -p` in the never-exec'd watcher
-                # shim's argv for the whole run. The hardened
-                # profiles' sysctl-read allowlist-deny closes the
-                # in-sandbox KERN_PROCARGS2 read of that argv; outside
-                # same-UID observers (plain `ps`) can still see it —
-                # unfixable while sandbox-exec takes `-p` — so the
-                # RAPTOR checkout path must simply never be in it.
-                _mac_readable = [
-                    _p for _p in _mac_readable
-                    if not _p.endswith("/libexec/raptor-pid1-shim")
-                ]
                 # Containment-floor contract, side 2: seatbelt is the
                 # platform's top tier — the check never refuses here,
                 # but every executor routes through the checked
@@ -4553,10 +4558,8 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     map_root=map_root,
                     start_new_session=_start_new_session,
                     # Keep-trust decision, out-of-band (watcher-shim
-                    # argv) exactly like the Linux pid1-shim lane's
-                    # --keep-trust-markers injection: only this
-                    # dispatch may mint it, keyed on the sanctioned
-                    # kwarg. Pre-fix the seatbelt dispatch never sent
+                    # argv): only this dispatch may mint it, keyed on
+                    # the sanctioned kwarg. Pre-fix the seatbelt dispatch never sent
                     # it, so run_untrusted_networked(
                     # keep_trust_markers=True) — RAPTOR's own claude -p
                     # skill-dispatch lane — delivered children on macOS
@@ -4662,18 +4665,6 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         for _tp in (tool_paths or []):
                             if _tp and _tp not in _readable_with_tools:
                                 _readable_with_tools.append(_tp)
-                        # The pid1-shim read grant exists for the
-                        # UNSHARE fallback lane only (Landlock must
-                        # allow exec of the shim there). The mount-ns
-                        # spawn lane never runs the shim, and binding
-                        # it would materialise the RAPTOR checkout
-                        # path (parent-directory skeleton included)
-                        # inside the target's mount view — a pure
-                        # framework/install-location tell.
-                        _readable_with_tools = [
-                            _p for _p in _readable_with_tools
-                            if not _p.endswith("/libexec/raptor-pid1-shim")
-                        ]
                         # Audit mode: thread audit_mode + audit_run_dir
                         # through to _spawn so the seccomp filter uses
                         # SCMP_ACT_TRACE and the tracer subprocess runs.
@@ -4788,7 +4779,20 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 inherit_netns=_inherit_netns,
                                 skip_pid_ns=_skip_pid_ns,
                                 skip_mount_ns=skip_mount,
-                                require_fresh_procfs=_require_fresh_procfs,
+                                # The ported ns-only mode hard-requires
+                                # the fresh procfs mount ('F' fail-
+                                # closed) whenever its declared tier
+                                # claims it — the caller's contract
+                                # flag stays authoritative everywhere
+                                # else.
+                                require_fresh_procfs=(
+                                    _require_fresh_procfs
+                                    or (skip_mount and _ported_hard_fresh)),
+                                # Floor-resolved, never caller-chosen:
+                                # Landlock ABSENCE is tolerated only
+                                # when the resolved floor admits the
+                                # ns-only tier (see _landlock_tolerated).
+                                landlock_required=not _landlock_tolerated,
                                 proxy_unix_socket=_proxy_unix_path if _use_proxy_netns else None,
                                 proxy_forwarder_port=_proxy_forwarder_port if _use_proxy_netns else None,
                                 extra_unix_bridges=(
@@ -4824,7 +4828,8 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             return identities
 
                         _spawn_without_mount = (
-                            _skip_mount_ns or _prefer_mountless_spawn)
+                            _skip_mount_ns or _prefer_mountless_spawn
+                            or not use_mount)
                         if (_prefer_mountless_spawn
                                 and _b_fallback_reason):
                             _mount_ns_degraded = _b_fallback_reason
@@ -4835,10 +4840,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         # untrusted floor — the B-fallback /
                         # speculative-cache / per-call skip_mount_ns
                         # routes refuse here with the route's own
-                        # remedy. skip_pid_ns keeps the HOST procfs on
-                        # both spawn lanes (the fresh-proc remount
-                        # rides the pid-ns grandchild fork) — it caps
-                        # the declared tier on both.
+                        # remedy. Per-call caps (_spawn_tier_cap):
+                        # skip_pid_ns keeps the HOST procfs on both
+                        # spawn lanes, and the Landlock-absent
+                        # tolerance bounds a mountless spawn at the
+                        # ported ns-only tier.
                         if _spawn_without_mount:
                             if (_b_fallback_reason
                                     and "previously failed mount-ns"
@@ -4857,12 +4863,22 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             else:
                                 _mountless_fix = _b_fallback_instr or ""
                             _spawn_lane = "mountless namespace backend"
+                            if not use_mount:
+                                _no_mount_why = (
+                                    "no target/output engages the "
+                                    "mount tier for this call"
+                                    if not (target or output or rootfs)
+                                    else "the mount-namespace "
+                                         "capability is unavailable "
+                                         "on this host")
+                            else:
+                                _no_mount_why = ("per-call "
+                                                 "skip_mount_ns=True "
+                                                 "bypasses the "
+                                                 "mount-ns backend")
                             _spawn_lane_kwargs: dict = {
                                 "detail": (_b_fallback_reason
-                                           or ("per-call "
-                                               "skip_mount_ns=True "
-                                               "bypasses the mount-ns "
-                                               "backend")),
+                                           or _no_mount_why),
                                 "remedy": _floor_remedy(_mountless_fix),
                                 "setup_category": (
                                     "X" if _prefer_mountless_spawn
@@ -4881,8 +4897,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 executor=lambda: _run_spawn_backend(
                                     skip_mount=_spawn_without_mount,
                                 ),
-                                cap=(_tiers.ContainmentTier.NS_NOMOUNT
-                                     if _skip_pid_ns else None),
+                                cap=_spawn_tier_cap(_spawn_without_mount),
                                 **_spawn_lane_kwargs,
                             )
                         finally:
@@ -5173,21 +5188,20 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 # below re-asserts at the executor.
                                 _mx_declared = _LANE_TIERS[
                                     "mountless namespace backend"]
-                                if (_skip_pid_ns
-                                        and _tiers.ContainmentTier
-                                        .NS_NOMOUNT < _mx_declared):
-                                    _mx_declared = (
-                                        _tiers.ContainmentTier
-                                        .NS_NOMOUNT)
+                                _mx_cap = _spawn_tier_cap(True)
+                                if (_mx_cap is not None
+                                        and _mx_cap < _mx_declared):
+                                    _mx_declared = _mx_cap
                                 _tiers.assert_floor(
                                     _mx_declared, _floor,
-                                    lane="mountless namespace backend",
+                                    lane=("mountless namespace "
+                                          "backend"),
                                     cause=_mx_cause,
                                     detail=(f"{_setup_status[0]}: "
                                             f"{_setup_status[1]}"),
                                     remedy=_floor_remedy(
-                                        "fix the bind-tree/tool-path "
-                                        "failure."),
+                                        "fix the bind-tree/"
+                                        "tool-path failure."),
                                     setup_category=_setup_status[0],
                                 )
                                 if (_grant_ids_before is not None
@@ -5229,9 +5243,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     "mountless namespace backend",
                                     executor=lambda: _run_spawn_backend(
                                         skip_mount=True),
-                                    cap=(_tiers.ContainmentTier
-                                         .NS_NOMOUNT
-                                         if _skip_pid_ns else None),
+                                    cap=_spawn_tier_cap(True),
                                     cause=_mx_cause,
                                     detail=(f"{_setup_status[0]}: "
                                             f"{_setup_status[1]}"),
@@ -5301,15 +5313,13 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         _errors.SandboxSetupError) as _spawn_err:
                     # _spawn raised mid-setup (uidmap uninstalled,
                     # kernel quirk, libc soname absent on minimal
-                    # containers, etc.). Fall back to
-                    # subprocess+preexec: the existing `full_cmd`
-                    # built above is already a Landlock-only
-                    # invocation (no --mount flags), so we don't
-                    # need to rebuild it — we just let the
-                    # `if not used_spawn` branch below run it. This
-                    # preserves --map-root-user if the caller
-                    # requested it (subprocess-level user-ns mapping
-                    # still works without mount-ns).
+                    # containers, etc.). Fall back to the plain
+                    # subprocess+preexec lane via the `if not
+                    # used_spawn` branch below — with the unshare-CLI
+                    # chain deleted there is no namespace fallback:
+                    # the per-call rechecks there (Landlock, network
+                    # block) and the floor dispatch decide whether the
+                    # demoted call may run at all.
                     # OSError covers ctypes.CDLL failures on exotic
                     # libc layouts (musl, minimal busybox images);
                     # FileNotFoundError is a subclass but we list
@@ -5532,30 +5542,10 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             "accept an unconfined run. RAPTOR will not "
                             "silently downgrade for you.",
                         )
-                    if restrict_reads and not exclude_tmp_baseline:
-                        _demoted_call_writable, _demoted_env = (
-                            _mountless_write_policy()
-                        )
-                        _dem_preexec = _make_preexec_fn(
-                            effective_limits,
-                            writable_paths=_demoted_call_writable,
-                            allowed_tcp_ports=allowed_tcp_ports,
-                            seccomp_profile=seccomp_profile,
-                            seccomp_block_udp=seccomp_block_udp,
-                            readable_paths=_preexec_readable,
-                            deny_all_tcp_connect=_degraded_tcp_deny,
-                            host_nproc_cap=_host_nproc_cap,
-                            reaper_cell=_reaper_cell,
-                        )
-                        if existing_preexec:
-                            def _dem_combined(_ep=existing_preexec,
-                                              _np=_dem_preexec):
-                                _ep()
-                                _np()
-                            kwargs["preexec_fn"] = _dem_combined
-                        else:
-                            kwargs["preexec_fn"] = _dem_preexec
-                        kwargs["env"] = dict(_demoted_env)
+                # (The private-scratch write-policy recompute and the
+                # per-call preexec rebuild moved BELOW the floor
+                # assert: a refused call must not mint scratch dirs
+                # or rebuild grants for a dispatch that never runs.)
                 # Containment-floor contract, side 2: shared demotion
                 # context for the fallback-lane dispatch checks below.
                 # _spawn_ladder_err carries the mid-setup backend
@@ -5598,7 +5588,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         "the floor can be met.")
                 else:
                     _fallback_floor_remedy = _floor_remedy(
-                        "these lanes expose the host-pid /proc to the "
+                        "this lane exposes the host-pid /proc to the "
                         "target; fix the demotion cause (see the sandbox "
                         "log for the spawn failure; typical hosts need the "
                         "uidmap package and the userns sysctl)."
@@ -5611,16 +5601,19 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     _tiers.ContainmentTier.BARE
                     if (effectively_disabled or not landlock_available)
                     else None)
-                # Refuse the fallback lanes BEFORE any audit machinery
+                # Refuse the fallback lane BEFORE any audit machinery
                 # runs: a refused call must not write audit-degraded
                 # markers or trade its floor refusal for an
                 # audit_required one. The checked dispatches below
                 # remain the hard per-executor guarantee; this early
-                # assert only fixes refusal PRIORITY.
-                _fallback_lane = ("unshare-CLI subprocess" if need_unshare
-                                  else "Landlock-only subprocess")
+                # assert only fixes refusal PRIORITY. The plain
+                # subprocess lane is the ONLY fallback — the
+                # unshare-CLI namespace fallback is deleted; namespace
+                # shapes that cannot spawn land here and the floor
+                # decides admission.
+                _fallback_lane = "Landlock-only subprocess"
                 _fallback_delivered = _LANE_TIERS[_fallback_lane]
-                if (not need_unshare and _plain_lane_cap is not None
+                if (_plain_lane_cap is not None
                         and _plain_lane_cap < _fallback_delivered):
                     _fallback_delivered = _plain_lane_cap
                 _tiers.assert_floor(
@@ -5629,6 +5622,111 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     detail=_fallback_floor_detail,
                     remedy=_fallback_floor_remedy,
                 )
+                # Per-call network-block recheck. Construction
+                # resolved block_network to the NAMESPACE tier for
+                # this call (need_unshare), so the construction-time
+                # degraded-net-deny arm never evaluated — and this
+                # demoted call is about to execute on the plain lane
+                # with NO network namespace. (The deleted unshare-CLI
+                # fallback used to keep a netns for these demotions.)
+                # Mirror the construction arm per call, same
+                # precedence, same acceptance levers: Landlock ABI
+                # v4+ TCP-connect deny (loud), else the operator's
+                # degraded acceptance env (loud), else refuse.
+                # degraded_net_deny=False is the caller's per-call
+                # "this run may egress" opt-out, honoured exactly as
+                # at construction. allowed_tcp_ports is excluded from
+                # the deny-all lane for the same reason as at
+                # construction (the allowlist IS the network policy).
+                _demoted_net_deny = False
+                if (sys.platform == "linux" and not effectively_disabled
+                        and need_unshare and block_network
+                        and degraded_net_deny):
+                    if (landlock_available and _get_landlock_abi() >= 4
+                            and not allowed_tcp_ports):
+                        _demoted_net_deny = True
+                        if state.warn_once("_demoted_tcp_deny_warned"):
+                            logger.warning(
+                                "Sandbox: block_network requested but "
+                                "this call was demoted from the "
+                                "namespace backend — falling back to "
+                                "Landlock TCP-connect deny for this "
+                                "call (all TCP connects fail with "
+                                "EACCES, including loopback; "
+                                "bind/listen and UDP are unaffected).",
+                            )
+                    elif not untrusted_fresh_procfs_required():
+                        if state.warn_once(
+                                "_demoted_net_open_override_warned"):
+                            logger.warning(
+                                "Sandbox: block_network requested but "
+                                "this call was demoted from the "
+                                "namespace backend and Landlock ABI "
+                                "v4+ is missing — "
+                                "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 "
+                                "accepts running with NETWORK "
+                                "UNRESTRICTED for such calls.",
+                            )
+                    else:
+                        from .errors import SandboxSetupError
+                        from .probes import ENGAGE_FAIL_INSTRUCTIONS
+                        _demote_net_why = (_fallback_floor_detail
+                                           or "spawn backend unavailable")
+                        raise SandboxSetupError(
+                            "Sandbox: block_network=True was requested "
+                            "but this call was demoted from the "
+                            f"namespace backend ({_demote_net_why}) "
+                            "and Landlock ABI v4+ is missing — no "
+                            "layer can enforce the requested network "
+                            "block for this call.",
+                            ENGAGE_FAIL_INSTRUCTIONS + " Alternatively "
+                            "pass degraded_net_deny=False (library "
+                            "callers) to accept an unrestricted-network "
+                            "run per call, or set "
+                            "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 to "
+                            "accept the degraded tier host-wide.",
+                        )
+                # Private-scratch write-policy recompute for demoted
+                # restrict_reads calls (the construction grants
+                # assumed the mount backend's per-sandbox tmpfs), and
+                # the per-call preexec rebuild that carries it and/or
+                # the per-call TCP deny. The rebuild keeps the
+                # namespace-creation deny rules — the plain lane's
+                # payload never legitimately unshares.
+                if (use_mount and rootfs is None
+                        and sys.platform == "linux"
+                        and not effectively_disabled
+                        and restrict_reads and not exclude_tmp_baseline):
+                    _demoted_call_writable, _demoted_env = (
+                        _mountless_write_policy()
+                    )
+                    kwargs["env"] = dict(_demoted_env)
+                if (_demoted_call_writable is not None
+                        or _demoted_net_deny):
+                    _dem_preexec = _make_preexec_fn(
+                        effective_limits,
+                        writable_paths=(
+                            _demoted_call_writable
+                            if _demoted_call_writable is not None
+                            else writable_paths),
+                        allowed_tcp_ports=allowed_tcp_ports,
+                        seccomp_profile=seccomp_profile,
+                        seccomp_block_udp=seccomp_block_udp,
+                        readable_paths=_preexec_readable,
+                        deny_all_tcp_connect=(_degraded_tcp_deny
+                                              or _demoted_net_deny),
+                        host_nproc_cap=_host_nproc_cap,
+                        reaper_cell=_reaper_cell,
+                        seccomp_block_ns_creation=True,
+                    )
+                    if existing_preexec:
+                        def _dem_combined(_ep=existing_preexec,
+                                          _np=_dem_preexec):
+                            _ep()
+                            _np()
+                        kwargs["preexec_fn"] = _dem_combined
+                    else:
+                        kwargs["preexec_fn"] = _dem_preexec
                 if _exec_pid_callback is not None:
                     logger.debug(
                         "Sandbox: exec_pid_callback supplied but this "
@@ -5715,35 +5813,49 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 # carries it, and dropping it here
                                 # silently restored outbound network
                                 # exactly when block_network had
-                                # downgraded to Landlock-only.
-                                deny_all_tcp_connect=_degraded_tcp_deny,
+                                # downgraded to Landlock-only. The
+                                # PER-CALL demoted deny rides along
+                                # for the same reason — the audit
+                                # branch builds its own preexecs, so
+                                # omitting it here let an audit-mode
+                                # demoted block_network call connect
+                                # freely while the demotion warning
+                                # claimed EACCES.
+                                deny_all_tcp_connect=(
+                                    _degraded_tcp_deny
+                                    or _demoted_net_deny),
                             )
                             _sc_preexec = _la_make_seccomp(
                                 seccomp_profile,
                                 block_udp=seccomp_block_udp,
                                 audit_mode=True,
                                 observe_mode=bool(observe and nonlocal_audit_mode),
+                                # The audit fallback executes the BARE
+                                # target (the unshare-CLI bootstrap
+                                # that once forced the permissive
+                                # filter is deleted) — the payload
+                                # never legitimately unshares, so the
+                                # namespace-creation deny applies here
+                                # exactly as on the plain lane.
+                                block_ns_creation=True,
                             ) if seccomp_profile else None
                             _audit_run_dir_la = (
                                 audit_run_dir or output
                             )
                             # Containment-floor contract, side 2: the
                             # Landlock-only audit helper executes the
-                            # same full_cmd as the plain dispatches
-                            # below (tracer is observability, not
+                            # same cmd as the plain dispatches below
+                            # (tracer is observability, not
                             # containment — same tier as its lane).
                             try:
                                 result = _dispatch_floor_check(
-                                    "unshare-CLI subprocess"
-                                    if need_unshare
-                                    else "Landlock-only subprocess",
-                                    cap=(None if need_unshare
-                                         else _plain_lane_cap),
+                                    "Landlock-only subprocess",
+                                    cap=_plain_lane_cap,
                                     cause=_spawn_ladder_err,
                                     detail=_fallback_floor_detail,
                                     remedy=_fallback_floor_remedy,
                                     executor=lambda: _la.run_landlock_audit(
-                                    full_cmd,
+                                    cmd,
                                     audit_run_dir=str(_audit_run_dir_la),
                                     audit_verbose=audit_verbose_active,
                                     observe_mode=bool(observe and nonlocal_audit_mode),
@@ -5767,29 +5879,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     landlock_preexec=_ll_preexec,
                                     seccomp_preexec=_sc_preexec,
                                     rlimit_preexec=_rlimit_only,
-                                    # full_cmd carries the pid1 shim
-                                    # when need_unshare — the shim
-                                    # needs the trust marker and
-                                    # strips it before the target
-                                    # exec. Loader vars (LD_*/DYLD_*)
-                                    # are quarantined so they load
-                                    # into the TARGET, never into the
-                                    # unshare/prlimit/shim bootstrap
-                                    # (see _env_quarantine). Without
-                                    # the shim the env goes straight
-                                    # to the target, so hand it the
-                                    # stripped view.
-                                    env=(_quarantine_loader_env(
-                                            _shim_hop_env())
-                                         if need_unshare
-                                         else _env_for_target),
-                                    # Orphan-teardown parity with the
-                                    # non-audit need_unshare branch
-                                    # below: when full_cmd carries the
-                                    # pid1 shim, plumb the death pipe
-                                    # so a hard-killed orchestrator
-                                    # still cascades the pid-ns down.
-                                    install_death_fd=need_unshare,
+                                    # cmd IS the target on this lane
+                                    # (no bootstrap hops — the
+                                    # unshare/prlimit/pid1-shim chain
+                                    # is deleted), so it gets the
+                                    # stripped target view directly.
+                                    env=_env_for_target,
                                     cwd=kwargs.get("cwd"),
                                     timeout=kwargs.get("timeout"),
                                     capture_output=kwargs.get(
@@ -5919,191 +6014,106 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                    "to accept marker-recorded "
                                    "degradation.",
                             )
-                    if need_unshare:
-                        # Containment-floor contract, side 2: the
-                        # unshare-CLI lane (namespaces via the CLI
-                        # chain, host procfs visible) — the mid-setup
-                        # spawn-exception ladder, the kwarg demotions,
-                        # and the achievability rerouting all land
-                        # here, with the original failure chained at
-                        # the checked dispatch below.
-                        # Orphan-teardown: the shim (pid-1 of the new pid-ns)
-                        # would otherwise outlive an ORCHESTRATOR that is
-                        # hard-killed (SIGKILL/OOM/crash) mid-run — the
-                        # blocking subprocess.run can't run cleanup, the
-                        # `unshare` intermediate reparents to init, and the
-                        # ns leaks. Hand the shim the READ end of a liveness
-                        # pipe; we hold the WRITE end here for exactly this
-                        # call. If this process dies, the write end closes →
-                        # the shim reads EOF → it exits → the kernel cascade-
-                        # SIGKILLs the whole pid-ns. The fd is a one-bit
-                        # liveness signal (nothing is written); write end is
-                        # CLOEXEC (os.pipe default) so no child inherits it,
-                        # read end is passed only to the shim via pass_fds
-                        # and the shim CLOEXEC's it away from the target.
+                    # Containment-floor contract, side 2: the
+                    # plain-subprocess lane (Landlock + seccomp +
+                    # rlimits, host namespaces; rlimits only under
+                    # the operator disable or on a Landlock-less
+                    # kernel) — both executor shapes below route
+                    # through the checked dispatch.
+                    # No shim, no pid namespace on this path —
+                    # teardown containment comes from the preexec
+                    # sweeper (reaper cell) plus a parent-side
+                    # marked-process sweep. The env marker is a
+                    # per-run random token every descendant
+                    # inherits; after the run (normal return,
+                    # timeout, or exception) any /proc process
+                    # still carrying it is SIGKILLed — the
+                    # backstop for the paths that kill the sweeper
+                    # itself (subprocess timeout kills Popen.pid,
+                    # which IS the sweeper).
+                    _reap_token = None
+                    _death_r = _death_w = None
+                    _penv = _env_for_target
+                    if not effectively_disabled:
+                        import uuid as _uuid
+                        _reap_token = _uuid.uuid4().hex
+                        _penv = dict(_env_for_target)
+                        _penv["_SBX_RUN_ID"] = _reap_token
+                    if _reaper_cell is not None:
                         _death_r, _death_w = os.pipe()
-                        try:
-                            _dk = dict(kwargs)
-                            _dk["start_new_session"] = _start_new_session
-                            _dk["pass_fds"] = (
-                                tuple(_dk.get("pass_fds") or ()) + (_death_r,)
+                        # Thread-local slot — see the cell's
+                        # construction comment for why this must
+                        # not be a plain shared key.
+                        _reaper_cell["death_local"].fd = _death_r
+                    _death_w_holder = [_death_w]
+                    try:
+                        # cmd IS the target (no bootstrap wrapper on
+                        # this lane), so it gets the marker-stripped
+                        # env view.
+                        _pk = dict(kwargs)
+                        _pk["env"] = _penv
+                        if (
+                            _reaper_cell is not None
+                            and _death_w is not None
+                            and _pk.get("timeout")
+                        ):
+                            # Teardown-first timeout: a plain
+                            # subprocess.run timeout SIGKILLs
+                            # Popen.pid, which on this path IS the
+                            # subreaper sweeper — the sweep dies
+                            # before it can run and containment
+                            # falls back to the (scrub-able)
+                            # marker backstop. Close the death
+                            # pipe FIRST so the sweeper reaps its
+                            # subtree and exits on its own; only
+                            # then kill.
+                            result = _dispatch_floor_check(
+                                "Landlock-only subprocess",
+                                cap=_plain_lane_cap,
+                                cause=_spawn_ladder_err,
+                                detail=_fallback_floor_detail,
+                                remedy=_fallback_floor_remedy,
+                                executor=lambda:
+                                    _run_teardown_first_timeout(
+                                        cmd, _pk,
+                                        _death_w_holder,
+                                        _start_new_session,
+                                    ),
                             )
-                            # kwargs["env"] is ALWAYS populated by the
-                            # env staging at the top of run() (None is
-                            # replaced with get_safe_env()). The old
-                            # `else os.environ` fallback here was a
-                            # latent fail-open: dead code today, but a
-                            # future refactor of the staging would have
-                            # silently handed the sandboxed child the
-                            # full unsanitised parent environment.
-                            # Fail loudly instead.
-                            _denv_base = _dk.get("env")
-                            if _denv_base is None:
-                                msg_0 = (
-                                    "sandbox run(): env staging "
-                                    "invariant violated — kwargs['env'] "
-                                    "unset at the death-pipe spawn "
-                                    "path; refusing to fall back to "
-                                    "os.environ for a sandboxed child."
-                                )
-                                raise RuntimeError(msg_0)
-                            # Launcher-bound env: quarantine loader
-                            # vars so LD_*/DYLD_* apply to the target
-                            # (the shim re-injects them at exec), not
-                            # to the unshare/prlimit/shim bootstrap.
-                            # _denv_base only feeds the invariant
-                            # check above; the hop env itself is the
-                            # minimal shim view (see _shim_hop_env —
-                            # the hops' environ is target-readable on
-                            # this lane).
-                            _denv = _quarantine_loader_env(_shim_hop_env())
-                            _denv["_RAPTOR_DEATH_FD"] = str(_death_r)
-                            _dk["env"] = _denv
-                            try:
-                                result = _dispatch_floor_check(
-                                    "unshare-CLI subprocess",
-                                    cause=_spawn_ladder_err,
-                                    detail=_fallback_floor_detail,
-                                    remedy=_fallback_floor_remedy,
-                                    executor=lambda: subprocess.run(
-                                        full_cmd, **_dk, check=False),
-                                )
-                            except OSError as _ebadf:
-                                if _ebadf.errno != errno.EBADF:
-                                    raise
-                                result = subprocess.CompletedProcess(
-                                    full_cmd, returncode=-9,
-                                )
-                                # Synthetic result for an executor that
-                                # died post-check — the floor was
-                                # asserted before it ran.
-                                result._floor_checked = True  # type: ignore[attr-defined]
-                        finally:
-                            for _dfd in (_death_r, _death_w):
+                        else:
+                            result = _dispatch_floor_check(
+                                "Landlock-only subprocess",
+                                cap=_plain_lane_cap,
+                                cause=_spawn_ladder_err,
+                                detail=_fallback_floor_detail,
+                                remedy=_fallback_floor_remedy,
+                                executor=lambda: subprocess.run(
+                                    cmd,
+                                    start_new_session=(
+                                        _start_new_session),
+                                    **_pk,
+                                    check=False,
+                                ),
+                            )
+                    except OSError as _ebadf:
+                        if _ebadf.errno != errno.EBADF:
+                            raise
+                        result = subprocess.CompletedProcess(
+                            cmd, returncode=-9,
+                        )
+                        # Post-check executor death — see above.
+                        result._floor_checked = True  # type: ignore[attr-defined]
+                    finally:
+                        if _reaper_cell is not None:
+                            _reaper_cell["death_local"].fd = None
+                        for _dfd in (_death_w_holder[0], _death_r):
+                            if _dfd is not None:
                                 try:
                                     os.close(_dfd)
                                 except OSError:
                                     pass
-                    else:
-                        # Containment-floor contract, side 2: the
-                        # plain-subprocess lane (Landlock + seccomp +
-                        # rlimits, host namespaces; rlimits only under
-                        # the operator disable or on a Landlock-less
-                        # kernel) — both executor shapes below route
-                        # through the checked dispatch.
-                        # No shim, no pid namespace on this path —
-                        # teardown containment comes from the preexec
-                        # sweeper (reaper cell) plus a parent-side
-                        # marked-process sweep. The env marker is a
-                        # per-run random token every descendant
-                        # inherits; after the run (normal return,
-                        # timeout, or exception) any /proc process
-                        # still carrying it is SIGKILLed — the
-                        # backstop for the paths that kill the sweeper
-                        # itself (subprocess timeout kills Popen.pid,
-                        # which IS the sweeper).
-                        _reap_token = None
-                        _death_r = _death_w = None
-                        _penv = _env_for_target
-                        if not effectively_disabled:
-                            import uuid as _uuid
-                            _reap_token = _uuid.uuid4().hex
-                            _penv = dict(_env_for_target)
-                            _penv["_SBX_RUN_ID"] = _reap_token
-                        if _reaper_cell is not None:
-                            _death_r, _death_w = os.pipe()
-                            # Thread-local slot — see the cell's
-                            # construction comment for why this must
-                            # not be a plain shared key.
-                            _reaper_cell["death_local"].fd = _death_r
-                        _death_w_holder = [_death_w]
-                        try:
-                            # full_cmd IS the target, so it gets the
-                            # marker-stripped env view.
-                            _pk = dict(kwargs)
-                            _pk["env"] = _penv
-                            if (
-                                _reaper_cell is not None
-                                and _death_w is not None
-                                and _pk.get("timeout")
-                            ):
-                                # Teardown-first timeout: a plain
-                                # subprocess.run timeout SIGKILLs
-                                # Popen.pid, which on this path IS the
-                                # subreaper sweeper — the sweep dies
-                                # before it can run and containment
-                                # falls back to the (scrub-able)
-                                # marker backstop. Close the death
-                                # pipe FIRST so the sweeper reaps its
-                                # subtree and exits on its own; only
-                                # then kill.
-                                result = _dispatch_floor_check(
-                                    "Landlock-only subprocess",
-                                    cap=_plain_lane_cap,
-                                    cause=_spawn_ladder_err,
-                                    detail=_fallback_floor_detail,
-                                    remedy=_fallback_floor_remedy,
-                                    executor=lambda:
-                                        _run_teardown_first_timeout(
-                                            full_cmd, _pk,
-                                            _death_w_holder,
-                                            _start_new_session,
-                                        ),
-                                )
-                            else:
-                                result = _dispatch_floor_check(
-                                    "Landlock-only subprocess",
-                                    cap=_plain_lane_cap,
-                                    cause=_spawn_ladder_err,
-                                    detail=_fallback_floor_detail,
-                                    remedy=_fallback_floor_remedy,
-                                    executor=lambda: subprocess.run(
-                                        full_cmd,
-                                        start_new_session=(
-                                            _start_new_session),
-                                        **_pk,
-                                        check=False,
-                                    ),
-                                )
-                        except OSError as _ebadf:
-                            if _ebadf.errno != errno.EBADF:
-                                raise
-                            result = subprocess.CompletedProcess(
-                                full_cmd, returncode=-9,
-                            )
-                            # Post-check executor death — see above.
-                            result._floor_checked = True  # type: ignore[attr-defined]
-                        finally:
-                            if _reaper_cell is not None:
-                                _reaper_cell["death_local"].fd = None
-                            for _dfd in (_death_w_holder[0], _death_r):
-                                if _dfd is not None:
-                                    try:
-                                        os.close(_dfd)
-                                    except OSError:
-                                        pass
-                            if _reap_token is not None:
-                                _sweep_marked_processes(_reap_token)
+                        if _reap_token is not None:
+                            _sweep_marked_processes(_reap_token)
         finally:
             events = (
                 proxy_instance.unregister_sandbox(proxy_token)
@@ -6151,32 +6161,47 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         )
         if (used_spawn
                 and _spawn_without_mount):
-            result.sandbox_info["backend"] = "landlock-pidns"
-            if _require_fresh_procfs:
+            # Backend vocabulary: "landlock-pidns" when the Landlock
+            # policy layer engaged (the historical mountless posture),
+            # "pidns-nomount" when the floor-consented Landlock-absent
+            # mode ran without it (the ported ns-only lane).
+            result.sandbox_info["backend"] = (
+                "landlock-pidns" if landlock_available
+                else "pidns-nomount")
+            if _require_fresh_procfs or _ported_hard_fresh:
+                # Stamped when the fresh procfs mount was ENFORCED
+                # ('F' fail-closed): the caller's contract flag, or
+                # the ported ns-only lane's own tier promise.
                 result.sandbox_info["fresh_procfs"] = True
         # Containment-tier posture: the tier this call actually
         # DELIVERED, the floor in force, and where the floor came
         # from. Always stamped — the canonical answer to "what
         # contained this run" (mount_ns_active/backend stay for
         # compatibility). Mirrors the dispatch tags exactly,
-        # including the per-call caps: a skip_pid_ns run keeps the
-        # HOST procfs on both spawn lanes (the fresh-proc remount
-        # rides the pid-ns grandchild fork), so its posture is capped
-        # at ns-only — stamping the lane's nominal tier would tell
-        # forensic readers the run had a procfs isolation it did not
-        # have.
+        # including the per-call caps (_spawn_tier_cap): a skip_pid_ns
+        # run keeps the HOST procfs on both spawn lanes (the
+        # fresh-proc remount rides the pid-ns grandchild fork), so
+        # its posture is capped at the policy-layer tier — under the
+        # redefined ns-only tier (which PROMISES a fresh procfs),
+        # stamping ns-only would tell forensic readers the run had a
+        # procfs isolation it did not have. The Landlock-absent
+        # tolerance stamps a mountless run at the ported ns-only
+        # tier (or lower, per the same cap the dispatch asserted).
         if effectively_disabled:
             _delivered_tier = _tiers.ContainmentTier.BARE
         elif used_spawn and use_seatbelt:
             _delivered_tier = _tiers.ContainmentTier.SEATBELT
         elif used_spawn and _skip_pid_ns and sys.platform == "linux":
-            _delivered_tier = _tiers.ContainmentTier.NS_NOMOUNT
+            _delivered_tier = (
+                _tiers.ContainmentTier.LANDLOCK_ONLY
+                if landlock_available
+                else _tiers.ContainmentTier.BARE)
         elif used_spawn and not _spawn_without_mount:
             _delivered_tier = _tiers.ContainmentTier.MOUNT_NS
+        elif used_spawn and _landlock_tolerated:
+            _delivered_tier = _ported_ns_tier()
         elif used_spawn:
             _delivered_tier = _tiers.ContainmentTier.MOUNTLESS_NS
-        elif need_unshare:
-            _delivered_tier = _tiers.ContainmentTier.NS_NOMOUNT
         elif sys.platform == "linux" and landlock_available:
             _delivered_tier = _tiers.ContainmentTier.LANDLOCK_ONLY
         else:
@@ -6205,7 +6230,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # failure aborts the run before any result exists), so a
         # divergent probe verdict must not mislabel it degraded.
         if (used_spawn and not _skip_pid_ns
-                and not _require_fresh_procfs
+                and not (_require_fresh_procfs or _ported_hard_fresh)
                 and sys.platform == "linux"):
             from .probes import check_pidns_fresh_proc_available
             if not check_pidns_fresh_proc_available():
@@ -6226,8 +6251,24 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         _seatbelt_audit_observe_only = bool(
             used_spawn and use_seatbelt and nonlocal_audit_mode
             and restrict_reads)
+        # Landlock-less honesty (Linux): a requested read restriction
+        # is DELIVERED only by the mount tree (visibility — unbound
+        # paths do not exist in the pivoted view) or by Landlock's
+        # read allowlist. When the run executed without either — the
+        # ported ns-only lane, or a trusted demotion to the plain
+        # lane on a Landlock-less kernel — nothing enforced it, and
+        # stamping the REQUEST would both self-contradict the tier
+        # stamp and defeat the telemetry-key forgery demotion
+        # (mac_key_hidden would claim a key the child could read was
+        # hidden). Same honesty rule the seatbelt audit tier applies.
+        _reads_unenforced_no_landlock = bool(
+            sys.platform == "linux" and restrict_reads
+            and not effectively_disabled
+            and not landlock_available
+            and not result.sandbox_info["mount_ns_active"])
         _reads_enforced = bool(
-            restrict_reads and not _seatbelt_audit_observe_only)
+            restrict_reads and not _seatbelt_audit_observe_only
+            and not _reads_unenforced_no_landlock)
         _posture_dir = audit_run_dir or output
         if _posture_dir and not effectively_disabled:
             try:
@@ -6258,12 +6299,20 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         if _seatbelt_audit_observe_only:
             result.sandbox_info[  # type: ignore[attr-defined]
                 "read_enforcement"] = "observe-only"
+        elif _reads_unenforced_no_landlock:
+            # Requested but nothing could enforce it (Landlock-less
+            # kernel, no mount tree) — distinct marker so forensic
+            # readers can tell "no read wall requested" from
+            # "requested, unenforceable, consented".
+            result.sandbox_info[  # type: ignore[attr-defined]
+                "read_enforcement"] = "unenforced"
         if _private_scratch_dir or _mountless_private_scratch:
             # Restricted host-visible posture: the host-shared /tmp and
             # /dev/shm grants were replaced by a 0700 TMPDIR-steered scratch
             # directory, whether namespaces remain active or not.
             result.sandbox_info["private_scratch"] = True
-        if _reaper_cell is not None and not _audit_landlock_engaged:
+        if (_reaper_cell is not None and not used_spawn
+                and not _audit_landlock_engaged):
             # No-namespace posture: teardown containment came from the
             # subreaper sweeper + marked-process backstop rather than
             # a pid-namespace cascade. The audit-engaged exclusion
@@ -6271,7 +6320,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # payload with a reaper-less rlimit preexec (no
             # _reaper_split, no sweeper, no marker backstop) —
             # teardown containment there is the tracer's
-            # PTRACE_O_EXITKILL, so neither sweep stamp applies.
+            # PTRACE_O_EXITKILL, so neither sweep stamp applies. The
+            # used_spawn exclusion is load-bearing since the reaper
+            # cell became unconditional: a spawn-lane run's teardown
+            # is the pid-ns cascade, and its preexec (where the
+            # sweeper forks) never runs.
             _sweep_info = result.sandbox_info
             _sweep_info["teardown_sweep"] = True
             # Sweeper-killability gap (kernel limitation, stamped
@@ -7573,12 +7626,10 @@ def run_untrusted_networked(
         kwargs["stdin"] = subprocess.DEVNULL
     kwargs["start_new_session"] = True
     if keep_trust_markers:
-        # The unshare fallback routes the env through the pid1 shim,
-        # which strips both markers unconditionally before exec'ing
-        # the target; the keep flag tells it this child is RAPTOR's
-        # own trusted dispatch. The flag itself never reaches the
-        # child (the shim pops it; the direct paths receive an env
-        # where it is inert and allowlist-stripped one hop later).
+        # Tells run()'s target-env staging that this child is
+        # RAPTOR's own trusted dispatch — every lane execs the target
+        # directly, and the sanctioned kwarg is the only way the
+        # markers survive the default strip.
         base_env = kwargs.get("env")
         if base_env is None:
             from core.config import RaptorConfig

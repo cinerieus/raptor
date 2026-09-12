@@ -86,13 +86,12 @@ _user_limits_cache_decided_at = 0.0
 # Resolved absolute paths to sandbox-setup binaries. We use absolute paths
 # to prevent PATH hijacking — a polluted PATH (e.g., a malicious .envrc
 # that direnv activated, or `.` in the user's PATH) could otherwise
-# shadow these with attacker binaries. unshare/prlimit are resolved for
-# the namespace-creation step; mount/mkdir for the mount-script setup
+# shadow these with attacker binaries. unshare is resolved for the
+# namespace engagement probe; mount/mkdir for the mount-script setup
 # (only active when mount-ns is available, e.g. not on Ubuntu 24.04 with
 # kernel.apparmor_restrict_unprivileged_userns=1).
 # All are resolved against a hardcoded safe bin-dir list, not PATH.
 _unshare_path_cache = None
-_prlimit_path_cache = None
 _mount_path_cache = None
 _mkdir_path_cache = None
 _sandbox_exec_path_cache = None
@@ -181,6 +180,16 @@ _net_and_tcp_allowlist_warned = False
 # second one-shot warning here.
 _degraded_tcp_deny_warned = False
 _degraded_net_open_override_warned = False
+# Landlock-less kernel accepted via RAPTOR_ALLOW_DEGRADED_UNTRUSTED
+# (construction-time enforceability arm).
+_degraded_landlock_override_warned = False
+# Per-call demotion twins of the two construction-time degraded-net
+# arms above (the plain-lane fallback for a namespace-shaped call).
+_demoted_tcp_deny_warned = False
+_demoted_net_open_override_warned = False
+# Trusted-floor Landlock-absence tolerance bit on a policy-carrying
+# call (the requested fs/TCP policy is unenforced on the ns-only lane).
+_tolerated_policy_unenforced_warned = False
 # Egress-proxy tier 2 engaged (Landlock TCP port pin, no netns bridge):
 # the pin is port-scoped, not (host, port)-scoped — weaker guarantee
 # than the netns tier; warned once per process at engagement.

@@ -479,7 +479,7 @@ _PR_SET_CHILD_SUBREAPER = 36
 # Grace budget for the kill loop: re-enumerate and re-kill until no
 # children remain (a dying daemon may orphan ITS children onto us).
 _SWEEP_DEADLINE_S = 3.0
-_DEATH_TEARDOWN_EXIT = 137  # parity with the pid1 shim convention
+_DEATH_TEARDOWN_EXIT = 137  # 128+SIGKILL shell convention
 
 
 def _reaper_split(reaper_cell: dict) -> None:

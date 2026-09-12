@@ -98,10 +98,11 @@ class TestDegradedRunUntrusted:
         assert len(warnings) == 2, (
             "degraded run_untrusted must warn on EVERY call, "
             f"got {len(warnings)}")
-        # Two run_untrusted calls, two preexec builds each (the plain
-        # variant plus its ns-creation-blocking twin — context builds
-        # the pair and run() selects per lane).
-        assert len(preexec_recorder) == 4
+        # Two run_untrusted calls, ONE preexec build each: only the
+        # ns-creation-blocking plain-lane preexec exists since the
+        # unshare-CLI lane (whose bootstrap needed the permissive
+        # variant) was deleted.
+        assert len(preexec_recorder) == 2
         for kwargs in preexec_recorder:
             readable = kwargs.get("readable_paths") or []
             assert "/proc" not in readable, (

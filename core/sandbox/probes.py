@@ -160,43 +160,14 @@ SEATBELT_FAIL_INSTRUCTIONS = (
 
 
 @functools.lru_cache(maxsize=1)
-def unshare_supports_kill_child() -> bool:
-    """Whether this host's ``unshare`` supports ``--kill-child`` (util-linux
-    ≥ 2.32, 2018). Used as belt-and-braces teardown: ``unshare --kill-child=
-    SIGKILL`` kills its pid-1 child (and thus cascades the pid-ns) if unshare
-    itself dies. The primary orphan-teardown is the death-pipe in
-    raptor-pid1-shim; this just covers "unshare killed directly". Probed via
-    ``--help`` (cheap, no namespace creation) and cached for the process; a
-    host without the flag silently runs without it.
-    """
-    try:
-        from core.config import RaptorConfig
-        # ``text=True`` keeps stdout/stderr as str regardless of caller-
-        # imposed mocks. Help text is plain ASCII, no encoding concern; the
-        # explicit text mode also stops ``str + b""`` blowing up under any
-        # global ``subprocess.run`` mock that returns str-typed stdout (the
-        # llm_analysis test_orchestrator pipeline patches subprocess.run
-        # process-wide, and bytes-typed defaults would TypeError on the
-        # membership check below).
-        out = subprocess.run(
-            [_resolve_sandbox_binary("unshare"), "--help"],
-            capture_output=True, text=True, timeout=5,
-            env=RaptorConfig.get_safe_env(),
-        )
-        return "--kill-child" in (out.stdout or "") + (out.stderr or "")
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
-
-
-@functools.lru_cache(maxsize=1)
 def unshare_supports_cgroup() -> bool:
     """Whether this host's ``unshare`` supports ``--cgroup`` (util-linux
-    ≥ 2.32, 2018). With it, the subprocess-lane bootstrap gets a fresh
-    cgroup namespace so /proc/self/cgroup reads ``0::/`` instead of the
-    orchestrator's host cgroup path (a systemd session scope names the
-    operator's uid and login session to any target that reads it).
-    Probed via ``--help`` and cached; a host without the flag runs
-    without the mask, host-real cgroup visible on this lane only.
+    ≥ 2.32, 2018). Consumed by the namespace ENGAGEMENT PROBE
+    (check_unshare_engages callers): the spawn backend unshares
+    CLONE_NEWCGROUP unconditionally, and the probe must exercise the
+    same kernel capability — the CLI flag is only expressible when
+    the installed util-linux knows it. Probed via ``--help`` and
+    cached.
     """
     try:
         from core.config import RaptorConfig

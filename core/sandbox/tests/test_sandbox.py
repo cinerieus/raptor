@@ -2093,7 +2093,9 @@ class TestLandlockDegradationWarnings(unittest.TestCase):
         self.assertIn("Landlock is unavailable", cm.exception.reason)
 
     @requires_userns
+    @requires_landlock
     def test_warns_when_tcp_allowlist_on_abi_lt_4(self):
+        # requires_landlock: see the abi_v2 sibling.
         from unittest.mock import patch
 
         import core.sandbox as mod
@@ -2159,9 +2161,13 @@ class TestLandlockDegradationWarnings(unittest.TestCase):
                     run(["true"], capture_output=True, text=True)
 
     @requires_userns
+    @requires_landlock
     def test_warns_on_old_landlock_abi_v2(self):
         """Pre-5.19 kernels lack REFER — rename-across-dirs isn't blocked.
-        Operator should see a WARNING so the gap is visible."""
+        Operator should see a WARNING so the gap is visible.
+        requires_landlock: the probe patches fake availability, but the
+        live child install is REAL — on a genuinely Landlock-less
+        kernel the spawn backend fails loud ('L') by design."""
         import core.sandbox as mod
         with patch.object(mod.landlock, "check_landlock_available", return_value=True), \
                 patch.object(mod.landlock, "_get_landlock_abi", return_value=1), \
@@ -2175,8 +2181,10 @@ class TestLandlockDegradationWarnings(unittest.TestCase):
         self.assertTrue(any("ABI v3" in m and "TRUNCATE" in m for m in cm.output))
 
     @requires_userns
+    @requires_landlock
     def test_warns_on_old_landlock_abi_v3_only(self):
-        """Pre-6.2 kernels lack TRUNCATE but have REFER (ABI 2)."""
+        """Pre-6.2 kernels lack TRUNCATE but have REFER (ABI 2).
+        requires_landlock: see the v2 sibling."""
         import core.sandbox as mod
         with patch.object(mod.landlock, "check_landlock_available", return_value=True), \
                 patch.object(mod.landlock, "_get_landlock_abi", return_value=2), \
@@ -2199,8 +2207,10 @@ class TestLandlockDegradationWarnings(unittest.TestCase):
             run(["true"], capture_output=True, text=True)
         self.assertTrue(any("unreachable" in m and "443" in m for m in cm.output))
 
+    @requires_landlock
     def test_no_warning_on_abi_v4_with_tcp_allowlist(self):
-        """On ABI v4+, allowed_tcp_ports is enforceable — no degradation warning."""
+        """On ABI v4+, allowed_tcp_ports is enforceable — no degradation
+        warning. requires_landlock: see the abi_v2 sibling."""
         from unittest.mock import patch
 
         import core.sandbox as mod

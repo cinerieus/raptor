@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from .capability import requires_landlock
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -685,7 +687,7 @@ def test_mountless_waived_untrusted_continues_down_ladder_on_low_abi(
     # failed mount attempt; the run continued on the subprocess lane.
     assert len(calls) == 1
     assert "not achievable" in r.sandbox_info.get("mount_ns_degraded", "")
-    assert r.sandbox_info["containment_tier"] == "ns-only"
+    assert r.sandbox_info["containment_tier"] == "landlock"
     assert any("HOST process table" in rec.getMessage()
                for rec in caplog.records), caplog.text
 
@@ -921,14 +923,19 @@ def test_spawn_exception_still_demotes_trusted_runs(
 
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
-def test_spawn_exception_optin_keeps_legacy_lane_for_untrusted(
+@requires_landlock
+def test_spawn_exception_optin_keeps_degraded_lane_for_untrusted(
         tmp_path, monkeypatch):
     """RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 is exactly the consent the
     refusal names: with it set, the same spawn exception demotes the
-    untrusted run onto the legacy subprocess lane as before. Positive
-    control for the refusal test: the child really runs there and
-    really sees the HOST /proc (pid 1 is the host's init — the legacy
-    lane's unshare --pid never remounts /proc)."""
+    untrusted run onto the plain Landlock-only lane (the frozen waiver
+    floor). Positive control for the refusal test: the child really
+    runs there and really sees the HOST /proc — the exposure the
+    override consents to. Same observable contract the deleted
+    unshare-CLI fallback used to satisfy (its pid-ns never remounted
+    /proc either). requires_landlock: on a Landlock-less kernel the
+    plain lane delivers nothing the waived floor accepts, so this
+    shape correctly refuses there."""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
     from core.sandbox.errors import SandboxSetupError
@@ -948,12 +955,13 @@ def test_spawn_exception_optin_keeps_legacy_lane_for_untrusted(
     except Exception as e:  # noqa: BLE001 — host can't reach the lane
         pytest.skip(f"legacy lane unavailable: {e}")
     if r.returncode != 0:
-        pytest.skip(f"legacy lane child failed on this host: "
+        pytest.skip(f"fallback-lane child failed on this host: "
                     f"rc={r.returncode}")
     host_init = Path("/proc/1/comm").read_text()
     assert r.stdout == host_init, (
-        "the opted-in legacy lane is expected to expose the host-pid "
+        "the opted-in fallback lane is expected to expose the host-pid "
         "/proc — that is exactly what the override consents to")
+    assert r.sandbox_info["containment_tier"] == "landlock"
 
 
 @pytest.mark.integration

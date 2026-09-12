@@ -13,7 +13,7 @@ import pytest as _pytest
 pytestmark = [
     _pytest.mark.skipif(
         _sys.platform != "linux",
-        reason="Linux-only sandbox internals (mount-ns / Landlock / seccomp / ptrace tracer / pid1 shim) — see core/sandbox/_macos_spawn.py for the macOS path",
+        reason="Linux-only sandbox internals (mount-ns / Landlock / seccomp / ptrace tracer) — see core/sandbox/_macos_spawn.py for the macOS path",
     ),
     # Every test in this file exercises real sandbox primitives
     # (namespaces, Landlock, seccomp, ptrace) on real subprocesses.
@@ -431,16 +431,17 @@ class TestE2EResourceLimits(unittest.TestCase):
 
 
 class TestE2EPathHijackDefeated(unittest.TestCase):
-    """Verify that PATH pollution can't hijack unshare/prlimit.
+    """Verify that PATH pollution can't hijack the sandbox's own
+    setup binaries.
 
-    The sandbox invokes `unshare` and `prlimit` to set up namespaces and
-    apply RLIMIT_NPROC. If a polluted PATH (malicious .envrc, direnv,
-    compromised shell rc) placed a fake `unshare` ahead of the real one,
-    the fake would run WITHIN Landlock+seccomp (applied in preexec) but
-    would skip the actual namespace creation — leaving the child in the
-    host's net/pid/ipc namespaces with full outbound network.
-    Fixed by resolving these binaries against a hardcoded safe bin-dir
-    list instead of PATH.
+    The sandbox invokes `unshare` for its namespace ENGAGEMENT PROBE
+    (and newuidmap/newgidmap for the uid-mapping step). If a polluted
+    PATH (malicious .envrc, direnv, compromised shell rc) placed a
+    fake `unshare` ahead of the real one, the probe would consult an
+    attacker binary to decide whether namespaces engage. Fixed by
+    resolving these binaries against a hardcoded safe bin-dir list
+    instead of PATH; the target command itself still resolves via
+    PATH as documented.
     """
 
     def setUp(self):
@@ -453,7 +454,6 @@ class TestE2EPathHijackDefeated(unittest.TestCase):
 
         from core.sandbox import state as s
         saved_unshare = s._unshare_path_cache
-        saved_prlimit = s._prlimit_path_cache
         saved_net = s._net_available_cache
         saved_path = os.environ.get("PATH", "")
 
@@ -466,7 +466,6 @@ class TestE2EPathHijackDefeated(unittest.TestCase):
 
             # Clear caches and poison PATH
             s._unshare_path_cache = None
-            s._prlimit_path_cache = None
             s._net_available_cache = None
             os.environ["PATH"] = d + ":" + saved_path
 
@@ -487,7 +486,6 @@ class TestE2EPathHijackDefeated(unittest.TestCase):
                 )
             finally:
                 s._unshare_path_cache = saved_unshare
-                s._prlimit_path_cache = saved_prlimit
                 s._net_available_cache = saved_net
                 os.environ["PATH"] = saved_path
 
@@ -3217,9 +3215,9 @@ class TestNetnsLoopbackUp(unittest.TestCase):
         )
         with TemporaryDirectory() as out:
             # /usr/bin/python3 explicitly: a $PATH interpreter outside
-            # the mount tree would fall back to the subprocess path,
-            # where the loopback bringup is best-effort only (see
-            # raptor-pid1-shim._ensure_loopback_up).
+            # the mount tree would route through the mountless retry;
+            # keep this test pinned on the mount lane's unconditional
+            # loopback bringup.
             r = sandbox_run(
                 ["/usr/bin/python3", "-c", code],
                 block_network=True, target=out, output=out,

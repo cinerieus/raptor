@@ -77,9 +77,9 @@ _SANITIZER_FLAG = {
 }
 
 # Exit codes the spawn layers re-encode a failed exec of the TARGET as
-# (shell/util-linux convention, shared by the pid1-shim and the spawn
-# grandchild): 127 file not found, 126 found but not executable, 125
-# the pid1-shim's catch-all exec errno (ETXTBSY, ENOEXEC, ELOOP, ...).
+# (shell/util-linux convention, from the spawn grandchild's exec
+# lane): 127 file not found, 126 found but not executable, 125 the
+# catch-all exec errno (ETXTBSY, ENOEXEC, ELOOP, ...).
 # A run that exits with one of these MAY still be a genuine target
 # outcome — see _spawn_failure_reason for how the ambiguity is bounded.
 _EXEC_FAILURE_RETURNCODES = frozenset({125, 126, 127})
@@ -94,7 +94,7 @@ def _stderr_is_sandbox_diagnostic_only(stderr: object) -> bool:
     """True iff ``stderr`` is empty or carries only the sandbox layer's
     own pre-exec diagnostics: lines prefixed ``sandbox:`` (the
     convention of ``warn_post_fork``, the seccomp preexec, and the
-    pid1-shim's exec-failure line), or the spawn child's
+    spawn layers' exec-failure lines), or the spawn child's
     ``sandbox child failure:`` block (one marker line followed by the
     child's traceback — written before the target's first instruction,
     so the whole block is sandbox-layer by construction). A target
@@ -134,10 +134,10 @@ def _spawn_failure_reason(result: Any) -> str | None:
     "non-deterministic". Silence therefore never vetoes the bounded
     heuristic below — only a category tuple short-circuits.
 
-    The heuristic (status ``None`` or attribute absent — the pid1-shim
-    subprocess lane, the Landlock-only retry, plain subprocess
-    fallbacks — where exec failure is re-encoded as exit 125/126/127
-    with no side channel): a bare 125-127 exit is ambiguous with a
+    The heuristic (status ``None`` or attribute absent — the plain
+    subprocess fallbacks, where exec failure is re-encoded as exit
+    125/126/127 with no side channel): a bare 125-127 exit is
+    ambiguous with a
     target that chooses those codes, so the reclassification is
     bounded to the pre-first-output window. A failed exec happens
     before the target's first instruction, so the child writes NOTHING

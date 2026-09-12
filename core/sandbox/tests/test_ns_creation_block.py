@@ -24,22 +24,27 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 def test_ns_block_lane_contract_source_pin():
     """Source pin on the per-lane contract: _spawn's grandchild-
-    installed filter always blocks; context builds an ns-blocking
-    preexec VARIANT and selects it keyed on need_unshare (so the
-    unshare-CLI bootstrap never runs under it); the audit lane —
-    whose filter also precedes its own setup — never enables it."""
+    installed filter always blocks; the plain subprocess lane — the
+    ONLY lane that execs through a preexec since the unshare-CLI
+    bootstrap was deleted — takes the ns-blocking rules
+    unconditionally (its payload never legitimately unshares), and
+    the per-call demoted preexec rebuild carries them too; the audit
+    lane — whose filter installs before the sandbox's own setup —
+    never enables it."""
     spawn = (_REPO_ROOT / "core" / "sandbox" / "_spawn.py").read_text(
         encoding="utf-8")
     assert "block_ns_creation=True" in spawn
     ctx = (_REPO_ROOT / "core" / "sandbox" / "context.py").read_text(
         encoding="utf-8")
-    assert "seccomp_block_ns_creation=True" in ctx, (
-        "context no longer builds the plain-lane ns-blocking variant")
-    assert ("preexec if need_unshare else preexec_ns_blocked"
-            in ctx), (
-        "the preexec selection must be keyed on need_unshare — an "
-        "unconditional ns-blocking preexec kills the unshare-CLI "
-        "lane's own bootstrap")
+    assert ctx.count("seccomp_block_ns_creation=True") >= 2, (
+        "context must build BOTH ns-blocking preexecs (the plain-lane "
+        "baseline and the demoted per-call rebuild)")
+    assert 'kwargs["preexec_fn"] = preexec_ns_blocked' in ctx, (
+        "the plain lane must take the ns-blocking preexec "
+        "unconditionally — no lane needs the permissive variant now")
+    assert "preexec if need_unshare else" not in ctx, (
+        "the deleted unshare-CLI lane's permissive preexec selection "
+        "must not resurface")
     la = (_REPO_ROOT / "core" / "sandbox" /
           "_landlock_audit.py").read_text(encoding="utf-8")
     assert "block_ns_creation" not in la, (

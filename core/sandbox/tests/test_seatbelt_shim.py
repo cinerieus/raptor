@@ -228,8 +228,8 @@ class TestSeatbeltShim:
 
     def test_env_restore_reapplied_at_target_exec(self):
         """Quarantined loader vars re-apply at the target exec (loader
-        names only, key never visible) — mirrors the pid1 shim's
-        restore contract on the seatbelt path."""
+        names only, key never visible) — the shim-side restore
+        contract (sole remaining consumer of _env_quarantine)."""
         import json as _json
         from core.sandbox._env_quarantine import _LOADER_EXACT
         names = sorted(_LOADER_EXACT) + ["LD_PRELOAD_X", "DYLD_X"]

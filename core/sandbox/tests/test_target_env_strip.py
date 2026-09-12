@@ -6,7 +6,8 @@ it so the sandbox re-anonymisation follow-up extends the CONSTANT and
 gets the coverage for free:
 
 * the constant's own contents and allowlist relationship,
-* the pid1 shim's hand-copied tuple (the shim cannot import core),
+* the seatbelt shim's hand-copied tuple (the isolated shim cannot
+  import core),
 * the fuzzing env scrub,
 * the frida raw-spawn env builder (frida spawn-mode targets inherit
   the CLI's environ — a raw subprocess, no sandbox chokepoint),
@@ -54,14 +55,17 @@ def test_degraded_untrusted_consent_is_allowlisted_but_stripped():
     )
 
 
-def test_pid1_shim_tuple_in_sync():
-    """The shim hand-copies the set (it cannot import core inside
-    namespace setup) — this is the tripwire that keeps it honest."""
-    shim = (_REPO_ROOT / "libexec" / "raptor-pid1-shim").read_text(
+def test_seatbelt_shim_tuple_in_sync():
+    """The macOS seatbelt shim hand-copies the set (the isolated
+    ``python3 -I`` shim cannot import core) — this is the tripwire
+    that keeps it honest. (The Linux pid1 shim carried the sibling
+    tuple until the unshare-CLI lane was deleted; every Linux lane
+    now strips via the context.run() seam directly.)"""
+    shim = (_REPO_ROOT / "libexec" / "raptor-seatbelt-shim").read_text(
         encoding="utf-8")
     for member in STRIP_SET:
         assert re.search(rf'"{re.escape(member)}"', shim), (
-            f"pid1 shim strip tuple is missing {member!r} — "
+            f"seatbelt shim strip tuple is missing {member!r} — "
             f"keep it in sync with TARGET_ENV_STRIP_SET"
         )
 
