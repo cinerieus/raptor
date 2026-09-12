@@ -76,11 +76,19 @@ def test_fail_closed_child_sites_write_status_bytes():
         "_spawn no longer maps the extra_ro failure to category 'C'")
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="exercises the Linux spawn-lane status arms via the Linux "
+           "spawn seam; the darwin seatbelt lane has its own readiness "
+           "protocol ('E') whose unknown-category posture belongs to "
+           "the darwin parity work")
 def test_parent_default_denies_unknown_status_category(
         tmp_path, monkeypatch):
     """A status byte from a future writer that this parent does not
     recognise must fail loud, never fall through as a genuine target
-    result."""
+    result. (Linux spawn lane: on darwin the monkeypatched seam is
+    never dispatched — the seatbelt branch runs — so the arms under
+    test are unreachable there.)"""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
 
@@ -103,9 +111,16 @@ def test_parent_default_denies_unknown_status_category(
     assert excinfo.value.setup_category == "Z"
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="exercises the Linux spawn-lane status arms via the Linux "
+           "spawn seam; the darwin seatbelt lane has its own readiness "
+           "protocol ('E') whose unknown-category posture belongs to "
+           "the darwin parity work")
 def test_parent_raises_typed_error_on_c_status(tmp_path, monkeypatch):
     """The 'C' category is fail-loud with no degrade path: no mountless
-    retry, no fallback lane, the failed result never returned."""
+    retry, no fallback lane, the failed result never returned. (Linux
+    spawn lane — see the platform gate's rationale above.)"""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
     calls = []

@@ -137,7 +137,20 @@ def test_rfp_kwarg_falsy_literals_normalise_to_false(
     the tri-state boundary normalises before resolution. The floor
     SOURCE follows the env truth: "env" only when the waiver really
     is set; a bare literal gets the same floor with the default
-    source (no banner in the waiver's name)."""
+    source (no banner in the waiver's name).
+
+    The waived-class floor is PLATFORM-RESOLVED: 'landlock' on Linux
+    (the waiver's frozen meaning) and 'none' on macOS — there is no
+    Landlock tier to hold there, and the waiver's documented macOS
+    semantics accept rlimits-only containment (the alternative would
+    be that untrusted work can never run on a seatbelt-broken mac,
+    which is the DEFAULT the waiver exists to escape). The mapping
+    itself is pinned platform-explicitly by
+    test_floor_class_defaults_per_platform and the consent matrix;
+    this test asserts the run() plumbing against the resolved value.
+    On macOS the Linux spawn stub is inert and the platform's real
+    backend serves the call — the floor stamps are lane-independent.
+    """
     import subprocess as _subprocess
 
     from core.sandbox import _spawn as _spawn_mod
@@ -149,21 +162,22 @@ def test_rfp_kwarg_falsy_literals_normalise_to_false(
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
     monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    waived_label = _tiers.tier_label(_tiers.waived_untrusted_floor())
     try:
         r = _ctx.run(["true"], target=str(tmp_path),
                      output=str(tmp_path), timeout=60,
                      require_fresh_procfs=0)
     except BaseException as e:  # noqa: BLE001 — host capability gate
-        pytest.skip(f"mount-ns lane unavailable: {e}")
+        pytest.skip(f"sandbox lane unavailable on this host: {e}")
     assert r.sandbox_info["floor_source"] == "default"
-    assert r.sandbox_info["containment_floor"] == "landlock"
+    assert r.sandbox_info["containment_floor"] == waived_label
 
     monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
     r = _ctx.run(["true"], target=str(tmp_path),
                  output=str(tmp_path), timeout=60,
                  require_fresh_procfs=0)
     assert r.sandbox_info["floor_source"] == "env"
-    assert r.sandbox_info["containment_floor"] == "landlock"
+    assert r.sandbox_info["containment_floor"] == waived_label
 
 
 def test_assert_floor_semantics():
