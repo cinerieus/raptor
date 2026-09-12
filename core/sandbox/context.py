@@ -4518,11 +4518,23 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 # Fail-loud parity with the Linux exec-status pipe. The macOS
                 # seatbelt shim reports via result._setup_status:
                 #   None     -> target reached inside the applied profile.
+                #   ("P", m) -> a granted path's identity pin (dev/ino)
+                #               stopped matching mid-run; the watcher shim
+                #               SIGKILLed the sandbox tree. Linux 'P'
+                #               parity: fail loud, never degrade, never
+                #               return the tainted result.
                 #   ("E", m) -> the in-sandbox readiness byte never arrived =>
                 #               sandbox-exec did not apply the profile. There
                 #               is no Landlock layer to degrade to on macOS, so
                 #               the only safe response is to fail loud rather
                 #               than silently run unsandboxed ("0 findings").
+                #   other    -> default-DENY, mirroring the Linux parent's
+                #               unknown-category arm: a category this parent
+                #               does not recognise means a setup/tamper step
+                #               reported something it cannot interpret, and
+                #               falling through as a genuine target result
+                #               is the same default-allow shape that let a
+                #               new demotion lane ship ungated on Linux.
                 _mac_status = getattr(result, "_setup_status", None)
                 if _mac_status is not None and _mac_status[0] == "E":
                     from .errors import SandboxSetupError
@@ -4531,6 +4543,34 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     raise SandboxSetupError(
                         msg_0,
                         SEATBELT_FAIL_INSTRUCTIONS,
+                        setup_category=_mac_status[0],
+                    )
+                if _mac_status is not None and _mac_status[0] == "P":
+                    from .errors import SandboxSetupError
+                    msg_0 = (
+                        f"sandbox grant-path pin violated: "
+                        f"{_mac_status[1]}"
+                    )
+                    raise SandboxSetupError(
+                        msg_0,
+                        "a granted target/output/writable path changed "
+                        "identity mid-run (symlink or rename swap) and "
+                        "the sandbox was killed. Re-create the directory "
+                        "and re-run; never point grants at "
+                        "attacker-writable parents.",
+                        setup_category="P",
+                    )
+                if _mac_status is not None:
+                    from .errors import SandboxSetupError
+                    raise SandboxSetupError(
+                        f"sandbox seatbelt backend reported an "
+                        f"unrecognised setup-status category "
+                        f"{_mac_status[0]!r}: {_mac_status[1]}",
+                        "treating an unknown status as a genuine result "
+                        "would be a default-allow on the security "
+                        "boundary. Update RAPTOR so this parent and the "
+                        "seatbelt backend agree on the status "
+                        "vocabulary.",
                         setup_category=_mac_status[0],
                     )
             elif spawn_eligible:

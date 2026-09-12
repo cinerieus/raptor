@@ -98,6 +98,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
 from collections.abc import Iterable
@@ -122,11 +123,29 @@ SEATBELT_SHIM = str(
     Path(__file__).resolve().parents[2] / "libexec" / "raptor-seatbelt-shim"
 )
 
-# Must match the `printf K` in the /bin/sh inner trampoline (built in
-# run_sandboxed). The trampoline writes this one byte to the status pipe
-# once it is running inside the applied profile; its absence means the
-# profile did not apply (fail loud).
+# Status-pipe byte vocabulary. Each writer emits one small (atomic)
+# write; the parent reads the pipe to EOF after the shim exits and
+# parses the accumulated bytes order-independently:
+#   b"K"        in-sandbox /bin/sh trampoline — the profile applied and
+#               the trampoline ran INSIDE it (must match the `printf K`
+#               in run_sandboxed's trampoline). Absence => profile did
+#               not apply (fail loud).
+#   b"P"        watcher shim — a granted path's identity pin (dev/ino)
+#               stopped matching mid-run; the shim SIGKILLed the
+#               sandbox tree. Outranks K: the run is tainted even
+#               though setup succeeded.
+#   b"G<pid>\n" watcher shim — the sandbox process-group leader's pid,
+#               reported so the parent's backstop sweep can attribute
+#               group members even after the shim itself is gone.
 _READY_BYTE = b"K"
+_PIN_TAMPER_BYTE = b"P"
+
+
+def _parse_group_report(data: bytes) -> int | None:
+    """Sandbox process-group leader pid from the status-channel bytes
+    (the watcher's ``G<pid>\\n`` report), or None when absent."""
+    m = re.search(rb"G(\d{1,9})\n", data)
+    return int(m.group(1)) if m else None
 
 
 def is_available() -> bool:
@@ -257,6 +276,28 @@ def _kill_pid(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _grant_pin_mismatch(path: str, dev: int, ino: int) -> str:
+    """Reason string when ``path`` no longer carries its pinned
+    identity, or "" while the pin holds. One lstat decides all three
+    tamper shapes: the path vanished, a symlink now sits at it (lstat
+    reports the LINK, so a symlink to the original inode — a
+    relocate-and-link-back — is caught too, not just links to foreign
+    victims), or a different filesystem object was renamed into it
+    (dev/ino mismatch). Mirrored inline in libexec/raptor-seatbelt-shim
+    (`python -I`, cannot import this module) — keep the two in sync."""
+    import stat as _stat
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return "no longer exists"
+    if _stat.S_ISLNK(st.st_mode):
+        return "is now a symlink"
+    if (int(st.st_dev), int(st.st_ino)) != (int(dev), int(ino)):
+        return (f"changed identity (dev/ino "
+                f"{st.st_dev}/{st.st_ino} != pinned {dev}/{ino})")
+    return ""
 
 
 def _sweep_descendants(root_pid, *, live_snapshot=None, extra_pgids=(),
@@ -561,6 +602,69 @@ def run_sandboxed(cmd: list[str], *,
             restrict_reads=bool(restrict_reads),
         )
 
+    # 0d. Grant-path identity pins — the darwin twin of the Linux
+    # bind-source P-byte pin (context._grant_path_identities +
+    # _spawn's abort), adapted to seatbelt's constraint that SBPL
+    # grants are path STRINGS with no kernel-held inode reference:
+    # a real directory renamed into a granted path mid-run INHERITS
+    # the grant, and on current macOS (26.6.2, observed live) even a
+    # symlink swapped into the granted path lets writes flow through
+    # to its destination. SBPL itself cannot express "this grant is
+    # for THIS inode", so the pin is enforced procedurally:
+    #   * snapshot (dev, ino) for every caller grant here, at the
+    #     same instant the path strings are frozen into the profile
+    #     (same realpath the profile emission applies);
+    #   * re-verify immediately before spawn (after the parent's own
+    #     fake-home/.tmp writes below — O_NOFOLLOW-style discipline
+    #     for RAPTOR's own writes into output);
+    #   * the watcher shim re-verifies on every poll tick for the
+    #     whole run and SIGKILLs the sandbox tree on mismatch,
+    #     reporting b"P" on the status pipe (fail loud, never a
+    #     normal-looking result).
+    # HONEST RESIDUAL, two halves: (a) writes between a swap and the
+    # watcher's next poll tick land before the kill (one ~0.1s poll
+    # cadence; longer only while a process-table snapshot stalls the
+    # loop); (b) detection requires the swap to PERSIST across a poll
+    # tick — a same-UID accomplice OUTSIDE the sandbox that swaps and
+    # restores within one tick lands its window of writes AND the run
+    # returns clean. A path-string sandbox cannot close either half;
+    # the pin bounds the damage and guarantees refusal only for
+    # persistent tampering. The swap-and-restore variant needs an
+    # unsandboxed same-UID process, which is already outside this
+    # sandbox's threat boundary (documented, not defended).
+    # The /private/tmp baseline seed and the /dev literals are
+    # system-owned paths outside same-UID rename control and are
+    # deliberately not pinned.
+    _grant_pins: list[dict] = []
+    import stat as _stat_mod
+    for _gp in dict.fromkeys(
+            p for p in (target, output,
+                        *(writable_paths or ()),
+                        *(readable_paths or ()))
+            if p):
+        _resolved = os.path.realpath(os.path.abspath(_gp))
+        try:
+            _st = os.stat(_resolved)
+        except OSError:
+            # Not (yet) existing / unreadable: nothing to pin — the
+            # profile clause for a nonexistent path grants nothing
+            # until something exists there. Linux parity: the
+            # identity snapshot skips OSError paths the same way.
+            continue
+        if not _stat_mod.S_ISDIR(_st.st_mode):
+            # Directories only: a granted FILE's identity changes
+            # legitimately when the workload rewrites it atomically
+            # (tmp + rename), so pinning it would SIGKILL legitimate
+            # runs; the enforced boundary is the containing directory
+            # grant. A file-only grant therefore carries no pin
+            # (documented residual).
+            continue
+        _grant_pins.append({
+            "path": _resolved,
+            "dev": int(_st.st_dev),
+            "ino": int(_st.st_ino),
+        })
+
     # 1. Build SBPL profile from the kwargs.
     profile = seatbelt.build_profile(
         target=target,
@@ -825,6 +929,19 @@ def run_sandboxed(cmd: list[str], *,
         raise
     child_env["_RAPTOR_STATUS_FD"] = str(status_w)
     child_env["_RAPTOR_DEATH_FD"] = str(death_r)
+    # Grant-path identity pins for the watcher shim (see step 0d).
+    # Consumed by the shim like the fd markers: verified in the child
+    # branch before exec, polled by the watcher for the whole run,
+    # stripped from the environment before anything sandboxed starts.
+    # No new disclosure: every pinned path already appears verbatim in
+    # the profile text riding argv. Pop-then-set: only THIS spawn
+    # layer may mint pins — a caller-supplied env dict carrying the
+    # key must never steer the watcher's kill decision (same
+    # no-env-authority rule as the keep-trust key).
+    child_env.pop("_RAPTOR_GRANT_PINS", None)
+    if _grant_pins:
+        import json as _json
+        child_env["_RAPTOR_GRANT_PINS"] = _json.dumps(_grant_pins)
     # The seatbelt shim is RAPTOR's own dispatch helper and refuses to run
     # without a trust marker (guards against a human/attacker invoking the
     # internal script directly). THIS code path is the trusted invoker, so
@@ -889,17 +1006,55 @@ def run_sandboxed(cmd: list[str], *,
             pass
         # 3. Post-wait descendant sweep, independent of process group:
         #    catches setsid escapees the two killpg's above cannot
-        #    reach. Best-effort with logging — teardown must never
-        #    raise over sweep failure.
+        #    reach. The shim is dead by now, so the status channel is
+        #    drainable — the G report lets the sweep attribute sandbox
+        #    process-group members even though their ppid link to the
+        #    (dead) shim is gone. Best-effort with logging — teardown
+        #    must never raise over sweep failure.
         try:
-            _sweep_descendants(process.pid, live_snapshot=_live_table)
+            _grp = _parse_group_report(_harvest_status())
+            _sweep_descendants(process.pid, live_snapshot=_live_table,
+                               extra_pgids=(_grp,) if _grp else ())
         except Exception:
             logger.warning(
                 "macOS sandbox teardown: descendant sweep failed",
                 exc_info=True,
             )
 
-    ready = b""
+    # Status-channel harvest: close our write end, then drain the read
+    # end to EOF. Idempotent (memoised) because both the normal path
+    # (which needs the sandbox-group report BEFORE its backstop sweep)
+    # and the finally (exception paths) call it. The drain can only
+    # block while another write-end copy lives — the watcher shim
+    # holds one for its P/G reports — and every route here has the
+    # shim already reaped (Popen.__exit__ waits; the teardown paths
+    # kill it), so EOF is guaranteed.
+    _status_state: dict = {"done": False, "data": b""}
+
+    def _harvest_status() -> bytes:
+        if _status_state["done"]:
+            return _status_state["data"]
+        _status_state["done"] = True
+        try:
+            os.close(status_w)
+        except OSError:
+            pass
+        data = b""
+        try:
+            while True:
+                chunk = os.read(status_r, 4096)
+                if not chunk:
+                    break
+                data += chunk
+        except OSError:
+            pass
+        try:
+            os.close(status_r)
+        except OSError:
+            pass
+        _status_state["data"] = data
+        return data
+
     if input is not None and stdin is not None:
         msg = "stdin and input arguments may not both be used."
         raise ValueError(msg)
@@ -913,6 +1068,34 @@ def run_sandboxed(cmd: list[str], *,
     # did pre-quarantine).
     from ._env_quarantine import quarantine_loader_env
     child_env = quarantine_loader_env(child_env)
+    # Last-moment pin re-verify before spawn (step 0d): the parent
+    # itself wrote into output above (fake-home layout, .tmp scratch)
+    # — those makedirs follow symlinks, so a swap in the capture→spawn
+    # window would have steered THIS process's writes as well as the
+    # child's grant. Refuse rather than hand a tampered path a live
+    # sandbox. From here the watcher shim owns the check.
+    for _pin in _grant_pins:
+        _pin_err = _grant_pin_mismatch(
+            _pin["path"], _pin["dev"], _pin["ino"])
+        if _pin_err:
+            # The status/death pipes were already created — close all
+            # four ends before raising (this refusal predates the
+            # try/finally that owns their lifecycle).
+            for _fd in (status_r, status_w, death_r, death_w):
+                try:
+                    os.close(_fd)
+                except OSError:
+                    pass
+            from .errors import SandboxSetupError
+            raise SandboxSetupError(
+                f"sandbox grant-path pin violated before spawn: "
+                f"{_pin['path']} {_pin_err}",
+                "a granted target/output/writable path changed "
+                "identity between validation and spawn (symlink or "
+                "rename swap). Re-create the directory and re-run; "
+                "never point grants at attacker-writable parents.",
+                setup_category="P",
+            )
     try:
         with subprocess.Popen(
             sandbox_cmd,
@@ -983,11 +1166,17 @@ def run_sandboxed(cmd: list[str], *,
         # point the shim has exited, so its own exit-time sweep (see
         # libexec/raptor-seatbelt-shim, which still saw the live tree)
         # is the primary owner of this path; this parent-side pass is
-        # the backstop for a shim that died without sweeping, and can
-        # only attribute descendants whose ppid chain or process group
-        # still connects them to the (dead) shim pid. Best-effort.
+        # the backstop for a shim that died without sweeping. The
+        # ppid walk from the dead shim pid finds nothing once
+        # survivors reparent to launchd, so the sweep leans on the
+        # shim's G group report (written right after fork, before any
+        # target code ran, so a shim killed later cannot have skipped
+        # it): sandbox process-group members stay attributable even
+        # with the shim gone. Best-effort.
         try:
-            _sweep_descendants(_process.pid)
+            _grp = _parse_group_report(_harvest_status())
+            _sweep_descendants(_process.pid,
+                               extra_pgids=(_grp,) if _grp else ())
         except Exception:
             logger.warning(
                 "macOS sandbox: post-run descendant sweep failed",
@@ -997,24 +1186,17 @@ def run_sandboxed(cmd: list[str], *,
             sandbox_cmd, _retcode, _stdout, _stderr,
         )
     finally:
-        # Close our copies. status_w MUST be closed before reading status_r,
-        # else a profile-apply failure (no byte written) would block the read
-        # forever (write ends still open). After this close the only remaining
-        # status write end was the inner shim's, already gone, so the read
-        # returns the byte if present or EOF (b"") if not.
-        for _fd in (status_w, death_r, death_w):
+        # Close our copies and drain the status channel (idempotent —
+        # the normal path already harvested before its backstop
+        # sweep). _harvest_status closes status_w first: with our
+        # write end gone and the shim reaped, the drain returns the
+        # accumulated bytes then EOF, never blocks.
+        for _fd in (death_r, death_w):
             try:
                 os.close(_fd)
             except OSError:
                 pass
-        try:
-            ready = os.read(status_r, 1)
-        except OSError:
-            ready = b""
-        try:
-            os.close(status_r)
-        except OSError:
-            pass
+        _status_bytes = _harvest_status()
         if audit_streamer is not None:
             try:
                 audit_streamer.stop()
@@ -1041,13 +1223,42 @@ def run_sandboxed(cmd: list[str], *,
     #     pipe's result._setup_status contract):
     #       None      -> target was reached inside the applied profile;
     #                    the result is genuine.
+    #       ("P", ..) -> a granted path's identity pin stopped matching
+    #                    mid-run and the watcher SIGKILLed the sandbox
+    #                    tree. Outranks the readiness byte: setup DID
+    #                    succeed, but the result is tainted — caller
+    #                    raises, never returns it (Linux P parity:
+    #                    fail-loud, never degrade).
     #       ("E", ..) -> the in-sandbox readiness byte never arrived =>
     #                    sandbox-exec did not apply the profile / the inner
     #                    shim never ran => caller raises SandboxSetupError.
     #     Unlike Linux there is no Landlock layer to degrade to, so the only
     #     safe response to "did not engage" is to fail loud — never silently
     #     run unsandboxed.
-    if ready == _READY_BYTE:
+    _leftover = re.sub(rb"G\d{1,9}\n", b"", _status_bytes)
+    _leftover = _leftover.replace(_READY_BYTE, b"").replace(
+        _PIN_TAMPER_BYTE, b"")
+    if _PIN_TAMPER_BYTE in _status_bytes:
+        result._setup_status = (  # type: ignore[attr-defined]
+            "P",
+            ("a granted path's identity (dev/ino) changed mid-run — "
+             "symlink or rename swapped into a granted target/output/"
+             "writable path; the watcher shim SIGKILLed the sandbox "
+             "tree and this result must not be trusted"),
+        )
+    elif _leftover:
+        # Default-DENY bytes this parent does not recognise — a writer
+        # this parser predates, or channel corruption. Treating them
+        # as noise beside a readiness byte would be the default-allow
+        # shape the context layer's unknown-category arm exists to
+        # refuse; mint a category that arm does not know so it does.
+        result._setup_status = (  # type: ignore[attr-defined]
+            "B",
+            (f"unrecognised bytes on the seatbelt status channel "
+             f"({_leftover[:16]!r}) — protocol violation; refusing "
+             f"to trust the result"),
+        )
+    elif _READY_BYTE in _status_bytes:
         result._setup_status = None
     else:
         result._setup_status = (

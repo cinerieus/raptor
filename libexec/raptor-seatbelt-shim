@@ -94,6 +94,75 @@ _STATUS_CHILD_FD = 3
 # (the orchestrator is gone); distinct from target codes for log clarity.
 _DEATH_TEARDOWN_EXIT = 137
 
+# Outer-shim exit code when a grant-path identity pin stops matching and
+# the shim SIGKILLs the sandbox tree (see the pin block below). Distinct
+# from the 125/126/127 exec conventions and the death-teardown code.
+_PIN_VIOLATION_EXIT = 121
+
+# ─── grant-path identity pins ───────────────────────────────────────
+# The spawn side (core/sandbox/_macos_spawn.py) snapshots (dev, ino)
+# for every caller-granted path at profile-emission time and hands the
+# list here via _RAPTOR_GRANT_PINS (consumed + stripped like the fd
+# markers). SBPL grants are path STRINGS: a directory renamed into a
+# granted path inherits its grant, and on current macOS even a symlink
+# swapped into it routes writes through (both confirmed live) — the
+# seatbelt kernel side offers no inode binding, so this watcher
+# enforces the pin procedurally: verify in the child right before
+# exec, then re-verify every watcher poll tick; on mismatch report
+# b"P" on the status pipe and SIGKILL the whole sandbox tree.
+# HONEST RESIDUAL, two halves: (a) writes issued between a swap and
+# the next poll tick land before the kill (~0.1s cadence; longer only
+# while a process-table snapshot stalls the loop); (b) detection needs
+# the swap to PERSIST across a tick — an unsandboxed same-UID
+# accomplice that swaps and restores within one tick lands its window
+# of writes and the run returns clean (outside this sandbox's threat
+# boundary; documented, not defended).
+# The hardened profiles' `(deny signal (target others))` keeps the
+# sandboxed target from killing THIS watcher to suppress the check.
+# Keep the mismatch semantics in sync with _macos_spawn's
+# _grant_pin_mismatch (this shim runs `python -I` with no repo on
+# sys.path and cannot import it).
+
+
+def _resolve_grant_pins():
+    """[(path, dev, ino), ...] from _RAPTOR_GRANT_PINS, else []."""
+    raw = os.environ.get("_RAPTOR_GRANT_PINS")
+    if not raw:
+        return []
+    import json
+    try:
+        pins = json.loads(raw)
+    except ValueError:
+        return []
+    out = []
+    if isinstance(pins, list):
+        for p in pins:
+            if (isinstance(p, dict)
+                    and isinstance(p.get("path"), str)
+                    and isinstance(p.get("dev"), int)
+                    and isinstance(p.get("ino"), int)):
+                out.append((p["path"], p["dev"], p["ino"]))
+    return out
+
+
+def _pin_violation(pins):
+    """First (path, reason) whose pinned identity no longer holds, or
+    None. One lstat decides all three tamper shapes: vanished path,
+    symlink now at the path (catches a relocate-and-link-back to the
+    original inode too), different object renamed in (dev/ino)."""
+    import stat as _stat
+    for path, dev, ino in pins:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return (path, "no longer exists")
+        if _stat.S_ISLNK(st.st_mode):
+            return (path, "is now a symlink")
+        if (st.st_dev, st.st_ino) != (dev, ino):
+            return (path, "changed identity (dev/ino)")
+    return None
+# ─── end grant-path identity pins ───────────────────────────────────
+
 # ─── post-exit descendant sweep ─────────────────────────────────────
 # The killpg-based teardown only reaches processes that stayed in the
 # sandbox process group; the allow-default seatbelt profile does not
@@ -322,6 +391,7 @@ def main() -> int:
 
     death_fd = _resolve_death_fd()
     status_fd = _resolve_status_fd()
+    grant_pins = _resolve_grant_pins()
 
     # Forward common termination signals to the child group rather than
     # dying and orphaning it.
@@ -382,6 +452,31 @@ def main() -> int:
         # never trusted — the keep decision arrives via the argv flag,
         # which only the spawn side can set.
         os.environ.pop("_RAPTOR_KEEP_TRUST_MARKERS", None)
+        # Grant pins: consumed by this shim (child pre-exec check here,
+        # watcher polling in the parent branch) — never visible to the
+        # sandboxed target.
+        os.environ.pop("_RAPTOR_GRANT_PINS", None)
+        # Last check before handing the granted paths a live sandbox:
+        # a swap in the spawn→exec window must abort the run, not run
+        # the target against a retargeted grant. Report P on the
+        # status pipe (already dup2'd onto the fixed fd above) so the
+        # orchestrator raises instead of reading rc 121 as a target
+        # exit.
+        if grant_pins:
+            _bad = _pin_violation(grant_pins)
+            if _bad is not None:
+                # The status pipe sits on the fixed fd only when the
+                # spawn side wired one — never write to a bare fd 3.
+                if status_fd is not None:
+                    try:
+                        os.write(_STATUS_CHILD_FD, b"P")
+                    except OSError:
+                        pass
+                sys.stderr.write(
+                    f"raptor-seatbelt-shim: grant-path pin violated "
+                    f"before exec: {_bad[0]} {_bad[1]}\n"
+                )
+                os._exit(_PIN_VIOLATION_EXIT)
         # Keep this tuple in sync with core.config's TARGET_ENV_STRIP_SET
         # (this shim runs `python -I` with no repo on sys.path and cannot
         # import core), matching raptor-pid1-shim: trust markers, the
@@ -430,31 +525,40 @@ def main() -> int:
         os._exit(125)
 
     child_holder["pid"] = child
-    # The outer (watcher) process doesn't need the status write end; closing
-    # it here means the orchestrator's post-run read sees EOF promptly when
-    # no byte was written.
-    if status_fd is not None:
-        try:
-            os.close(status_fd)
-        except OSError:
-            pass
+    # The watcher KEEPS its status write end: it is the reporting
+    # channel for the sandbox-group pid (G, below) and grant-pin
+    # violations (P). EOF promptness for the orchestrator is
+    # unchanged — it drains the pipe only after this shim exits (its
+    # communicate() waits on us), at which point every write-end copy
+    # is closed.
     # Mirror the child into its own pgrp from the parent side too, to close
     # the fork→setpgid race (whichever wins, the child leads group == child).
     try:
         os.setpgid(child, child)
     except OSError:
         pass
+    # Report the sandbox process-group leader to the orchestrator.
+    # Written before any target code can run, so a watcher killed
+    # later cannot have skipped it: the parent's backstop sweep uses
+    # it to killpg-attribute group members after this shim is gone
+    # (the ppid walk from a dead shim pid attributes nothing).
+    if status_fd is not None:
+        try:
+            os.write(status_fd, b"G%d\n" % child)
+        except OSError:
+            pass
 
     # Latest while-alive process-table snapshot, refreshed by the reap
     # loop below. Feeds the post-exit sweep so setsid descendants stay
     # attributable across a reparent to launchd (see _sweep_orphans).
     live_holder = {"table": None}
 
-    def _teardown_and_exit():
-        # Orchestrator gone → snapshot the still-alive tree, SIGKILL the
-        # sandbox process group, then the process directly (covers the
-        # window before the child's setpgid), reap briefly, sweep the
-        # group-escapee descendants, and exit.
+    def _forced_teardown(exit_code):
+        # Snapshot the still-alive tree, SIGKILL the sandbox process
+        # group, then the process directly (covers the window before
+        # the child's setpgid), reap briefly, sweep the group-escapee
+        # descendants, and exit. Shared by the death-pipe teardown
+        # (orchestrator gone) and the grant-pin violation teardown.
         try:
             fresh = _ps_snapshot()
         except Exception:
@@ -474,7 +578,26 @@ def main() -> int:
         except Exception:
             sys.stderr.write(
                 "raptor-seatbelt-shim: teardown descendant sweep failed\n")
-        os._exit(_DEATH_TEARDOWN_EXIT)
+        os._exit(exit_code)
+
+    def _teardown_and_exit():
+        # Orchestrator gone (death-pipe EOF).
+        _forced_teardown(_DEATH_TEARDOWN_EXIT)
+
+    def _pin_teardown_and_exit(bad):
+        # A granted path's identity pin stopped matching: report P so
+        # the orchestrator raises (never returns this run as genuine),
+        # say why on stderr, and take the whole sandbox tree down.
+        if status_fd is not None:
+            try:
+                os.write(status_fd, b"P")
+            except OSError:
+                pass
+        sys.stderr.write(
+            f"raptor-seatbelt-shim: grant-path pin violated mid-run: "
+            f"{bad[0]} {bad[1]} — SIGKILLing the sandbox tree\n"
+        )
+        _forced_teardown(_PIN_VIOLATION_EXIT)
 
     # Unified reap loop (with or without the liveness pipe): 0.1s poll,
     # WNOHANG reap, periodic while-alive snapshot. The pre-fix
@@ -490,6 +613,16 @@ def main() -> int:
     last_snap = 0.0
     while status is None:
         now = _time.monotonic()
+        # Grant-pin re-verify on every poll tick (~0.1s): the bounded
+        # residual window between a swap and this check is documented
+        # at the pin block above. Runs BEFORE the snapshot (whose ps
+        # child can stall up to its timeout) and BEFORE the reap check
+        # below, so a violation on the run's last tick still reports P
+        # and a slow ps never widens the pin window at tick entry.
+        if grant_pins:
+            _bad = _pin_violation(grant_pins)
+            if _bad is not None:
+                _pin_teardown_and_exit(_bad)
         if now - last_snap >= _SNAPSHOT_INTERVAL_S:
             last_snap = now
             try:

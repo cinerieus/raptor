@@ -59,6 +59,10 @@ def test_dispatch_picks_macos_backend_on_darwin(reset_caches):
     fake_macos_result.returncode = 0
     fake_macos_result.stderr = b""
     fake_macos_result.sandbox_info = {"backend": "macos-seatbelt"}
+    # The status-pipe contract is default-deny: an unset MagicMock
+    # attribute reads as a truthy unknown status and is (correctly)
+    # refused. Model a clean spawn explicitly.
+    fake_macos_result._setup_status = None
 
     with mock.patch.object(sys, "platform", "darwin"), \
          mock.patch.object(context, "check_seatbelt_available",
@@ -163,6 +167,10 @@ def test_use_seatbelt_does_not_depend_on_check_net_available(reset_caches):
     fake_macos_result.returncode = 0
     fake_macos_result.stderr = b""
     fake_macos_result.sandbox_info = {"backend": "macos-seatbelt"}
+    # The status-pipe contract is default-deny: an unset MagicMock
+    # attribute reads as a truthy unknown status and is (correctly)
+    # refused. Model a clean spawn explicitly.
+    fake_macos_result._setup_status = None
 
     from core.sandbox import _macos_spawn as macos_mod
     with mock.patch.object(sys, "platform", "darwin"), \
@@ -198,6 +206,10 @@ def test_macos_does_not_resolve_unshare(reset_caches):
     fake_macos_result.returncode = 0
     fake_macos_result.stderr = b""
     fake_macos_result.sandbox_info = {"backend": "macos-seatbelt"}
+    # The status-pipe contract is default-deny: an unset MagicMock
+    # attribute reads as a truthy unknown status and is (correctly)
+    # refused. Model a clean spawn explicitly.
+    fake_macos_result._setup_status = None
 
     with mock.patch.object(sys, "platform", "darwin"), \
          mock.patch.object(context, "check_seatbelt_available",

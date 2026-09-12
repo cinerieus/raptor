@@ -30,6 +30,20 @@ pytestmark = pytest.mark.skipif(
 SHIM_PATH = Path(__file__).resolve().parents[3] / "libexec" / "raptor-seatbelt-shim"
 _READY_BYTE = b"K"
 
+
+def _drain(fd):
+    """Read the status channel to EOF. The channel now carries the
+    watcher's ``G<pid>\n`` sandbox-group report (and ``P`` on a
+    grant-pin violation) alongside the trampoline's readiness byte,
+    so a single fixed-size read no longer captures the protocol."""
+    data = b""
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
 # The in-sandbox trampoline _macos_spawn builds. On Linux (no sandbox-exec)
 # we run it directly as the shim's child — the "$@" args become the target.
 _TRAMPOLINE = ['/bin/sh', '-c', 'printf K >&3; exec 3>&-; exec "$@"',
@@ -97,10 +111,16 @@ class TestSeatbeltShim:
         os.close(sw)
         os.close(dr)
         out, _ = p.communicate(timeout=10)
-        byte = os.read(sr, 8)
+        data = _drain(sr)
         os.close(sr)
         os.close(dw)
-        assert byte == _READY_BYTE
+        assert _READY_BYTE in data
+        # The watcher reports the sandbox process-group leader before
+        # any target code runs — well-formed and plausible.
+        import re as _re
+        m = _re.search(rb"G(\d+)\n", data)
+        assert m, f"no sandbox-group report on the status channel: {data!r}"
+        assert int(m.group(1)) > 0
         assert out.strip() == "DEEP"
         assert p.returncode == 5
 
@@ -118,9 +138,9 @@ class TestSeatbeltShim:
         )
         os.close(sw)
         out, _ = p.communicate(timeout=10)
-        byte = os.read(sr, 8)
+        data = _drain(sr)
         os.close(sr)
-        assert byte == _READY_BYTE
+        assert _READY_BYTE in data
         assert "FD3_CLOSED" in out
         assert "FD3_OPEN" not in out
 
@@ -141,9 +161,9 @@ class TestSeatbeltShim:
         )
         os.close(sw)
         out, _ = p.communicate(timeout=10)
-        byte = os.read(sr, 8)
+        data = _drain(sr)
         os.close(sr)
-        assert byte == _READY_BYTE
+        assert _READY_BYTE in data
         assert "TRUST=<unset>" in out
         assert "SFD=<unset>" in out
         assert "DFD=<unset>" in out
@@ -187,9 +207,9 @@ class TestSeatbeltShim:
             rc = p.wait(timeout=5)
             time.sleep(0.5)
             survivors = [q for q in tree if _alive(q)]
-            byte = os.read(sr, 8)
+            data = _drain(sr)
             assert rc == 137, f"expected teardown exit, got {rc}"
-            assert byte == _READY_BYTE
+            assert _READY_BYTE in data
             assert survivors == [], f"leaked sandbox procs: {survivors}"
         finally:
             if p.poll() is None:
@@ -235,9 +255,9 @@ class TestSeatbeltShim:
         )
         os.close(sw)
         out, _ = p.communicate(timeout=10)
-        byte = os.read(sr, 8)
+        data = _drain(sr)
         os.close(sr)
-        assert byte == _READY_BYTE
+        assert _READY_BYTE in data
         for n in names:
             assert f"{n}=/pv/{n}" in out, (
                 f"{n} quarantined but not restored by the seatbelt shim"
