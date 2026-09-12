@@ -492,9 +492,23 @@ def test_seccomp_profile_full_emits_process_info_deny():
     left process-info-listpids open (proc_listallpids() enumerated
     every host pid) and the narrow pidinfo deny itself proved
     ineffective against proc_name() on current macOS (26.6.2).
-    `(target others)` keeps self-introspection working."""
+    The clause SHAPE is load-bearing: a `(target others)`-filtered
+    deny proved inert live on current macOS — the attested pattern is
+    a bare family deny followed by a `(target self)` allow (later
+    allow wins for this family), which keeps self-introspection
+    working."""
     p = seatbelt.build_profile(seccomp_profile="full")
-    assert "(deny process-info* (target others))" in p
+    assert "(deny process-info*)" in p
+    assert "(allow process-info* (target self))" in p
+    # Ordering pin: the self allow must FOLLOW the family deny —
+    # this family relies on later-allow-wins (like network*, unlike
+    # file-*). An inverted emission silently loses self-allowance.
+    lines = [line.strip() for line in p.splitlines() if line.strip()]
+    d = lines.index("(deny process-info*)")
+    a = lines.index("(allow process-info* (target self))")
+    assert a > d, (d, a)
+    # The inert filtered-deny shape must not come back.
+    assert "(target others)" not in p
     # The narrow forms are subsumed — regressing back to them would
     # silently reopen listpids enumeration.
     assert "(deny process-info-pidinfo" not in p
@@ -535,7 +549,8 @@ def test_strict_profile_emits_macos_strict_extras():
     blanket deny)."""
     p = seatbelt.build_profile(seccomp_profile="full",
                                profile_name="strict")
-    assert "(deny signal (target others))" in p
+    assert "(deny signal)" in p
+    assert "(allow signal (target self))" in p
     assert "(deny nvram*)" in p
     assert "(deny mach-lookup (require-not (require-any" in p
     for svc in seatbelt.MACOS_STRICT_MACH_SERVICES:
@@ -551,7 +566,31 @@ def test_full_profile_carries_hardening_baseline():
     never regress to the permissive pre-hardening shape."""
     p = seatbelt.build_profile(seccomp_profile="full",
                                profile_name="full")
-    assert "(deny signal (target others))" in p
+    assert "(deny signal)" in p
+    assert "(allow signal (target self))" in p
+    # Ordering pin (same later-allow-wins reliance as process-info):
+    # the self allow must FOLLOW the family deny.
+    lines = [line.strip() for line in p.splitlines() if line.strip()]
+    assert (lines.index("(allow signal (target self))")
+            > lines.index("(deny signal)"))
+    assert "(deny nvram*)" in p
+    assert "(deny mach-lookup (require-not (require-any" in p
+
+
+def test_strict_legacy_branch_emits_deny_then_allow_self_signal():
+    """The legacy strict-extras branch (profile_name='strict' with a
+    seccomp profile outside the hardening set — unreached in
+    production) must carry the same signal clause shape as the
+    hardened baseline: the filtered-deny form it historically used is
+    inert on current macOS."""
+    p = seatbelt.build_profile(seccomp_profile="debug",
+                               profile_name="strict")
+    assert "(deny signal)" in p
+    assert "(allow signal (target self))" in p
+    lines = [line.strip() for line in p.splitlines() if line.strip()]
+    assert (lines.index("(allow signal (target self))")
+            > lines.index("(deny signal)"))
+    assert "(target others)" not in p
     assert "(deny nvram*)" in p
     assert "(deny mach-lookup (require-not (require-any" in p
 
@@ -709,9 +748,11 @@ def test_untrusted_default_shape_carries_full_hardening():
         seccomp_profile="full", profile_name="full",
     )
     for clause in (
-        "(deny process-info* (target others))",
+        "(deny process-info*)",
+        "(allow process-info* (target self))",
         "(deny iokit-open)",
-        "(deny signal (target others))",
+        "(deny signal)",
+        "(allow signal (target self))",
         "(deny nvram*)",
         "(deny mach-lookup (require-not (require-any",
         "(deny sysctl-read (require-not (require-any",
@@ -764,7 +805,7 @@ def test_seccomp_profile_with_audit_mode_uses_report():
 def test_seccomp_profile_debug_omits_introspection_denies():
     """Linux's `--sandbox debug` is "full minus ptrace block" so
     gdb/rr can attach to the sandboxed target. The macOS analogue
-    must keep process-info-* on `target others` unrestricted so
+    must keep other-process process-info-* unrestricted so
     lldb / sample / dtrace can introspect — same intent both
     platforms. Regression catch: any earlier behaviour where
     "debug" engaged the same hardening as "full" silently broke
@@ -780,7 +821,7 @@ def test_seccomp_profile_full_distinct_from_debug():
     them, this test catches it."""
     full = seatbelt.build_profile(seccomp_profile="full")
     debug = seatbelt.build_profile(seccomp_profile="debug")
-    assert "(deny process-info* (target others))" in full
+    assert "(deny process-info*)" in full
     assert "(deny process-info*" not in debug
 
 

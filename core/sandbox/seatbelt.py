@@ -307,9 +307,9 @@ def build_profile(*,
         hardening set — the macOS expression of the same policy
         intent, "block introspection / IPC / capability-escape
         vectors that don't break common tools":
-          * (deny process-info* (target others))
+          * (deny process-info*) + (allow process-info* (target self))
           * (deny iokit-open)
-          * (deny signal (target others))
+          * (deny signal) + (allow signal (target self))
           * (deny nvram*)
           * mach-lookup allowlist-deny (MACOS_BASE_MACH_SERVICES)
           * sysctl-read allowlist-deny (MACOS_SYSCTL_READ_*)
@@ -579,8 +579,8 @@ def build_profile(*,
     # `debug` profile is deliberately EXCLUDED from the introspection
     # denies. Linux's `--sandbox debug` is "full minus ptrace block"
     # so gdb/rr can attach to the sandboxed target; on macOS the
-    # analogue is leaving process-info-* on `target others`
-    # unrestricted so lldb / dtrace / sample(1) can introspect the
+    # analogue is leaving other-process process-info-* unrestricted
+    # so lldb / dtrace / sample(1) can introspect the
     # target. Both platforms now share the same intent: "debug
     # profile = full enforcement EXCEPT keep debugger primitives
     # functional".
@@ -594,9 +594,9 @@ def build_profile(*,
     if seccomp_profile in _SECCOMP_PROFILES_HARDEN_INTROSPECTION:
         # Block introspection of OTHER processes — closest analogue
         # to Linux's seccomp-blocked ptrace under the "full" profile.
-        # `target others` so the sandboxed process can still introspect
-        # itself (legitimate things like reading /proc/self equivalents
-        # via libproc still work).
+        # The `(target self)` allow after the family deny keeps
+        # self-introspection working (legitimate things like reading
+        # /proc/self equivalents via libproc still work).
         if audit_mode:
             # Observe-don't-block duals for every family the
             # enforcement branch denies below.
@@ -617,13 +617,22 @@ def build_profile(*,
             # Whole process-info* family, not just pidinfo/pidfdinfo:
             # the narrow pair left process-info-listpids open
             # (proc_listallpids() enumerates every host pid — Linux's
-            # PID-ns hides them), and on current macOS (26.6.2) the
-            # narrow pidinfo deny itself proved ineffective against
-            # proc_name() on another pid while the family-level deny
-            # is the documented-stable construct (Apple's WebProcess
-            # profile uses `(deny process-info*)` + targeted allows).
-            # `target others` keeps self-introspection working.
-            parts.append("(deny process-info* (target others))")
+            # PID-ns hides them). Clause SHAPE matters on current
+            # macOS: `(deny X (target others))` proved INERT live on
+            # 26.6.2 (other-process pidinfo, listpids all still
+            # allowed under it), while Apple's own WebProcess profile
+            # uses the deny-then-allow-self pattern — a bare family
+            # deny followed by `(target self)` allows, relying on
+            # the later-allow-wins semantics this operation family
+            # shares with network* (NOT with file-*, where explicit
+            # deny outranks any later allow — see module docstring).
+            # Emit that attested shape; self-introspection keeps
+            # working through the allow. (Breadth note: Apple scopes
+            # its self allows per subclass; we allow the whole family
+            # to self — the delta is self-targeted only, so it grants
+            # nothing about OTHER processes.)
+            parts.append("(deny process-info*)")
+            parts.append("(allow process-info* (target self))")
             # iokit-open: userland driver/device access — the macOS
             # analogue of Linux's blocked device-capability escapes.
             # Empirically free (2026-08-15 probe battery: clang, make,
@@ -635,8 +644,12 @@ def build_profile(*,
             # every same-UID host process (operator's editor, sibling
             # runs) is signalable from inside the sandbox. Battery-
             # validated free (2026-08-15, as part of the strict-extras
-            # probe run).
-            parts.append("(deny signal (target others))")
+            # probe run). Same clause-shape story as process-info*
+            # above: the (target others)-filtered deny proved inert
+            # live on 26.6.2 (SIGCONT delivered to a host process
+            # under it) — emit deny-then-allow-self instead.
+            parts.append("(deny signal)")
+            parts.append("(allow signal (target self))")
             # NVRAM reads leak boot-args / firmware state; nothing in
             # the toolchain battery touches nvram.
             parts.append("(deny nvram*)")
@@ -740,7 +753,11 @@ def build_profile(*,
             parts.append("(allow nvram* (with report))")
             parts.append("(allow mach-lookup (with report))")
         else:
-            parts.append("(deny signal (target others))")
+            # Same deny-then-allow-self shape as the hardened
+            # baseline (the (target others) filter is inert on
+            # current macOS).
+            parts.append("(deny signal)")
+            parts.append("(allow signal (target self))")
             parts.append("(deny nvram*)")
             _mach_names = " ".join(
                 f"(global-name {_quote_sbpl(s)})"
