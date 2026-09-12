@@ -537,7 +537,7 @@ def main() -> int:
                   "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN",
                   "RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
                   "RAPTOR_DIR", "RAPTOR_OUT_DIR", "RAPTOR_TARGET_KIND",
-                  "RAPTOR_AGENT")
+                  "RAPTOR_AGENT", "RAPTOR_AGENT_MODEL")
         )
         for _m in _strip:
             os.environ.pop(_m, None)
