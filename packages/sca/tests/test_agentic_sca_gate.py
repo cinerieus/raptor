@@ -16,7 +16,10 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from raptor_agentic import _should_run_mechanical_sca
+from raptor_agentic import (
+    _persist_redacted_sca_stderr,
+    _should_run_mechanical_sca,
+)
 
 
 class TestMechanicalScaGate(unittest.TestCase):
@@ -32,6 +35,20 @@ class TestMechanicalScaGate(unittest.TestCase):
     def test_skipped_when_agent_missing(self):
         self.assertFalse(_should_run_mechanical_sca(None, False))
         self.assertFalse(_should_run_mechanical_sca(None, True))
+
+    def test_sca_stderr_redaction_is_shared_by_log_and_file(self):
+        with self.subTest("terminal text and file sink use one redaction"):
+            from tempfile import TemporaryDirectory
+
+            with TemporaryDirectory() as tmp:
+                output = Path(tmp)
+                safe = _persist_redacted_sca_stderr(
+                    "request failed token=secret-value-123\n", output,
+                )
+                persisted = (output / "stderr.log").read_text(
+                    encoding="utf-8")
+                self.assertEqual(persisted, safe)
+                self.assertNotIn("secret-value-123", safe)
 
 
 if __name__ == "__main__":

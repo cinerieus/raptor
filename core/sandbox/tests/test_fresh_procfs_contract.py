@@ -419,18 +419,16 @@ def test_require_fresh_procfs_reaches_the_spawn_layer(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
-def test_mount_ns_failure_refuses_landlock_only_for_untrusted(
+def test_mount_ns_failure_refuses_mountless_untrusted_without_opt_in(
         tmp_path, monkeypatch):
-    """A mount-ns setup failure ('M' status) on an untrusted run must
-    NOT silently degrade to the Landlock-only retry — that fallback
-    runs with no pid namespace and the host /proc, the exact posture
-    the fresh-procfs contract refuses. The operator override restores
-    the old degrade."""
+    """Untrusted work does not lose bind-tree isolation automatically."""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
     from core.sandbox.errors import SandboxSetupError
+    calls = []
 
     def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
         cp = subprocess.CompletedProcess(cmd, returncode=126,
                                          stdout="", stderr="")
         cp._setup_status = ("M", "forced mount-ns failure")
@@ -438,23 +436,254 @@ def test_mount_ns_failure_refuses_landlock_only_for_untrusted(
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
     monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run_untrusted(
+            ["sh", "-c", "test $$ -eq 1 && test -r /proc/1/status"],
+            target=str(tmp_path), output=str(tmp_path), timeout=60,
+            capture_output=True, text=True)
+    assert len(calls) == 1
+    assert calls[0]["skip_mount_ns"] is False
+    assert excinfo.value.setup_category == "M"
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1" in str(excinfo.value)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_mount_ns_failure_preserves_trusted_policy_and_tmp_baseline(
+        tmp_path, monkeypatch):
+    """Trusted fallback keeps the caller's reads and documented /tmp."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    calls = []
+
+    def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=0,
+                                         stdout="", stderr="")
+        cp._setup_status = (
+            ("M", "forced mount-ns failure")
+            if len(calls) == 1 else None)
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
     try:
-        with pytest.raises(SandboxSetupError, match="host-pid /proc"):
-            _ctx.run_untrusted(["true"], target=str(tmp_path),
-                               output=str(tmp_path), timeout=60)
+        with _ctx.sandbox(
+                block_network=True, target=str(tmp_path),
+                output=str(tmp_path), restrict_reads=False) as run:
+            result = run(["true"], timeout=60)
     except (pytest.skip.Exception, pytest.fail.Exception):
         raise
-    except Exception as e:  # noqa: BLE001 — host can't reach the lane
-        pytest.skip(f"mount-ns lane unavailable: {e}")
+    except Exception as exc:  # noqa: BLE001 - host capability gate
+        pytest.skip(f"mount-ns lane unavailable: {exc}")
+    assert result.returncode == 0
+    assert len(calls) == 2
+    assert calls[0]["restrict_reads"] is False
+    assert calls[1]["restrict_reads"] is False
+    assert "/tmp" in calls[1]["writable_paths"]
+    # context.sandbox() already scrubbed the caller environment. The lower
+    # backend must not strip wrapper-owned environment values a second time.
+    assert calls[1]["strict_env"] is False
 
+
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_read_restricted_mountless_retry_and_cache_use_private_scratch(
+        tmp_path, monkeypatch, caplog):
+    """Every host-visible namespace lane replaces shared temporary grants."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox import state as _state
+    calls = []
+
+    def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=0,
+                                         stdout="", stderr="")
+        cp._setup_status = (
+            ("M", "forced mount-ns failure")
+            if len(calls) == 1 else None)
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    monkeypatch.setattr(_ctx, "check_mount_available", lambda: True)
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
+    monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 6)
+    monkeypatch.setattr(_state, "_speculative_failure_cache", {})
+    monkeypatch.setattr(_state, "_mountless_backend_warned", False)
+    scratch_paths = []
+    with _ctx.sandbox(
+            block_network=True, target=str(tmp_path),
+            output=str(tmp_path), restrict_reads=True) as run:
+        first = run(["true"], timeout=60)
+        second = run(["true"], timeout=60)
+        assert first.sandbox_info["private_scratch"] is True
+        assert second.sandbox_info["private_scratch"] is True
+
+        assert [call["skip_mount_ns"] for call in calls] == [
+            False, True, True,
+        ]
+        for call in calls[1:]:
+            scratch = call["env"]["TMPDIR"]
+            scratch_paths.append(scratch)
+            assert call["env"]["TEMP"] == scratch
+            assert call["env"]["TMP"] == scratch
+            assert call["writable_paths"][0] == scratch
+            assert "/tmp" not in call["writable_paths"]
+            assert "/dev/shm" not in call["writable_paths"]
+            assert Path(scratch).stat().st_mode & 0o777 == 0o700
+        assert scratch_paths[0] != scratch_paths[1]
+
+    assert all(not Path(path).exists() for path in scratch_paths)
+    warnings = [
+        record for record in caplog.records
+        if "bind-tree isolation unavailable" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+@pytest.mark.parametrize("selection", ["outside-bind-tree", "explicit-skip"])
+def test_read_restricted_direct_mountless_selection_uses_private_scratch(
+        tmp_path, monkeypatch, selection):
+    """Every direct mountless selection gets the same private write policy."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox import state as _state
+    calls = []
+
+    def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=0,
+                                         stdout="", stderr="")
+        cp._setup_status = None
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    monkeypatch.setattr(_ctx, "check_mount_available", lambda: True)
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
+    monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 6)
+    if selection == "outside-bind-tree":
+        monkeypatch.setattr(
+            _ctx, "_cmd_visible_in_mount_tree", lambda *args: False,
+        )
+    monkeypatch.setattr(_state, "_mountless_backend_warned", False)
+    scratch = None
+    with _ctx.sandbox(
+            block_network=True, target=str(tmp_path),
+            output=str(tmp_path), restrict_reads=True) as run:
+        result = run(
+            ["true"], timeout=60,
+            skip_mount_ns=(selection == "explicit-skip"),
+        )
+        assert result.sandbox_info["private_scratch"] is True
+        assert len(calls) == 1
+        assert calls[0]["skip_mount_ns"] is True
+        scratch = calls[0]["env"]["TMPDIR"]
+        assert calls[0]["writable_paths"][0] == scratch
+        assert "/tmp" not in calls[0]["writable_paths"]
+        assert "/dev/shm" not in calls[0]["writable_paths"]
+
+    assert scratch is not None
+    assert not Path(scratch).exists()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+@pytest.mark.parametrize("restrict_reads", [True, False])
+def test_mountless_untrusted_refuses_landlock_abi_below_three(
+        tmp_path, monkeypatch, restrict_reads):
+    """ABI 1/2 cannot safely contain any mountless untrusted run."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    calls = []
+
+    def fail_bind(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=126,
+                                         stdout="", stderr="")
+        cp._setup_status = ("M", "forced mount-ns failure")
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fail_bind)
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
+    monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 2)
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run_untrusted(
+            ["true"], target=str(tmp_path), output=str(tmp_path), timeout=60,
+            restrict_reads=restrict_reads,
+        )
+    assert len(calls) == 1
+    assert "ABI is below 3" in str(excinfo.value)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_mountless_retry_blocks_home_credentials(tmp_path, monkeypatch):
+    """An opted-in read-restricted fallback blocks home credentials."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    real_spawn = _spawn_mod.run_sandboxed
+    calls = []
+    secret = Path.home() / f".raptor_mountless_read_test_{os.getpid()}"
+    secret.write_text("SECRET-CREDENTIAL\n")
+
+    def fail_first_bind(cmd, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            cp = subprocess.CompletedProcess(cmd, returncode=126,
+                                             stdout="", stderr="")
+            cp._setup_status = ("M", "forced mount-ns failure")
+            return cp
+        return real_spawn(cmd, **kwargs)
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fail_first_bind)
     monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
     try:
-        r = _ctx.run_untrusted(["true"], target=str(tmp_path),
-                               output=str(tmp_path), timeout=60)
-    except Exception as e:  # noqa: BLE001
-        pytest.skip(f"override lane unavailable: {e}")
-    assert r.returncode == 0, (
-        "operator override did not restore the Landlock-only degrade")
+        try:
+            result = _ctx.run_untrusted(
+                ["cat", str(secret)], target=str(tmp_path),
+                output=str(tmp_path), timeout=60,
+                capture_output=True, text=True)
+        except Exception as exc:  # noqa: BLE001 - host capability gate
+            pytest.skip(f"mount-ns lane unavailable: {exc}")
+        assert len(calls) == 2
+        assert calls[1]["restrict_reads"] is True
+        assert result.returncode != 0
+        assert "SECRET-CREDENTIAL" not in result.stdout
+        assert result.sandbox_info["restrict_reads"] is True
+        assert result.sandbox_info["mount_ns_active"] is False
+    finally:
+        secret.unlink(missing_ok=True)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_secure_namespace_retry_fails_closed(tmp_path, monkeypatch):
+    """The target never runs when the reduced backend cannot engage."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxSetupError
+    calls = []
+
+    def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=126,
+                                         stdout="", stderr="")
+        cp._setup_status = (
+            "M" if len(calls) == 1 else "F",
+            "forced setup failure",
+        )
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    with pytest.raises(SandboxSetupError) as excinfo:
+        with _ctx.sandbox(
+                block_network=True, target=str(tmp_path),
+                output=str(tmp_path), restrict_reads=False) as run:
+            run(["true"], timeout=60)
+    assert excinfo.value.setup_category == "F"
+    assert [call["skip_mount_ns"] for call in calls] == [False, True]
 
 
 @pytest.mark.integration

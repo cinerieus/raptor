@@ -36,6 +36,7 @@ def test_constant_contents():
     assert "_RAPTOR_TRUSTED" in STRIP_SET
     assert "RAPTOR_SESSION_PID" in STRIP_SET
     assert "RAPTOR_SESSION_TOKEN" in STRIP_SET
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in STRIP_SET
 
 
 def test_session_credential_is_allowlisted_but_stripped():
@@ -44,6 +45,13 @@ def test_session_credential_is_allowlisted_but_stripped():
     combination, not a contradiction."""
     assert "RAPTOR_SESSION_PID" in RaptorConfig.SAFE_ENV_ALLOWLIST
     assert "RAPTOR_SESSION_TOKEN" in RaptorConfig.SAFE_ENV_ALLOWLIST
+
+
+def test_degraded_untrusted_consent_is_allowlisted_but_stripped():
+    """RAPTOR workers inherit consent, but scanned code cannot change it."""
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in (
+        RaptorConfig.SAFE_ENV_ALLOWLIST
+    )
 
 
 def test_pid1_shim_tuple_in_sync():

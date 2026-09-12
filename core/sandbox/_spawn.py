@@ -2533,9 +2533,11 @@ def run_sandboxed(
                     if strict_env:
                         from core.config import RaptorConfig
                         _dangerous = set(RaptorConfig.DANGEROUS_ENV_VARS)
+                        _safe_git = RaptorConfig.GIT_ENV_VARS
                         exec_env = {
                             k: v for k, v in exec_env.items()
-                            if k not in _dangerous
+                            if (k not in _dangerous
+                                or _safe_git.get(k) == v)
                         }
                 else:
                     # env=None → scrubbed allowlist env, NOT the full

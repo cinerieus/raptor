@@ -561,6 +561,11 @@ class RaptorConfig:
         # TARGET_ENV_STRIP_SET (sandboxed code never sees the
         # credential; see core/sandbox/context.py).
         "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN",
+        # Host-level consent for RAPTOR's reduced untrusted sandbox tier.
+        # RAPTOR-owned workers must inherit it so the decision made at the
+        # launcher boundary is not silently lost.  Target-bound envs strip it
+        # below, preventing scanned code from changing sandbox policy.
+        "RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
     })
 
     # Variables that must NEVER reach code executed on behalf of a
@@ -577,6 +582,7 @@ class RaptorConfig:
     TARGET_ENV_STRIP_SET = frozenset({
         "CLAUDECODE", "_RAPTOR_TRUSTED",
         "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN",
+        "RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
         # Framework-identity values: each one names RAPTOR (or its
         # checkout / output layout) to any target that runs `env`,
         # defeating the anti-fingerprint posture in one getenv. No
@@ -862,7 +868,9 @@ class RaptorConfig:
     # on the platform (e.g. some Windows builds).
     GIT_ENV_VARS: ClassVar[dict] = {
         "GIT_TERMINAL_PROMPT": "0",
-        "GIT_ASKPASS": "true",
+        # Absolute so Git cannot resolve an operator-controlled executable
+        # through PATH inside a sandbox.
+        "GIT_ASKPASS": "/usr/bin/true",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",

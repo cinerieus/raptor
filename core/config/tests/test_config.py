@@ -92,6 +92,13 @@ class TestGetSafeEnv:
         env = RaptorConfig.get_safe_env()
         assert env.get("PYTHONUNBUFFERED") == "1"
 
+    def test_degraded_untrusted_consent_reaches_raptor_workers(self):
+        with patch.dict(os.environ, {
+            "RAPTOR_ALLOW_DEGRADED_UNTRUSTED": "1",
+        }):
+            env = RaptorConfig.get_safe_env()
+        assert env.get("RAPTOR_ALLOW_DEGRADED_UNTRUSTED") == "1"
+
     def test_ef_benign_knobs_survive_scrub(self):
         """Numeric/boolean feasibility knobs must reach scrub-spawned
         children (the loader runs inside them); the exec-path class
@@ -156,7 +163,7 @@ class TestGetGitEnv:
 
     def test_sets_askpass(self):
         env = RaptorConfig.get_git_env()
-        assert env.get("GIT_ASKPASS") == "true"
+        assert env.get("GIT_ASKPASS") == "/usr/bin/true"
 
     def test_also_strips_dangerous_vars(self):
         injected = {var: "bad" for var in RaptorConfig.DANGEROUS_ENV_VARS}

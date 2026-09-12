@@ -102,12 +102,11 @@ namespace-capable hosts: untrusted runs mount a pid-namespace-local
 `/proc` inside the sandbox (hiding the host process table and the
 spawn chain's own environ images). The requirement binds everywhere
 the contract would otherwise silently degrade: a failed fresh-proc
-mount aborts instead of warning, a mount-ns setup failure refuses
-the Landlock-only retry, hosts whose mount-namespace backend cannot
+mount aborts instead of warning, a mount-ns setup failure refuses the
+mountless retry, hosts whose namespace backend cannot
 engage at all (`newuidmap` missing) refuse untrusted runs up front,
-and so do the pre-flight demotions (a tool resolving outside the
-mount-ns bind tree — pass `tool_paths=` — a speculative-failure
-cache hit, `skip_mount_ns=`, and `pass_fds=`) — each with a
+and so do pre-flight demotions (a tool outside the bind tree, a cached
+bind-tree failure, `skip_mount_ns=`, and `pass_fds=`), each with a
 `SandboxSetupError` naming this override. Witness bytes passed via
 `input=` do NOT degrade the lane: they convert to a private unlinked
 stdin spool and ride the fork backend. `--sandbox none` remains
@@ -723,7 +722,8 @@ seam and scanned for drift.
 - **`PROXY_ENV_VARS`** — both cases of the proxy family; stripped by
   default, preserved + normalised on opt-in (see above).
 - **`GIT_ENV_VARS`** — git-config isolation applied to *every*
-  sanitised subprocess env: `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=true`,
+  sanitised subprocess env: `GIT_TERMINAL_PROMPT=0`,
+  `GIT_ASKPASS=/usr/bin/true`,
   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`,
   `GIT_CONFIG_NOSYSTEM=1` — operator gitconfig (gpg signing,
   credential helpers, fsmonitor) never influences internal git.

@@ -376,6 +376,7 @@ def main() -> int:
                 ("_RAPTOR_DEATH_FD",) if keep_trust_markers
                 else ("_RAPTOR_DEATH_FD", "_RAPTOR_TRUSTED", "CLAUDECODE",
                       "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN",
+                      "RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
                       # Framework-identity values (checkout path,
                       # output layout, target-kind override) are pure
                       # "inside RAPTOR" tells — no target consumes

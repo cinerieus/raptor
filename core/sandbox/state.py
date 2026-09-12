@@ -153,6 +153,9 @@ _pidns_proc_mount_unavailable_warned = False
 # level mount probe); this flag is for the user-facing warning emitted from
 # the public sandbox() path that names the practical posture and remediation.
 _sandbox_landlock_only_warned = False
+# Namespace-preserving bind-tree fallback. The posture is static enough for a
+# process-level warning; per-call reporting still records every affected run.
+_mountless_backend_warned = False
 _bare_run_posture_warned = False
 _net_and_tcp_allowlist_warned = False
 # Degraded-mode Landlock TCP-connect deny (block_network without a

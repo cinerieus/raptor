@@ -966,6 +966,26 @@ class TestE2EEgressProxy(unittest.TestCase):
             self.assertIn("GIT_CONFIG_SYSTEM=/dev/null", r.stdout)
             self.assertIn("MY_LEGITIMATE_VAR=kept", r.stdout)
 
+    def test_strict_env_keeps_only_exact_git_neutralisers(self):
+        """Strict filtering keeps /dev/null pins but rejects overrides."""
+        with TemporaryDirectory() as out:
+            r = sandbox_run(
+                ["env"], target=out, output=out,
+                env={
+                    "PATH": "/usr/bin",
+                    "HOME": out,
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/tmp/attacker-config",
+                    "LD_PRELOAD": "/tmp/attacker.so",
+                },
+                strict_env=True,
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(r.returncode, 0)
+            self.assertIn("GIT_CONFIG_GLOBAL=/dev/null", r.stdout)
+            self.assertNotIn("GIT_CONFIG_SYSTEM=", r.stdout)
+            self.assertNotIn("LD_PRELOAD=", r.stdout)
+
     def test_run_untrusted_detaches_controlling_tty(self):
         """run_untrusted must put the child in a new session (setsid) so
         it has no controlling tty.
