@@ -33,7 +33,11 @@ Feature parity table (Linux ⇄ macOS):
     rlimits via prlimit + preexec      → preexec rlimits (same code
                                         path); ⚠  RLIMIT_NPROC is
                                         per-UID host-wide on macOS,
-                                        not per-namespace
+                                        not per-namespace — applied
+                                        as current-count + budget
+                                        (the Linux no-namespace
+                                        lane's relative ceiling),
+                                        never as an absolute cap
     ptrace tracer (audit_mode)         → `log stream` reader (see
                                         seatbelt_audit.LogStreamer)
     fake_home env override             → identical (env mutation)
@@ -69,9 +73,14 @@ Implications of the ⚠ items for the threat model:
      child can read everything the calling user can. Always pass
      restrict_reads=True for untrusted code (run_untrusted does this
      by default).
-  3. RLIMIT_NPROC: a fork-bombing sandboxed child can exhaust the
-     calling user's process table host-wide. Lower nproc_limit on
-     macOS than on Linux when running unknown code.
+  3. RLIMIT_NPROC: the cap counts the calling user's TOTAL
+     simultaneous processes, so the configured budget is applied as
+     a ceiling RELATIVE to current usage (count + budget, clamped to
+     the hard limit) — a fork bomb is bounded to the budget's
+     headroom, while pre-existing same-UID processes (browser
+     sessions, sibling runs) no longer push every in-sandbox fork
+     into EAGAIN. Growth beyond the ceiling still lands on the
+     shared per-UID table; keep budgets modest on shared hosts.
   4. audit_verbose granularity: macOS records are SBPL-action-level
      (e.g. "file-read-data /etc/foo") rather than syscall+argv
      level. Linux's tracer can show "openat(/etc/foo, O_RDONLY)";
@@ -285,6 +294,31 @@ def _kill_pid(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+def _same_uid_process_count() -> int | None:
+    """Current same-UID process count via ps (macOS has no /proc), or
+    None when ps is unavailable/broken. RLIMIT_NPROC on macOS counts
+    the user's simultaneous PROCESSES (unlike Linux, where the task
+    count includes threads — see the Linux lane's thread-aware count
+    in context.py), so a plain pid count is the right denominator for
+    the count-plus-budget ceiling."""
+    uid = str(os.geteuid())
+    for ps in _PS_CANDIDATES:
+        try:
+            proc = subprocess.run(
+                [ps, "-xo", "pid=", "-U", uid],
+                capture_output=True, text=True,
+                timeout=_PS_TIMEOUT_S, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            count = sum(
+                1 for line in proc.stdout.splitlines() if line.strip())
+            if count > 0:
+                return count
+    return None
 
 
 def _grant_pin_mismatch(path: str, dev: int, ino: int) -> str:
@@ -802,34 +836,56 @@ def run_sandboxed(cmd: list[str], *,
     # — works as-is on macOS (POSIX). It deliberately skips
     # RLIMIT_NPROC on Linux because Linux applies nproc via the
     # prlimit-inside-unshare wrapper (so the limit counts against the
-    # ns-local UID, not the host's). macOS has no unshare wrapper,
-    # so we apply nproc INSIDE preexec here. The limit then counts
-    # against the calling UID host-wide — coarser than Linux's per-
-    # namespace semantics, but the threat model (bound the fork count
-    # of THIS sandboxed child) is met. Operators on shared hosts
-    # should set a lower nproc on macOS than on Linux. Documented in
-    # this module's top docstring.
+    # ns-local UID, not the host's). macOS has no unshare wrapper, so
+    # nproc is applied INSIDE preexec here, where it counts against
+    # the calling UID host-wide. That is why the configured budget
+    # cannot be applied as an ABSOLUTE ceiling (the pre-fix shape):
+    # on a host already running more same-UID processes than the
+    # budget — an interactive Mac with a browser session gets there —
+    # an absolute cap sits BELOW current usage and every fork inside
+    # the sandbox fails EAGAIN; on a quiet host it admits
+    # (budget - count) forks instead of the budget. Mirror the Linux
+    # no-namespace lane instead: ceiling = current same-UID process
+    # count + configured budget, clamped to the hard limit (same
+    # arithmetic as preexec._make_preexec_fn's host_nproc_cap arm).
+    # When ps cannot produce a count, skip the cap with a warning
+    # (Linux parity: the /proc-unreadable case skips there too) — a
+    # blind absolute cap risks breaking the run outright.
     effective_limits = dict(limits or {})
     base_preexec = _make_preexec_fn(effective_limits)
+    preexec = base_preexec
     if nproc_limit and nproc_limit > 0:
-        import resource as _resource
-        _nproc = int(nproc_limit)
-        def preexec() -> None:
-            base_preexec()
-            try:
-                _resource.setrlimit(
-                    _resource.RLIMIT_NPROC, (_nproc, _nproc)
-                )
-            except (ValueError, OSError):
-                # Best-effort. Some macOS versions cap NPROC via
-                # different sysctls and setrlimit may EPERM the
-                # call when NPROC > kern.maxproc/UID. The module
-                # docstring already documents this as soft posture;
-                # emit a fork-safe warning so operators can observe
-                # when the documented-soft bound becomes a silent no-op.
-                warn_post_fork(b"sandbox: _macos_spawn RLIMIT_NPROC setrlimit failed -- documented soft posture became silent no-op\n")
-    else:
-        preexec = base_preexec
+        _uid_count = _same_uid_process_count()
+        if _uid_count is None:
+            logger.warning(
+                "sandbox: could not count same-UID processes via ps — "
+                "skipping the RLIMIT_NPROC fork-bomb bound for this "
+                "run (an absolute cap below current usage would make "
+                "every fork in the sandbox fail)"
+            )
+        else:
+            import resource as _resource
+            _nproc_ceiling = _uid_count + int(nproc_limit)
+
+            def preexec() -> None:
+                base_preexec()
+                try:
+                    _, _hard = _resource.getrlimit(
+                        _resource.RLIMIT_NPROC)
+                    _eff = (_nproc_ceiling
+                            if _hard == _resource.RLIM_INFINITY
+                            else min(_nproc_ceiling, _hard))
+                    _resource.setrlimit(
+                        _resource.RLIMIT_NPROC, (_eff, _eff)
+                    )
+                except (ValueError, OSError):
+                    # Best-effort. Some macOS versions cap NPROC via
+                    # different sysctls and setrlimit may EPERM the
+                    # call when NPROC > kern.maxproc/UID. The module
+                    # docstring already documents this as soft posture;
+                    # emit a fork-safe warning so operators can observe
+                    # when the documented-soft bound becomes a silent no-op.
+                    warn_post_fork(b"sandbox: _macos_spawn RLIMIT_NPROC setrlimit failed -- documented soft posture became silent no-op\n")
 
     # 4. Wrap cmd with sandbox-exec, interposed by the seatbelt shim.
     #    Layout (outermost first):

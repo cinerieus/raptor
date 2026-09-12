@@ -533,7 +533,7 @@ layers. Defaults (override per limit in
 | `memory_mb` | `0` (off) | `RLIMIT_AS` | Deliberately off: ASAN-instrumented targets reserve ~56 TiB of shadow VA and break under ANY finite cap, and `/validate` PoCs run ASAN through the untrusted entry points. Set a value only for workloads you know are ASAN-free; use cgroup `memory.max` for a real RAM bound. |
 | `max_file_mb` | `~10240` (+ per-install jitter) | `RLIMIT_FSIZE` | Caps a single written file (10 GB accommodates debug builds and corpora). |
 | `cpu_seconds` | `~3600` (+ jitter) | `RLIMIT_CPU` | Soft limit fires SIGXCPU 1s before the hard kill. |
-| `nproc` | `~1024` (+ jitter) | `RLIMIT_NPROC` | Namespace paths count it against the ns-local uid (nobody = zero pre-existing processes). On the Landlock-only path (no user namespace) the same budget is applied as an absolute ceiling of current-same-uid-process-count + `nproc`, bounding fork bombs without counting the operator's unrelated work. |
+| `nproc` | `~1024` (+ jitter) | `RLIMIT_NPROC` | Namespace paths count it against the ns-local uid (nobody = zero pre-existing processes). On the Landlock-only path (no user namespace) the same budget is applied as an absolute ceiling of current-same-uid-process-count + `nproc`, bounding fork bombs without counting the operator's unrelated work. The macOS seatbelt lane applies the same relative ceiling (count via `ps`; macOS `RLIMIT_NPROC` counts the user's processes host-wide). |
 | `nofile` | `~4096` (+ jitter) | `RLIMIT_NOFILE` | Bounds fd-exhaustion DoS; clamped to the inherited hard limit. `0` disables. |
 
 Defaults carry a small deterministic per-install surplus (stable
