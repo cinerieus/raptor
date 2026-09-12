@@ -341,10 +341,18 @@ class TestRootfsPivotE2E(_RootfsE2EBase):
     def test_signal_death_mirrored_as_128_plus_n(self):
         """abort()-class deaths are the raison d'être of the PID-1
         waiter: a PID-1 target would have the self-signal filtered by
-        the kernel and hang; as PID 2 it dies and the waiter mirrors
-        the shim convention observe._interpret_result decodes."""
+        the kernel and hang; as PID 2 it dies, the waiter mirrors
+        128+sig, and the raw-wait-status side channel upgrades the
+        parent's view back to WIFSIGNALED (rc < 0, mechanical
+        waitstatus grade) — observe._interpret_result decodes both
+        shapes to the same crash identity."""
         r = self._run(["/bin/init", "die6"])  # SIGABRT
-        self.assertEqual(r.returncode, 128 + 6, f"stderr: {r.stderr!r}")
+        self.assertEqual(r.returncode, -6, f"stderr: {r.stderr!r}")
+        self.assertTrue(r.sandbox_info.get("crashed"),
+                        r.sandbox_info)
+        self.assertEqual(r.sandbox_info.get("signal"), "SIGABRT")
+        self.assertEqual(r.sandbox_info.get("signal_provenance"),
+                         "waitstatus")
 
     def test_missing_cmd_in_image_fails_closed(self):
         """cmd[0] absent from the image → exec fails inside the mount

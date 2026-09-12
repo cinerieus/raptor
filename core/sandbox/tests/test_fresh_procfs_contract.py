@@ -167,7 +167,10 @@ def test_untrusted_procfs_is_pid_ns_local(tmp_path):
     assert pid_count <= 8, (
         f"{pid_count} pids visible in /proc — host procfs is leaking "
         f"into the untrusted sandbox (fresh proc mount regressed?)")
-    assert self_pid == 1
+    # pid-ns-local pid 2: PID 1 is the in-ns init waiter (the target
+    # must not be pid-1, or the kernel's pid-1 signal filter distorts
+    # its crash identities).
+    assert self_pid == 2
     joined = " ".join(lines)
     assert "NoNewPrivs: 1" in joined
     assert "Seccomp: 2" in joined, (

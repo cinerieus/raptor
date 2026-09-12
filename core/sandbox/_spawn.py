@@ -946,28 +946,43 @@ def _subid_range(path: str, user: str, numeric_id: str) -> tuple[int, int] | Non
     return None
 
 
-def _pid1_split_for_waiter() -> None:
+def _pid1_split_for_waiter(wstat_w: int | None = None) -> None:
     """Fork so the exec target becomes PID 2 of the pid-ns; PID 1 (this
     process) stays as a minimal in-process init that reaps children and
     mirrors the target's exit.
 
-    Rationale (rootfs mode): a container-image entrypoint running as
-    pid-ns PID 1 has kill(2)-delivered signals silently filtered by the
-    kernel (abort(), raise(SIGFPE), self-kill test harnesses) — the
-    same problem libexec/raptor-pid1-shim solves for the subprocess
-    path, solved here in-process because the shim's interpreter isn't
-    guaranteed to exist inside a foreign image rootfs. PID 1 cannot
-    re-raise the death signal on itself (same filter), so a signalled
-    target is mirrored as exit ``128 + signum`` — the shim convention
-    ``observe._interpret_result`` already decodes. SIGTERM / SIGINT /
-    SIGHUP / SIGQUIT arriving at PID 1 are forwarded to the target;
-    orphans are reaped and their statuses discarded.
+    Rationale: a target running as pid-ns PID 1 has kill(2)-delivered
+    signals silently filtered by the kernel (abort(), raise(SIGFPE),
+    self-kill test harnesses) — solved in-process because a wrapper
+    interpreter isn't guaranteed to exist inside a foreign image
+    rootfs. PID 1 cannot re-raise the death signal on itself (same
+    filter), so a signalled target is mirrored as exit ``128 +
+    signum`` — the convention ``observe._interpret_result`` already
+    decodes. SIGTERM / SIGINT / SIGHUP / SIGQUIT arriving at PID 1
+    are forwarded to the target; orphans are reaped and their
+    statuses discarded.
+
+    ``wstat_w``: write end of the raw-wait-status side channel to the
+    setup child. The 128+sig mirror is TARGET-FORGEABLE at the exit-
+    code layer (``exit(139)`` is indistinguishable from a real
+    SIGSEGV), so this trusted init also reports the kernel's raw
+    ``waitpid`` status for the target out-of-band; the setup child
+    re-raises a genuinely-signalled status on itself, preserving the
+    parent's WIFSIGNALED view (rc < 0, mechanical evidence grade) that
+    the target-as-PID-1 layout used to provide for fault signals.
+    The write end exists ONLY here and (briefly, CLOEXEC + swept)
+    in the exec path — the target can never reach it.
 
     Returns in the CHILD (the exec path). The PID 1 side never returns
     (``os._exit``).
     """
     child = os.fork()
     if child == 0:
+        # Exec path: drop the side-channel write end immediately so
+        # EOF semantics never depend on the pre-exec fd sweep.
+        if wstat_w is not None:
+            with contextlib.suppress(OSError):
+                os.close(wstat_w)
         return  # exec path continues as PID 2
 
     def _forward(signum, _frame, _child=child) -> None:
@@ -977,6 +992,15 @@ def _pid1_split_for_waiter() -> None:
     for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
         with contextlib.suppress(OSError, ValueError):
             signal.signal(_sig, _forward)
+
+    def _report_and_exit(status: int, code: int) -> None:
+        if wstat_w is not None:
+            with contextlib.suppress(OSError):
+                os.write(wstat_w, f"{status}".encode("ascii"))
+            with contextlib.suppress(OSError):
+                os.close(wstat_w)
+        os._exit(code)
+
     while True:
         try:
             pid_, status = os.wait()
@@ -987,9 +1011,9 @@ def _pid1_split_for_waiter() -> None:
         if pid_ != child:
             continue  # reap orphans; only the target's status mirrors
         if os.WIFEXITED(status):
-            os._exit(os.WEXITSTATUS(status))
+            _report_and_exit(status, os.WEXITSTATUS(status))
         if os.WIFSIGNALED(status):
-            os._exit(128 + os.WTERMSIG(status))
+            _report_and_exit(status, 128 + os.WTERMSIG(status))
         # stopped/continued — keep waiting
 
 
@@ -2431,6 +2455,12 @@ def run_sandboxed(
             # CAP_SYS_PTRACE doesn't apply). Found via bpftrace 2026-06-14:
             # __ptrace_may_access fires with target_pid=1 target_comm=systemd
             # then returns -EPERM, breaking gdb's bp insertion.
+            # Raw-wait-status side channel from the in-ns init waiter
+            # (see _pid1_split_for_waiter): created before the pid-ns
+            # fork so the waiter inherits the write end.
+            _tgt_wstat_r = _tgt_wstat_w = -1
+            if not skip_pid_ns:
+                _tgt_wstat_r, _tgt_wstat_w = os.pipe()
             if not skip_pid_ns:
                 os.unshare(CLONE_NEWPID)
             grand = os.fork()
@@ -2618,13 +2648,32 @@ def run_sandboxed(
                     _status_step = b"S"
                     seccomp_fn()
                 _status_step = b"X"
-                if rootfs is not None and not skip_pid_ns:
-                    # Rootfs mode: split so the image entrypoint is PID 2
-                    # (a PID-1 entrypoint has kill(2)-delivered signals
-                    # filtered — abort()/raise() deaths would vanish).
-                    # Returns in the exec-path child; PID 1 stays behind
-                    # as the in-process init mirroring exit statuses.
-                    _pid1_split_for_waiter()
+                if not skip_pid_ns:
+                    # Split so the target is PID 2 of the pid-ns, not
+                    # PID 1: a PID-1 target has kill(2)-delivered
+                    # signals silently filtered by the kernel —
+                    # abort() falls through raise(SIGABRT) to glibc's
+                    # ABORT_INSTRUCTION and reads as SIGSEGV,
+                    # raise(SIGFPE)/self-kill harnesses vanish
+                    # entirely — corrupting crash observability for
+                    # every oracle downstream. Originally rootfs-only
+                    # (the deleted pid1 shim carried this duty on the
+                    # unshare-CLI lane; the mount lane silently had
+                    # the distortion); now every pid-ns spawn splits,
+                    # so signal identity is preserved on all shapes.
+                    # Returns in the exec-path child; PID 1 stays
+                    # behind as the in-process init mirroring exit
+                    # statuses (128+sig, the convention
+                    # observe._interpret_result decodes; the raw
+                    # kernel wait status also travels the trusted
+                    # side channel so signal evidence keeps its
+                    # mechanical waitstatus grade) and forwarding
+                    # SIGTERM/SIGINT/SIGHUP/SIGQUIT.
+                    if _tgt_wstat_r >= 0:
+                        with contextlib.suppress(OSError):
+                            os.close(_tgt_wstat_r)
+                    _pid1_split_for_waiter(
+                        _tgt_wstat_w if _tgt_wstat_w >= 0 else None)
                 if env is not None:
                     exec_env = env
                     # Defense-in-depth: context.py:run() already strips
@@ -2727,6 +2776,13 @@ def run_sandboxed(
                     os._exit(126)
                 os._exit(125)  # unreachable
             else:
+                # Drop our copy of the waiter's wait-status write end
+                # NOW: the post-reap read below must see EOF once the
+                # waiter (sole remaining writer) exits, and a held
+                # write end here would deadlock it.
+                if _tgt_wstat_w >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(_tgt_wstat_w)
                 # Report the exec'ing grandchild's pid to the parent.
                 # One short ASCII write is atomic (well under PIPE_BUF);
                 # best-effort — if the parent went away the observation
@@ -2802,6 +2858,41 @@ def run_sandboxed(
                         os.close(_forwarder_death_w)
                     except OSError:
                         pass
+                # Raw target wait status from the trusted in-ns init
+                # waiter (see _pid1_split_for_waiter): the waiter can
+                # only mirror a signalled target as exit 128+sig — an
+                # exit-code shape the target itself can forge — so it
+                # reports the kernel's waitpid status out-of-band and
+                # THIS process (outside the pid-ns, not its init)
+                # re-raises the signal, restoring the parent's
+                # WIFSIGNALED view (rc < 0, mechanical evidence
+                # grade). The waiter exited, so the read is a bounded
+                # bytes-then-EOF drain; garbage or absence falls back
+                # to mirroring the waiter's own status below.
+                _tgt_status: int | None = None
+                if _tgt_wstat_r >= 0:
+                    _wbuf = b""
+                    with contextlib.suppress(OSError):
+                        while len(_wbuf) < 64:
+                            _chunk = os.read(_tgt_wstat_r, 64)
+                            if not _chunk:
+                                break
+                            _wbuf += _chunk
+                    with contextlib.suppress(OSError):
+                        os.close(_tgt_wstat_r)
+                    with contextlib.suppress(ValueError):
+                        _tgt_status = int(_wbuf.decode("ascii", "replace"))
+                if (_tgt_status is not None and _tgt_status >= 0
+                        and os.WIFSIGNALED(_tgt_status)
+                        and os.WIFEXITED(status)):
+                    sig = os.WTERMSIG(_tgt_status)
+                    import signal as _signal
+                    try:
+                        _signal.signal(sig, _signal.SIG_DFL)
+                    except (OSError, ValueError):
+                        pass
+                    os.kill(os.getpid(), sig)
+                    os._exit(128 + sig)
                 if os.WIFEXITED(status):
                     os._exit(os.WEXITSTATUS(status))
                 if os.WIFSIGNALED(status):

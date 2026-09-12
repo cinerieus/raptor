@@ -104,7 +104,10 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
     @requires_userns
     def test_basic_execvp(self):
         """Fork+newuidmap+mount+Landlock+seccomp+exec chain runs. The
-        child sees itself as PID 1 (pid-ns) and uid 0 (user-ns-mapped)."""
+        child sees itself as PID 2 (pid-ns — the in-ns init waiter is
+        PID 1, so the TARGET keeps normal kill(2) signal semantics;
+        a PID-1 target had abort()/raise() identities distorted by
+        the kernel's pid-1 filter) and uid 0 (user-ns-mapped)."""
         from core.sandbox._spawn import run_sandboxed
         r = run_sandboxed(
             ["sh", "-c", "echo pid=$$; id -u"],
@@ -121,8 +124,9 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(r.returncode, 0, f"stderr: {r.stderr!r}")
-        # PID 1 inside the pid-ns, uid 0 inside the user-ns.
-        self.assertIn("pid=1", r.stdout)
+        # PID 2 inside the pid-ns (PID 1 is the init waiter), uid 0
+        # inside the user-ns.
+        self.assertIn("pid=2", r.stdout)
         self.assertIn("0", r.stdout.splitlines()[-1])
 
     @requires_landlock

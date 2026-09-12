@@ -355,19 +355,19 @@ class TestE2ECrashObservability(unittest.TestCase):
             self.assertIn("SIGSEGV", result.sandbox_info["evidence"])
 
     def test_sigabrt_detected(self):
-        """abort() captured — THE shim regression test.
+        """abort() captured — THE pid-1 signal-filter regression test.
 
-        abort() self-sends SIGABRT via `raise(SIGABRT)`. Without the
-        pid-1 shim, the target is pid-1 of the new pid-ns and the
-        kernel silently drops raise() from pid-1 (no default handler
-        → pid-ns init-signal filter applies). Result: target exits
-        rc=0 and observability loses the crash entirely.
+        abort() self-sends SIGABRT via `raise(SIGABRT)`. If the target
+        ran as pid-1 of the new pid-ns, the kernel would silently drop
+        the raise (no default handler → pid-ns init-signal filter) and
+        glibc's fallback would misreport the death as SIGSEGV — the
+        crash identity every downstream oracle keys on.
 
-        With the shim (`libexec/raptor-pid1-shim`), the target runs
-        as pid-3 so raise() goes through normally. The intermediate
-        process encodes signal-death as rc=128+6=134 (can't re-raise
-        on pid-1 either), and observe._interpret_result decodes both
-        rc<0 and 128+sig to the same crashed=True state.
+        The spawn backend's in-ns init split keeps the target at PID 2
+        so raise() goes through normally; the trusted waiter reports
+        the raw wait status over its side channel, so the parent sees
+        WIFSIGNALED (rc<0) and observe._interpret_result decodes it
+        with the mechanical waitstatus grade.
 
         Unlike SIGFPE (x86-only synchronous trap), SIGABRT is
         portable, so this test runs everywhere.

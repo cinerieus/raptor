@@ -852,12 +852,9 @@ class TestPidNamespaceDefenses(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_self_runs_as_init_pid(self):
-        """Child should see itself as a low pid (1, 2, or 3) inside the
-        PID namespace. The exact value depends on layout:
-        - pid=1 if target is the direct pid-ns init
-        - pid=2 under the mount-ns path's intermediate fork
-        - pid=3 under the subprocess-path pid-1 shim
-          (libexec/raptor-pid1-shim with its double-fork layout)
+        """Child should see itself as a low pid (1, 2, or 3) inside
+        the PID namespace (pid=2 on the spawn backend: the in-ns init
+        waiter is pid-1 so the target keeps normal signal semantics).
         Any of these prove host pids are hidden."""
         r = run_untrusted(
             ["sh", "-c", "echo $$"],
