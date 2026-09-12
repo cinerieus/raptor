@@ -616,7 +616,39 @@ def run_semgrep_sweep(
                 errors=["semgrep not installed"],
             )
 
-        result = run_rule(full_path, rule_config, timeout=120)
+        # When a dynamic rule will need its negative control anyway,
+        # fold the control fixture into the SAME invocation as an
+        # extra target (one semgrep process instead of two) and split
+        # the findings back per file afterwards. Any wrinkle — batch
+        # failure, missing attribution, fixture parse failure — falls
+        # back to a target-only scan plus the separate-process control
+        # path, so the confirm/refute logic always sees exactly the
+        # unbatched inputs.
+        batch: tuple[Path, tuple, list[Any], list[Any]] | None = None
+        batched_fixture, batched_cache_key = _negative_control_batch_plan(
+            rule_keyword, file_path, full_path,
+        )
+        if batched_fixture is not None:
+            result = run_rule(
+                full_path, rule_config, timeout=120,
+                extra_targets=[batched_fixture],
+            )
+            split = None
+            if not result.errors and getattr(result, "returncode", 0) in (0, 1):
+                split = _split_batched_control_findings(
+                    result.findings, batched_fixture,
+                )
+            if split is not None and batched_cache_key is not None:
+                batch = (batched_fixture, batched_cache_key, *split)
+            else:
+                # A batch-level failure could be the fixture leg's
+                # fault, and a finding without file attribution could
+                # move between the target verdict and the control
+                # verdict — an unbatched target scan has neither
+                # problem. Retry target-only before classifying.
+                result = run_rule(full_path, rule_config, timeout=120)
+        else:
+            result = run_rule(full_path, rule_config, timeout=120)
 
         # Tool failure is never a refutation. The runner populates
         # ``errors`` for not-installed / sandbox-refusal / timeout /
@@ -656,8 +688,31 @@ def run_semgrep_sweep(
                 rule_id=rule_config,
             )
 
+        target_findings = result.findings
+        if batch is not None:
+            fixture, control_key, target_findings, control_findings = batch
+            if _fixture_in_examined_files(
+                getattr(result, "files_examined", None), fixture,
+            ) and not _fixture_in_failed_files(
+                getattr(result, "files_failed", None), fixture,
+            ):
+                # The fixture leg verifiably ran — bank its verdict so
+                # the negative-control check below (and the expanded
+                # second pass) reads it from the cache instead of
+                # spawning the separate control process. The positive
+                # scanned-witness gate matters: semgrep can silently
+                # SKIP a target (paths.skipped — surfaced in neither
+                # ``errors`` nor ``files_failed``), and banking False
+                # from a scan that never examined the fixture would
+                # permanently disarm the presence-detector cap for the
+                # keyword (the control cache is process-lifetime).
+                # Anything short of a scanned witness banks nothing:
+                # the separate-process control path stays
+                # authoritative, exactly as unbatched.
+                _negative_control_cache[control_key] = bool(control_findings)
+
         in_function = []
-        for finding in result.findings:
+        for finding in target_findings:
             if hasattr(finding, "line"):
                 finding_line = finding.line
             elif isinstance(finding, dict):
@@ -1025,6 +1080,108 @@ def _relanguage_rule_config(
     ) as fh:
         fh.write(rewritten)
         return fh.name
+
+
+def _negative_control_batch_plan(
+    rule_keyword: str, file_path: str, full_path: Path,
+) -> tuple[Path | None, tuple | None]:
+    """Whether the keyword's negative-control fixture can ride along
+    as an extra TARGET of the main semgrep invocation.
+
+    Batching folds the control scan into the target scan (one process
+    instead of two) with per-file attribution of the findings.
+    Returns ``(fixture, cache_key)`` when batchable, ``(None, None)``
+    otherwise. Batchable requires:
+
+    * a dynamic rule keyword with an on-disk fixture,
+    * no cached control verdict for the key yet,
+    * the emitted rule's language selects the fixture AS-IS — a
+      language mismatch needs the re-languaged rule copy and stays a
+      separate control process,
+    * distinct basenames — findings are attributed per file by
+      basename, so a collision would be ambiguous.
+    """
+    if not rule_keyword:
+        return None, None
+    fixture = negative_control_fixture(rule_keyword, file_path)
+    if fixture is None:
+        return None, None
+    from .hypothesis_mapping import semgrep_language_for
+
+    rule_lang = semgrep_language_for(file_path)
+    cache_key = (rule_keyword, rule_lang, fixture.suffix)
+    if cache_key in _negative_control_cache:
+        return None, None
+    fixture_lang = semgrep_language_for(str(fixture))
+    if rule_lang != "generic" and fixture_lang != rule_lang:
+        return None, None
+    if fixture.name == full_path.name:
+        return None, None
+    return fixture, cache_key
+
+
+def _split_batched_control_findings(
+    findings: list[Any], fixture: Path,
+) -> tuple[list[Any], list[Any]] | None:
+    """Split a batched scan's findings into (target, control) by file.
+
+    Basenames were pre-checked distinct, so basename equality with the
+    fixture is unambiguous. Returns None when any finding carries no
+    usable file attribution — the caller must then discard the batched
+    attempt (an unattributable finding could silently move between the
+    target verdict and the control verdict).
+    """
+    target_findings: list[Any] = []
+    control_findings: list[Any] = []
+    for finding in findings:
+        if hasattr(finding, "file"):
+            fpath = str(finding.file or "")
+        elif isinstance(finding, dict):
+            fpath = str(finding.get("file", "") or "")
+        else:
+            fpath = ""
+        if not fpath:
+            return None
+        if os.path.basename(fpath) == fixture.name:
+            control_findings.append(finding)
+        else:
+            target_findings.append(finding)
+    return target_findings, control_findings
+
+
+def _fixture_in_examined_files(files_examined: Any, fixture: Path) -> bool:
+    """Whether the control fixture is in semgrep's ``files_examined``.
+
+    Entries are path strings parsed from --json-output's
+    ``paths.scanned``. This is the POSITIVE witness that the batched
+    control leg actually ran: a target semgrep silently skipped lands
+    in ``paths.skipped`` — surfaced in neither ``errors`` nor
+    ``files_failed`` — so absence-of-failure alone proves nothing.
+    An absent/empty sidecar (injected runners) simply yields False and
+    the caller falls back to the separate-process control run.
+    """
+    target = str(fixture)
+    for entry in files_examined or []:
+        p = str(entry)
+        if p and (p == target or p.endswith("/" + fixture.name)):
+            return True
+    return False
+
+
+def _fixture_in_failed_files(files_failed: Any, fixture: Path) -> bool:
+    """Whether the control fixture is in semgrep's ``files_failed``.
+
+    Entries are ``{"path", "reason"}`` dicts from the runner's
+    --json-output parse (string entries tolerated for injected
+    runners). A failed fixture parse means the control leg scanned
+    nothing — its empty findings must not be banked as a verdict.
+    """
+    target = str(fixture)
+    for entry in files_failed or []:
+        p = entry.get("path", "") if isinstance(entry, dict) else str(entry)
+        if p and (p == target or p.endswith("/" + fixture.name)):
+            return True
+    return False
 
 
 def _rule_matches_negative_control(

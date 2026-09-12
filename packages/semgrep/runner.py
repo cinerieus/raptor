@@ -19,14 +19,22 @@ and JSON output. Callers add their own concerns on top:
     convenience run_rules() that runs sequentially.
 """
 
+import atexit
 import logging
+import os
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TYPE_CHECKING
 
 from core.run.toolprobe import probe
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 from .models import (
     _MAX_TOOL_OUTPUT_BYTES,
@@ -67,6 +75,7 @@ def build_cmd(
     rule_timeout: int = _DEFAULT_RULE_TIMEOUT,
     semgrep_bin: str | None = None,
     extra_args: list[str] | None = None,
+    extra_targets: "Sequence[Path]" = (),
 ) -> list[str]:
     """Build the semgrep command argv.
 
@@ -82,6 +91,9 @@ def build_cmd(
         rule_timeout: Per-rule timeout in seconds.
         semgrep_bin: Override semgrep binary path. Defaults to PATH lookup.
         extra_args: Additional semgrep arguments to pass through.
+        extra_targets: Additional scan targets appended after ``target``.
+            Findings carry per-file artifact URIs, so callers can split
+            results back per target.
 
     Returns:
         argv list ready for subprocess.run.
@@ -109,7 +121,54 @@ def build_cmd(
     if extra_args:
         cmd.extend(extra_args)
     cmd.append(str(target))
+    cmd.extend(str(t) for t in extra_targets)
     return cmd
+
+
+# One sandbox scratch PARENT per process, one fake-HOME subdirectory
+# per invocation. The parent amortises the per-process cost (created
+# lazily, removed once at exit — its rmtree sweeps every invocation
+# subdir with it); the per-invocation mkdtemp subdir is what each
+# sandboxed child gets as its output/fake-HOME root. Per-invocation
+# isolation is load-bearing, not hygiene: a sandboxed child has write
+# access to ITS OWN output dir for its whole lifetime, so with a
+# SHARED dir a still-live compromised child of call A could rewrite
+# call B's ``.home`` between B's parent-side lstat sweep and makedirs
+# (core.sandbox.context's symlink-TOCTOU check-then-act) — regaining
+# the bounded parent-side write-outside escape that check exists to
+# stop — and a damaged shared ``.home`` would also poison every later
+# semgrep call in the process. With a fresh subdir per call, no child
+# ever holds write access to another call's scratch, and the
+# sandbox's fake-home materialisation validates each fresh ``.home``
+# tree per call exactly as before. Scan RESULTS come exclusively from
+# stdout SARIF and --json-output, both outside this dir.
+_SCRATCH_LOCK = threading.Lock()
+_scratch_parent: str | None = None
+
+
+def _sandbox_scratch_parent() -> str:
+    global _scratch_parent
+    with _SCRATCH_LOCK:
+        if _scratch_parent is None or not os.path.isdir(_scratch_parent):
+            _scratch_parent = tempfile.mkdtemp(prefix="semgrep-sbx-")
+            atexit.register(
+                shutil.rmtree, _scratch_parent, ignore_errors=True,
+            )
+        return _scratch_parent
+
+
+def _invocation_scratch_dir() -> str:
+    """Fresh per-invocation scratch under the process-shared parent."""
+    return tempfile.mkdtemp(prefix="inv-", dir=_sandbox_scratch_parent())
+
+
+def _reset_sandbox_scratch() -> None:
+    """Test hook: drop the shared scratch parent immediately."""
+    global _scratch_parent
+    with _SCRATCH_LOCK:
+        if _scratch_parent is not None:
+            shutil.rmtree(_scratch_parent, ignore_errors=True)
+        _scratch_parent = None
 
 
 def _default_sandbox_runner(target: Path, config: str):
@@ -132,28 +191,29 @@ def _default_sandbox_runner(target: Path, config: str):
     needs_registry = str(config).startswith(("p/", "category/"))
 
     def _runner(cmd, **kwargs):
-        # Fake HOME in a per-call scratch dir: semgrep unconditionally
-        # appends to ``~/.semgrep/semgrep.log`` (and reads/writes
-        # ``~/.semgrep/settings.yml``); the operator's real HOME is
-        # not sandbox-writable, so every scan died rc=1 with
-        # "write outside allowed paths denied to ~/.semgrep/semgrep.log".
-        # fake_home requires output= (the Landlock-writable location
-        # the .home dir materialises under). The scratch dir — and the
-        # log noise semgrep writes there — is removed on return;
+        # Fake HOME in a per-invocation scratch dir: semgrep
+        # unconditionally appends to ``~/.semgrep/semgrep.log`` (and
+        # reads/writes ``~/.semgrep/settings.yml``); the operator's
+        # real HOME is not sandbox-writable, so every scan died rc=1
+        # with "write outside allowed paths denied to
+        # ~/.semgrep/semgrep.log". fake_home requires output= (the
+        # Landlock-writable location the .home dir materialises
+        # under). Each invocation gets a fresh mkdtemp subdir of the
+        # process-shared parent (see the _sandbox_scratch_parent
+        # comment for why sharing one dir across concurrent
+        # invocations would reopen the fake-home symlink-TOCTOU
+        # window); the parent's atexit rmtree reclaims them all, and
         # semgrep's stderr still carries any real failure.
-        import tempfile
-
-        with tempfile.TemporaryDirectory(prefix="semgrep-sbx-") as scratch:
-            return sandbox_run(
-                cmd,
-                block_network=not needs_registry,
-                target=str(target),
-                caller_label="semgrep-runner",
-                env_caller_filtered=True,
-                output=scratch,
-                fake_home=True,
-                **{k: v for k, v in kwargs.items() if k != "shell"},
-            )
+        return sandbox_run(
+            cmd,
+            block_network=not needs_registry,
+            target=str(target),
+            caller_label="semgrep-runner",
+            env_caller_filtered=True,
+            output=_invocation_scratch_dir(),
+            fake_home=True,
+            **{k: v for k, v in kwargs.items() if k != "shell"},
+        )
 
     return _runner
 
@@ -179,6 +239,7 @@ def run_rule(
     extra_args: list[str] | None = None,
     subprocess_runner=None,
     unsandboxed: bool = False,
+    extra_targets: "Sequence[Path]" = (),
 ) -> SemgrepResult:
     """Run semgrep with one config against a target.
 
@@ -204,6 +265,10 @@ def run_rule(
             bare subprocess.run. For trusted input only. Ignored when
             subprocess_runner is given. Without it, run_rule REFUSES to
             execute when core.sandbox is unavailable.
+        extra_targets: Additional scan targets for the same invocation.
+            The result's findings cover ALL targets (each finding's
+            ``file`` names its origin) and the returncode follows the
+            combined scan — callers split per target themselves.
 
     Returns:
         SemgrepResult with parsed findings, files_examined, files_failed,
@@ -239,6 +304,7 @@ def run_rule(
             rule_timeout=rule_timeout,
             semgrep_bin=semgrep_bin,
             extra_args=extra_args,
+            extra_targets=extra_targets,
         )
 
         if env is None:
