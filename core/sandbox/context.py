@@ -3660,6 +3660,47 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         else:
             kwargs["preexec_fn"] = preexec
 
+        # Missing-tool resolution check, BEFORE any lane dispatch. A
+        # command that resolves NOWHERE — not on the caller's PATH, not
+        # on the child env's PATH, and (for absolute invocations) not
+        # on the filesystem — cannot exec on ANY non-rootfs lane: the
+        # mount view's bind sources, the private /tmp tmpfs (fresh and
+        # empty per call), and the host-visible lanes are all subsets
+        # of the host namespace, so an in-sandbox resolution can never
+        # succeed where the host's failed. Raise the subprocess-parity
+        # FileNotFoundError here, exactly what the plain-subprocess
+        # lane raises natively and what callers' tool-missing arms
+        # (`except FileNotFoundError: <tool> not installed`) have
+        # always been written against. Routing this shape into the
+        # spawn lane instead produced two doomed spawn attempts, a
+        # speculative-failure cache entry that steered every LATER
+        # call for the same name onto the mountless backend, and a
+        # category-'X' SandboxSetupError — a containment-flavoured
+        # refusal (BaseException, uncatchable by the tool-missing
+        # arms) for what is a plain missing binary, not a containment
+        # failure. Scope guards: rootfs runs resolve cmd[0] inside the
+        # IMAGE tree (host resolution is meaningless there — the
+        # existing rootfs gates own that shape); relative-with-
+        # separator invocations resolve against the CHILD cwd (which
+        # differs from the caller's) and are left to the lane; the
+        # operator-disabled path already gets this exact exception
+        # from subprocess.run itself.
+        if (not effectively_disabled and rootfs is None
+                and cmd and cmd[0]):
+            _cmd0 = cmd[0]
+            if os.sep not in _cmd0:
+                _resolvable = bool(
+                    shutil.which(_cmd0)
+                    or shutil.which(_cmd0,
+                                    path=kwargs["env"].get("PATH")))
+            elif os.path.isabs(_cmd0):
+                _resolvable = os.path.exists(_cmd0)
+            else:
+                _resolvable = True  # relative-with-sep: cwd-dependent
+            if not _resolvable:
+                raise FileNotFoundError(
+                    errno.ENOENT, os.strerror(errno.ENOENT), _cmd0)
+
         # Only use unshare when we need network / mount / PID isolation.
         # Landlock filesystem isolation works without unshare, BUT in
         # Landlock-only mode (no PID namespace) a compromised child

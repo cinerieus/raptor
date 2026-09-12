@@ -1808,28 +1808,24 @@ class TestE2EHomeToolchainSeam(unittest.TestCase):
             self.assertIn("abs-ok", r.stdout)
 
     def test_nowhere_resolvable_tool_keeps_errno_diagnostic(self):
-        """A name the CALLER cannot resolve either skips the gate
-        (nothing to diverge from) and fails LOUDLY at exec — never
-        silently. The failure shape is lane-dependent: the unshare-CLI
-        lane surfaces the named pid1-shim errno line on stderr; the
-        fork spawn backend reports the in-sandbox exec failure through
-        the status pipe, and after the mountless retry meets the same
-        missing binary the call raises the typed category-'X' refusal
-        (sandbox engaged, target never exec'd)."""
-        from core.sandbox.errors import SandboxSetupError
+        """A name that resolves NOWHERE (caller PATH, child PATH,
+        filesystem) raises the subprocess-parity FileNotFoundError
+        BEFORE any lane dispatch — the same exception the plain
+        subprocess lane raises natively and the exception every
+        tool-missing arm (`except FileNotFoundError: <tool> not
+        installed`) is written against. A missing binary is not a
+        containment failure: it must not enter the demotion ladder,
+        burn spawn attempts, pollute the speculative-failure cache,
+        or surface as a BaseException-grade sandbox refusal."""
         with TemporaryDirectory() as out:
-            try:
-                r = sandbox_run(
+            with self.assertRaises(FileNotFoundError) as ctx:
+                sandbox_run(
                     ["seamtool-missing-everywhere", "hi"],
                     block_network=True, target=out, output=out,
                     capture_output=True, text=True, timeout=30,
                 )
-            except SandboxSetupError as e:
-                self.assertEqual(e.setup_category, "X")
-                self.assertIn("exec", str(e))
-                return
-            self.assertNotEqual(r.returncode, 0)
-            self.assertIn("exec of target failed", r.stderr)
+            self.assertIn("seamtool-missing-everywhere",
+                          str(ctx.exception))
 
     def test_declared_tool_paths_resolve_home_toolchain(self):
         """Declaring BOTH hop dirs makes the toolchain work under
