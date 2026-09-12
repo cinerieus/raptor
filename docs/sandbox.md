@@ -167,6 +167,24 @@ consent source, and every waived call that lands on a
 host-procfs-visible lane (`ns-only` or below) warns individually; the
 mountless fallback keeps its existing once-per-process notice.
 
+**What a floor refusal looks like at the verification seams.** The
+attacker-payload executors — `/audit`'s dark-witness execution,
+exploit execution (`--execute-exploits`), and the mitigation-profile
+witness replay — map a floor refusal to a structured **unverifiable
+environment** outcome instead of a hypothesis verdict: the finding's
+record keeps its existing error-shaped vocabulary (a dark-verify
+`verdict: "error"`, an execution outcome of `unknown`) and carries a
+detail payload with `status: "unverifiable_environment"`, the required
+`floor`, the `achievable` tier, and the operator `remedies`. The
+semantics are record-then-raise: the refusal is host-deterministic, so
+the first one records that verdict on the finding it was verifying,
+prints one summary line (`1 execution(s) refused: environment cannot
+meet the containment floor (mount-ns required, landlock achievable) —
+remedies: ...`), and re-raises the typed error so the run fails loudly
+rather than continuing to mint identical refusals. An unverifiable
+environment is neither a confirmation nor a refutation — fix the host
+(or consent to a lower floor) and re-run.
+
 ---
 
 ## Profiles
