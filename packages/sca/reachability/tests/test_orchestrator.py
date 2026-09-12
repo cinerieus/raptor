@@ -468,3 +468,39 @@ def test_tier3_skipped_when_http_not_provided(tmp_path, monkeypatch):
     assert captured == [], (
         f"wheel fetch fired without http: {captured}"
     )
+
+
+def test_npm_alias_resolves_reachability_by_alias_spelling(
+    tmp_path: Path,
+) -> None:
+    """An aliased dep (``"my-lodash": "npm:lodash@^4"``) is imported
+    by its ALIAS (``require('my-lodash')``) — the real package's row
+    must read as imported, not not_reachable."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "client.js").write_text(
+        "require('my-lodash');\n", encoding="utf-8",
+    )
+    aliased = _dep("lodash", ecosystem="npm")
+    aliased.alias_name = "my-lodash"
+    plain = _dep("ms", ecosystem="npm")
+    out = scan(repo, [aliased, plain])
+    assert out[aliased.key()].verdict == "imported"
+    assert out[plain.key()].verdict == "not_reachable"
+
+
+def test_npm_alias_dual_declared_resolves_stronger_spelling(
+    tmp_path: Path,
+) -> None:
+    """A canonical row can cover a plain AND an aliased declaration of
+    the same package — either spelling's import must count. Alias-only
+    resolution demoted a plainly-imported dual-declared package."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "client.js").write_text(
+        "require('lodash');\n", encoding="utf-8",
+    )
+    dual = _dep("lodash", ecosystem="npm")
+    dual.alias_name = "my-lodash"
+    out = scan(repo, [dual])
+    assert out[dual.key()].verdict == "imported"

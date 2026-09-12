@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .parsers._npm_alias import split_npm_alias
 from .versions import VersionError
 from .versions import compare as version_compare
 
@@ -708,6 +709,9 @@ def _plan_targets(
         if not allow_major and _crosses_major(ecosystem, installed, fix):
             continue
 
+        alias = sca.get("alias_name")
+        alias_name = alias if isinstance(alias, str) and alias else None
+
         key = (ecosystem, name, manifest)
         entry = plans.get(key)
         if entry is None:
@@ -716,6 +720,7 @@ def _plan_targets(
                 installed=installed, target=fix,
                 manifest=Path(manifest),
                 advisory_ids=[adv_id] if adv_id else [],
+                alias_name=alias_name,
             )
             continue
         # Multiple findings against the same (eco, name, manifest) →
@@ -728,6 +733,8 @@ def _plan_targets(
             entry.target = fix
         if adv_id and adv_id not in entry.advisory_ids:
             entry.advisory_ids.append(adv_id)
+        if entry.alias_name is None and alias_name is not None:
+            entry.alias_name = alias_name
     return plans
 
 
@@ -747,6 +754,11 @@ class _PlanEntry:
     # pyproject PEP 508 paths honour it; other forms refuse to rewrite under
     # floor_raise rather than emit an exact pin (never make a library worse).
     floor_raise: bool = False
+    # npm alias spelling (``"my-lodash": "npm:lodash@^4.17.21"``). ``name``
+    # is the REAL (installed) package — the advisory identity — but the
+    # manifest keys the spec under the ALIAS, so the package.json rewriter
+    # must anchor on this spelling and write the ``npm:<real>@…`` form back.
+    alias_name: str | None = None
 
 
 def _crosses_major(_ecosystem: str, installed: str, target: str) -> bool:
@@ -1242,30 +1254,77 @@ def _rewrite_package_json(
     # spec. The `name` may need JSON-string escaping if it contains
     # special chars; for npm package names those are limited and
     # ``re.escape`` handles them.
-    pat = re.compile(
-        r'("' + re.escape(plan.name) + r'"\s*:\s*")'
-        r"([^\"]*?)"
-        r'(")'
-    )
-    match: re.Match | None = None
-    for start, end in _package_json_dep_spans(text):
-        match = pat.search(text, start, end)
-        if match is not None:
-            break
-    if match is None:
-        return text, False, "no matching spec found"
-    new_spec = _bump_npm_spec(match.group(2), plan.installed, plan.target,
-                              floor_raise=plan.floor_raise)
-    if new_spec is None:
-        # The dep was found but _bump_npm_spec declined (VCS/alias/
-        # tarball, or a range whose target falls outside the operator's
-        # declared bounds) — don't mislabel that as 'not found'.
-        return text, False, ("spec matched but not safely bumpable "
-                             "(out of declared range or unsupported form)")
-    new_text = (text[:match.start()]
+    #
+    # An aliased dep (``"my-lodash": "npm:lodash@^4.17.21"``) is keyed
+    # by the ALIAS spelling — ``plan.name`` (the installed package, the
+    # advisory identity) never appears as a key. The plan is keyed on
+    # the installed package, so one plan can cover BOTH spellings when
+    # a manifest declares the package aliased AND plain: attempt each
+    # spelling independently and apply every one that matches — fixing
+    # only one would leave the other declaration on the vulnerable
+    # range while reporting applied.
+    key_names = [plan.name]
+    if plan.alias_name and plan.alias_name != plan.name:
+        key_names.insert(0, plan.alias_name)
+    # Collect every qualifying edit on the ORIGINAL text (all spans,
+    # all occurrences — the same key can appear in dependencies AND
+    # devDependencies), then apply back-to-front so offsets stay valid.
+    edits: list[tuple[re.Match, str]] = []
+    matched_any = False
+    spans = _package_json_dep_spans(text)
+    for key_name in key_names:
+        pat = re.compile(
+            r'("' + re.escape(key_name) + r'"\s*:\s*")'
+            r"([^\"]*?)"
+            r'(")'
+        )
+        for start, end in spans:
+            for match in pat.finditer(text, start, end):
+                spec = match.group(2).strip()
+                if spec.startswith("npm:"):
+                    split = split_npm_alias(spec)
+                    if split is None:
+                        # Bare protocol form — found, but manual review.
+                        matched_any = True
+                        continue
+                    if split[0] != plan.name:
+                        # This key aliases a DIFFERENT package
+                        # ("lodash": "npm:left-pad@^1") — writing the
+                        # plan's fix version into another package's
+                        # range would pin left-pad to lodash's version.
+                        # Exact comparison: plan.name comes from the
+                        # same parser output as the alias target, and
+                        # legacy case-colliding npm names (JSONStream
+                        # vs jsonstream) are distinct packages a
+                        # case-folded match would conflate. Not our
+                        # dep; keep looking.
+                        continue
+                elif key_name != plan.name:
+                    # The alias key with a PLAIN spec is a real package
+                    # that happens to share the alias spelling — not an
+                    # install of the plan's package. Keep looking.
+                    continue
+                matched_any = True
+                new_spec = _bump_npm_spec(match.group(2), plan.installed,
+                                          plan.target,
+                                          floor_raise=plan.floor_raise)
+                if new_spec is not None:
+                    edits.append((match, new_spec))
+    for match, new_spec in sorted(edits, key=lambda e: e[0].start(),
+                                  reverse=True):
+        text = (text[:match.start()]
                 + match.group(1) + new_spec + match.group(3)
                 + text[match.end():])
-    return new_text, True, None
+    if edits:
+        return text, True, None
+    if matched_any:
+        # The dep was found but _bump_npm_spec declined (VCS/tarball/
+        # bare-protocol, or a range whose target falls outside the
+        # operator's declared bounds) — don't mislabel that as 'not
+        # found'.
+        return text, False, ("spec matched but not safely bumpable "
+                             "(out of declared range or unsupported form)")
+    return text, False, "no matching spec found"
 
 
 def _bump_npm_spec(current: str, installed: str, target: str,
@@ -1274,7 +1333,14 @@ def _bump_npm_spec(current: str, installed: str, target: str,
 
     Preserves the operator's leading prefix (``^``, ``~``, ``>=``,
     blank). Returns ``None`` when the current spec is a tarball / git
-    URL / npm-alias — those need manual review.
+    URL — those need manual review.
+
+    An npm-alias spec (``npm:lodash@^4.17.0``) keeps its alias
+    spelling: the range after the alias target is bumped and the
+    ``npm:<real>@`` prefix written back verbatim, so the manifest still
+    installs under the operator's chosen local name. The bare protocol
+    form (``npm:<range>`` with no package name) defers to manual
+    review.
 
     ``floor_raise`` (library posture, npm + Poetry): a BARE exact spec
     (``"1.0.0"`` / empty / ``*`` / ``latest``) is an exact pin that
@@ -1287,8 +1353,18 @@ def _bump_npm_spec(current: str, installed: str, target: str,
     s = current.strip()
     if not s:
         return bare
+    if s.startswith("npm:"):
+        split = split_npm_alias(s)
+        if split is None:
+            return None
+        alias_target, inner = split
+        new_inner = _bump_npm_spec(inner, installed, target,
+                                   floor_raise=floor_raise)
+        if new_inner is None:
+            return None
+        return f"npm:{alias_target}@{new_inner}"
     if s.startswith(("git+", "git@", "git:", "github:", "bitbucket:",
-                     "gitlab:", "gist:", "file:", "npm:")):
+                     "gitlab:", "gist:", "file:")):
         return None
     if s.startswith(("http://", "https://")):
         return None

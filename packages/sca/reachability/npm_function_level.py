@@ -132,7 +132,10 @@ def refine_npm_verdicts(
         funcs = npm_symbol_map[d.key()]
         paired = []
         for fn in funcs:
-            qualified = _qualified_name(d.name, fn)
+            # Source references an aliased dep by its ALIAS spelling
+            # (``require("my-lodash").fn``) — qualify with the name
+            # the project's code actually uses.
+            qualified = _qualified_name(d.alias_name or d.name, fn)
             if qualified is None:
                 continue
             try:

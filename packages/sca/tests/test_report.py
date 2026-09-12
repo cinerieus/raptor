@@ -15,6 +15,7 @@ from packages.sca.models import (
     HygieneFinding,
     PinStyle,
     Reachability,
+    VulnFinding,
 )
 from packages.sca.osv import OsvResult
 from packages.sca.report import (
@@ -1062,3 +1063,64 @@ def test_reachability_bullet_uses_display_label() -> None:
     )
     assert "- Reachability: Not function reachable (" in md
     assert "- Reachability: not_function_reachable" not in md
+
+
+# ---------------------------------------------------------------------------
+# npm alias display — the heading names the installed package; a
+# dedicated line surfaces the manifest spelling
+# ---------------------------------------------------------------------------
+
+def test_vuln_report_shows_alias_declaration_line(tmp_path: Path) -> None:
+    dep = _dep()
+    dep.alias_name = "my-lodash"
+    f = VulnFinding(
+        finding_id="sca:vuln:npm:lodash:4.17.20:GHSA-x",
+        dependency=dep,
+        advisories=[_adv()],
+        in_kev=False,
+        epss=None,
+        fixed_version="5.0.0",
+        reachability=Reachability(
+            verdict="not_evaluated",
+            confidence=Confidence("low", reason="t"),
+        ),
+        version_match_confidence=Confidence("high", reason="t"),
+        cvss_score=9.8,
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        severity="critical",
+        exposure_factor=0.0,
+        transitive_depth=0,
+    )
+    md = render_markdown_report(
+        target=tmp_path, deps_analysed=1,
+        vuln_findings=[f], hygiene_findings=[],
+    )
+    # Heading: the installed package (the advisory identity).
+    assert "lodash" in md
+    assert "Declared as npm alias: `my-lodash`" in md
+
+
+def test_vuln_report_no_alias_line_for_plain_deps(tmp_path: Path) -> None:
+    f = VulnFinding(
+        finding_id="sca:vuln:npm:lodash:4.17.20:GHSA-x",
+        dependency=_dep(),
+        advisories=[_adv()],
+        in_kev=False,
+        epss=None,
+        fixed_version="5.0.0",
+        reachability=Reachability(
+            verdict="not_evaluated",
+            confidence=Confidence("low", reason="t"),
+        ),
+        version_match_confidence=Confidence("high", reason="t"),
+        cvss_score=9.8,
+        cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        severity="critical",
+        exposure_factor=0.0,
+        transitive_depth=0,
+    )
+    md = render_markdown_report(
+        target=tmp_path, deps_analysed=1,
+        vuln_findings=[f], hygiene_findings=[],
+    )
+    assert "Declared as npm alias" not in md

@@ -107,7 +107,15 @@ class Dependency:
 
     ecosystem: str               # "Maven", "PyPI", "npm", "Cargo", "Go",
                                  # "RubyGems", "NuGet", "Packagist"
-    name: str                    # canonical (purl-ready), case-normalised
+    name: str                    # canonical (purl-ready), case-normalised.
+                                 # ALWAYS the real (installed) package: an
+                                 # npm alias (``<alias>@npm:<real>@<range>``)
+                                 # records the alias TARGET here so advisory
+                                 # lookups, purls, and cross-run identity
+                                 # key on what actually ships — recording
+                                 # the alias spelling hid the installed
+                                 # package's advisories. The manifest's
+                                 # literal spelling lives in ``alias_name``.
     version: str | None       # None = unpinned manifest entry
     declared_in: Path            # which manifest/lockfile observed it
     scope: str                   # "main" | "dev" | "test" | "peer" |
@@ -163,6 +171,21 @@ class Dependency:
                                             # use this as the cluster
                                             # key.
 
+    alias_name: str | None = None        # manifest-declared alias
+                                            # spelling when the dep was
+                                            # installed via an npm alias
+                                            # (``"my-lodash": "npm:lodash@
+                                            # ^4.17.21"`` → name="lodash",
+                                            # alias_name="my-lodash").
+                                            # Display and fix-
+                                            # materialisation consult this
+                                            # so reports show what the
+                                            # manifest literally declares
+                                            # and rewrites land under the
+                                            # alias key; everything else
+                                            # (OSV, purl, dedup, diff)
+                                            # keys on ``name``. ``None``
+                                            # for non-aliased deps.
     inline_comment: str | None = None    # trailing ``# note`` text
                                             # from the raw line, preserved
                                             # for round-trip rewriting

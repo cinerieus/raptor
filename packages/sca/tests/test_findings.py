@@ -925,3 +925,43 @@ def test_write_findings_json_atomic_no_predictable_tmp(
         "findings.json", "findings.json.tmp",
     }
     assert leftovers == set()
+
+
+def test_findings_rows_carry_alias_name(tmp_path: Path) -> None:
+    """The ``sca`` block surfaces the manifest's alias spelling so
+    consumers (fix-materialisation, report display) can recover what
+    the operator literally declared; ``name`` stays the installed
+    package — the advisory identity."""
+    d = _dep()
+    d.alias_name = "my-lodash"
+    adv = _adv()
+    findings = build_vuln_findings(
+        [d],
+        [OsvResult(dep_key=d.key(), advisories=[adv])],
+    )
+    hygiene = [HygieneFinding(
+        finding_id="sca:hygiene:loose_pin:npm:lodash:/x",
+        kind="loose_pin",
+        dependency=d,
+        detail="loose pin",
+        severity="low",
+        confidence=Confidence("high", reason="t"),
+    )]
+    out = tmp_path / "findings.json"
+    write_findings_json(out, vuln_findings=findings,
+                        hygiene_findings=hygiene)
+    data = json.loads(out.read_text())
+    for row in data:
+        assert row["sca"]["name"] == "lodash"
+        assert row["sca"]["alias_name"] == "my-lodash"
+    # Plain deps emit an explicit null, not a missing key — schema-
+    # tolerant consumers can rely on the field's presence.
+    d2 = _dep(name="ms", version="2.1.3")
+    findings2 = build_vuln_findings(
+        [d2],
+        [OsvResult(dep_key=d2.key(), advisories=[_adv(osv_id="GHSA-y")])],
+    )
+    out2 = tmp_path / "findings2.json"
+    write_findings_json(out2, vuln_findings=findings2)
+    data2 = json.loads(out2.read_text())
+    assert data2[0]["sca"]["alias_name"] is None

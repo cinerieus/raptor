@@ -23,6 +23,7 @@ def _vuln_row(
     advisory_id: str = "GHSA-x",
     pin_style: str = "exact",
     aliases: list[str] | None = None,
+    alias_name: str | None = None,
 ) -> dict:
     return {
         "id": f"sca:vuln:{ecosystem}:{name}:{version}:{advisory_id}",
@@ -36,6 +37,7 @@ def _vuln_row(
         "sca": {
             "ecosystem": ecosystem,
             "name": name,
+            "alias_name": alias_name,
             "version": version,
             "purl": f"pkg:{ecosystem.lower()}/{name}@{version}",
             "pin_style": pin_style,
@@ -1196,3 +1198,165 @@ def test_requirements_txt_spaced_extras_and_operator_rewritten(
     # Spaced operator + trailing environment marker both survive.
     assert 'flask==2.3.3 ; python_version >= "3.8"' in body
     assert "2.3.0" not in body
+
+
+# ---------------------------------------------------------------------------
+# npm-alias fix-materialisation — the rewrite anchors on the ALIAS key
+# and writes the ``npm:<real>@…`` spelling back
+# ---------------------------------------------------------------------------
+
+def test_bump_npm_spec_alias_preserves_alias_spelling() -> None:
+    assert update._bump_npm_spec(
+        "npm:lodash@^4.17.0", "4.17.4", "4.17.21",
+    ) == "npm:lodash@^4.17.21"
+    assert update._bump_npm_spec(
+        "npm:@scope/real@~1.2.0", "1.2.1", "1.2.3",
+    ) == "npm:@scope/real@~1.2.3"
+    # No range after the target → pin the target version.
+    assert update._bump_npm_spec(
+        "npm:lodash", "4.17.4", "4.17.21",
+    ) == "npm:lodash@4.17.21"
+    # Bare protocol form (range, no package name) → manual review.
+    assert update._bump_npm_spec("npm:^1.0.0", "1.0.1", "1.0.5") is None
+
+
+def test_rewrite_package_json_aliased_dep(tmp_path: Path) -> None:
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {"my-lodash": "npm:lodash@^4.17.0"},
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="lodash",
+                      installed="4.17.4", target="4.17.21",
+                      manifest=Path("package.json"), advisory_ids=[],
+                      alias_name="my-lodash")
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is True, reason
+    # The alias key and the npm:<real>@ spelling both survive.
+    assert '"my-lodash": "npm:lodash@^4.17.21"' in new_text
+    assert "4.17.0" not in new_text
+
+
+def test_rewrite_package_json_alias_plan_falls_back_to_plain_key(
+    tmp_path: Path,
+) -> None:
+    # The plan carries an alias but this manifest declares the package
+    # un-aliased (both spellings exist in the project) — the plain key
+    # still rewrites.
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {"lodash": "^4.17.0"},
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="lodash",
+                      installed="4.17.4", target="4.17.21",
+                      manifest=Path("package.json"), advisory_ids=[],
+                      alias_name="my-lodash")
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is True, reason
+    assert '"lodash": "^4.17.21"' in new_text
+
+
+def test_update_main_materialises_alias_rewrite(tmp_path: Path) -> None:
+    manifest = tmp_path / "package.json"
+    manifest.write_text(json.dumps({
+        "dependencies": {"my-lodash": "npm:lodash@^4.17.0"},
+    }, indent=2), encoding="utf-8")
+    findings = _findings_file(tmp_path, [
+        _vuln_row(ecosystem="npm", name="lodash",
+                  version="4.17.4", fixed_version="4.17.21",
+                  manifest=manifest, alias_name="my-lodash"),
+    ])
+    out = tmp_path / "out"
+    update.main(["--findings", str(findings), "--out", str(out),
+                 "--offline"])
+    proposed = next(iter((out / "proposed").rglob("package.json")))
+    body = proposed.read_text()
+    assert '"my-lodash": "npm:lodash@^4.17.21"' in body
+    assert "4.17.0" not in body
+    # The installed package's name never appears as a manifest key.
+    assert '"lodash":' not in body
+
+
+def test_rewrite_package_json_alias_and_plain_both_bumped(
+    tmp_path: Path,
+) -> None:
+    # One manifest declares the package BOTH aliased and plain — the
+    # single plan (keyed on the installed package) must fix both
+    # spellings, or one declaration stays on the vulnerable range
+    # while the change reports applied.
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {
+            "my-lodash": "npm:lodash@^4.17.0",
+            "lodash": "^4.17.0",
+        },
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="lodash",
+                      installed="4.17.4", target="4.17.21",
+                      manifest=Path("package.json"), advisory_ids=[],
+                      alias_name="my-lodash")
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is True, reason
+    obj = json.loads(new_text)
+    assert obj["dependencies"]["my-lodash"] == "npm:lodash@^4.17.21"
+    assert obj["dependencies"]["lodash"] == "^4.17.21"
+
+
+def test_rewrite_package_json_never_writes_into_a_different_alias_target(
+    tmp_path: Path,
+) -> None:
+    # A key equal to plan.name that aliases a DIFFERENT package
+    # ("lodash": "npm:left-pad@^1") must never receive the plan's fix
+    # version — and the genuinely vulnerable plain declaration in the
+    # other section must still be found and bumped.
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {"lodash": "npm:left-pad@^1.0.0"},
+        "devDependencies": {"lodash": "^4.17.0"},
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="lodash",
+                      installed="4.17.4", target="4.17.21",
+                      manifest=Path("package.json"), advisory_ids=[])
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is True, reason
+    obj = json.loads(new_text)
+    assert obj["dependencies"]["lodash"] == "npm:left-pad@^1.0.0"
+    assert obj["devDependencies"]["lodash"] == "^4.17.21"
+
+
+def test_rewrite_package_json_alias_key_with_plain_spec_not_touched(
+    tmp_path: Path,
+) -> None:
+    # The plan's alias spelling collides with a REAL package of that
+    # name declared plainly — that's a different dep, not an aliased
+    # install of the plan's package.
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {"my-lodash": "^1.0.0"},
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="lodash",
+                      installed="4.17.4", target="4.17.21",
+                      manifest=Path("package.json"), advisory_ids=[],
+                      alias_name="my-lodash")
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is False
+    assert new_text == text
+    assert reason == "no matching spec found"
+
+
+def test_rewrite_package_json_case_sibling_alias_not_bumped(
+    tmp_path: Path,
+) -> None:
+    # Legacy case-colliding npm names are distinct packages
+    # (JSONStream vs jsonstream) — a plan for the lowercase one must
+    # not write into an alias targeting its case-sibling.
+    from packages.sca.update import _PlanEntry, _rewrite_package_json
+    text = json.dumps({
+        "dependencies": {"jsonstream": "npm:JSONStream@^1.0.0"},
+    }, indent=2)
+    plan = _PlanEntry(ecosystem="npm", name="jsonstream",
+                      installed="1.0.0", target="1.3.5",
+                      manifest=Path("package.json"), advisory_ids=[])
+    new_text, applied, reason = _rewrite_package_json(text, plan)
+    assert applied is False
+    assert new_text == text
+    assert reason == "no matching spec found"

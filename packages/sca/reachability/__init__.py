@@ -28,7 +28,12 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable, Iterable
 
-from ..models import Confidence, Dependency, Reachability
+from ..models import (
+    Confidence,
+    Dependency,
+    REACHABILITY_ORDER,
+    Reachability,
+)
 from . import cargo as _cargo
 from . import composer as _composer
 from . import gemfile as _gemfile
@@ -39,6 +44,16 @@ from . import nuget as _nuget
 from . import python as _python
 
 logger = logging.getLogger(__name__)
+
+
+def _verdict_rank(r: Reachability) -> int:
+    """Strength rank for verdict comparison — lower is stronger
+    (``REACHABILITY_ORDER`` is reachable-tier first). Unknown verdicts
+    sort weakest."""
+    try:
+        return REACHABILITY_ORDER.index(r.verdict)
+    except ValueError:
+        return len(REACHABILITY_ORDER)
 
 
 # Per-ecosystem scanner: returns the raw module → evidence map.
@@ -164,9 +179,27 @@ def scan(
                     )
                 out[d.key()] = seen[cache_key]
             else:
-                if d.name not in seen:
-                    seen[d.name] = resolver(d.name, scan_result, target)
-                out[d.key()] = seen[d.name]
+                # An npm-aliased dep is imported by its ALIAS spelling
+                # (``require("my-lodash")`` for ``"my-lodash":
+                # "npm:lodash@^4"``) — but the canonical row can cover
+                # BOTH a plain and an aliased declaration of the same
+                # package, so resolve every spelling source code could
+                # reference and keep the strongest verdict. Alias-only
+                # resolution deterministically demoted a plainly-
+                # imported dual-declared package to not_reachable.
+                candidates = [d.name]
+                if d.alias_name and d.alias_name != d.name:
+                    candidates.insert(0, d.alias_name)
+                best: Reachability | None = None
+                for nm in candidates:
+                    if nm not in seen:
+                        seen[nm] = resolver(nm, scan_result, target)
+                    r = seen[nm]
+                    if best is None or (_verdict_rank(r)
+                                        < _verdict_rank(best)):
+                        best = r
+                assert best is not None  # candidates is never empty
+                out[d.key()] = best
 
     # Tier-3 escalation. Only PyPI today; other ecosystems' resolvers
     # don't yet support wheel-style on-demand metadata. Gated on:

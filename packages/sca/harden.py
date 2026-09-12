@@ -157,6 +157,10 @@ class HardenCandidate:
     # by ``_apply`` when building the ``_PlanEntry`` so the rewrite is
     # routed to the right file. ``None`` for inline / non-central deps.
     resolved_in: str | None = None
+    # npm alias spelling (``Dependency.alias_name``). ``name`` is the
+    # installed package; the manifest keys the spec under the alias, so
+    # ``_apply`` carries this onto the ``_PlanEntry`` for the rewriter.
+    alias_name: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +589,7 @@ def _plan_one(
         to_version=None,
         crosses_major=False,
         resolved_in=resolved_in,
+        alias_name=dep.alias_name,
     )
 
     # ``--pin-only``: skip loose pins entirely (don't convert ``>=X`` to
@@ -1521,6 +1526,7 @@ def _apply(
             # Library posture: the rewriter raises the floor to a range
             # (``>=target``) instead of corridor-pinning ``==target``.
             floor_raise=(cand.selection == "library_minimal"),
+            alias_name=cand.alias_name,
         )
     if not plans:
         return []

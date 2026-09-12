@@ -1999,18 +1999,29 @@ def select_canonical_for_osv(
         by_name[key].append(d)
 
     out: list[Dependency] = []
-    seen_versions: set[tuple[str, str, str]] = set()
+    kept_by_version: dict[tuple[str, str, str], Dependency] = {}
+
+    def _keep(triple: tuple[str, str, str], r: Dependency) -> None:
+        kept = kept_by_version.get(triple)
+        if kept is not None:
+            # Collapsed duplicate. Don't lose the npm-alias spelling to
+            # first-seen order: a manifest declaring the package both
+            # plain and aliased ("lodash" + "my-lodash": "npm:lodash@…")
+            # must keep the alias on the canonical row, or the fix
+            # path can't rewrite the aliased declaration.
+            if kept.alias_name is None and r.alias_name is not None:
+                kept.alias_name = r.alias_name
+            return
+        kept_by_version[triple] = r
+        out.append(r)
+
     for key in order:
         rows = by_name[key]
         lockfile_versions = [r for r in rows
                              if r.is_lockfile and r.version is not None]
         if lockfile_versions:
             for r in lockfile_versions:
-                triple = (key[0], key[1], r.version or "")
-                if triple in seen_versions:
-                    continue
-                seen_versions.add(triple)
-                out.append(r)
+                _keep((key[0], key[1], r.version or ""), r)
             continue
         manifest_versions = [r for r in rows
                              if not r.is_lockfile and r.version is not None]
@@ -2019,22 +2030,14 @@ def select_canonical_for_osv(
                         if not _is_placeholder_version(r.version or "")]
             keep = resolved if resolved else manifest_versions[:1]
             for r in keep:
-                triple = (key[0], key[1], r.version or "")
-                if triple in seen_versions:
-                    continue
-                seen_versions.add(triple)
-                out.append(r)
+                _keep((key[0], key[1], r.version or ""), r)
             continue
         corridor_rows = [
             r for r in rows
             if r.version_floor is not None or r.version_ceiling is not None
         ]
         if corridor_rows:
-            r = corridor_rows[0]
-            triple = (key[0], key[1], "")
-            if triple not in seen_versions:
-                seen_versions.add(triple)
-                out.append(r)
+            _keep((key[0], key[1], ""), corridor_rows[0])
     return out
 
 

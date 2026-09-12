@@ -672,6 +672,15 @@ def _render_one_vuln(
             bullets.append(f"- Source: lockfile (`{escape_nonprintable(str(dep.declared_in))}`)")
         else:
             bullets.append(f"- Source: manifest (`{escape_nonprintable(str(dep.declared_in))}`)")
+        # Aliased install — the heading shows the INSTALLED package
+        # (what the advisory applies to); this line shows the manifest
+        # spelling operators will grep for.
+        if dep.alias_name:
+            alias_span = (
+                "`" + escape_nonprintable(dep.alias_name).replace("`", "'")
+                + "`"
+            )
+            bullets.append(f"- Declared as npm alias: {alias_span}")
         # Source-specific context — Dockerfile FROM rows surface
         # the base image + stage so operators can group findings
         # by build stage in their review.

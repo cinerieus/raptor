@@ -516,3 +516,24 @@ def test_run_sca_scan_reports_fixture_tree_manifests(tmp_path: Path) -> None:
     assert any("testdata/pom.xml" in f for f in all_files), (
         "testdata/-tree manifest must appear in scan findings"
     )
+
+
+def test_canonical_merges_alias_name_regardless_of_order() -> None:
+    """A manifest declaring the package both plain and aliased at the
+    same version collapses to one row — the alias spelling must
+    survive first-seen order, or fix-materialisation can't rewrite
+    the aliased declaration."""
+    plain = _dep("lodash", "4.17.4")
+    aliased = _dep("lodash", "4.17.4")
+    aliased.alias_name = "my-lodash"
+    for order in ([plain, aliased], [aliased, plain]):
+        # Fresh copies per direction — the merge mutates the kept row.
+        a, b = order[0], order[1]
+        canonical = select_canonical_for_osv([a, b])
+        assert len(canonical) == 1
+        assert canonical[0].alias_name == "my-lodash", (
+            f"alias lost for order {[d.alias_name for d in order]}"
+        )
+        # reset for the second iteration
+        plain.alias_name = None
+        aliased.alias_name = "my-lodash"

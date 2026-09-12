@@ -17,6 +17,13 @@ Scope mapping:
 Pin-style classification covers npm's range grammar; anything we can't
 classify drops to ``unknown`` rather than guessing.
 
+npm aliases (``"my-lodash": "npm:lodash@^4.17.21"``): the dep row
+records the REAL (installed) package as ``name`` — advisory lookups,
+purls, and cross-run identity key on what actually ships — with the
+manifest's alias spelling preserved in ``alias_name``. All npm-family
+parsers (package.json, package-lock.json, yarn.lock, pnpm-lock.yaml)
+follow the same rule.
+
 Modern monorepo / workspace specs:
 
 - ``workspace:^1.0.0``, ``workspace:*``, ``workspace:~`` (pnpm /
@@ -69,6 +76,7 @@ from pathlib import Path
 from ..models import Confidence, Dependency, PinStyle
 from ..versions import semver
 from . import _safe_read, register
+from ._npm_alias import split_npm_alias as _split_npm_alias
 
 logger = logging.getLogger(__name__)
 
@@ -403,23 +411,41 @@ def _build_dep(
             )
 
     pin_style, version, npm_alias_target = _classify(spec)
-    purl_name = npm_alias_target or name
+    # npm alias (``"my-lodash": "npm:lodash@^4.17.21"``): the REAL
+    # (installed) package is the canonical name — OSV queries key on
+    # ``Dependency.name``, so recording the alias spelling hid the
+    # installed package's advisories (a lockfile-less project with an
+    # aliased manifest entry queried the alias name and missed every
+    # advisory). The manifest's literal spelling is preserved in
+    # ``alias_name`` for display and fix-materialisation.
+    real_name = npm_alias_target or name
+    alias_name = name if npm_alias_target and npm_alias_target != name else None
     # Record the semver corridor (caret/tilde/range -> floor & ceiling) so
     # harden can place a ranged dep relative to its floor and keep a bump
-    # inside the ceiling. Exact / git / alias specs yield (None, None).
-    version_floor, version_ceiling = semver.bounds(spec)
+    # inside the ceiling. For an alias the corridor comes from the range
+    # AFTER the alias target. Exact / git specs yield (None, None).
+    corridor_spec = spec
+    if npm_alias_target:
+        alias_split = _split_npm_alias(spec)
+        corridor_spec = alias_split[1] if alias_split else ""
+    elif spec.startswith("npm:"):
+        # Bare protocol form (``npm:^2.1.3``) — the range follows the
+        # prefix directly.
+        corridor_spec = spec[len("npm:"):]
+    version_floor, version_ceiling = semver.bounds(corridor_spec)
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=name,
+        name=real_name,
         version=version,
         declared_in=path,
         scope=scope,
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(purl_name, version),
+        purl=_build_purl(real_name, version),
         parser_confidence=_confidence(pin_style, version),
+        alias_name=alias_name,
         version_floor=version_floor,
         version_ceiling=version_ceiling,
     )
@@ -429,7 +455,7 @@ def _classify(spec: str) -> tuple[PinStyle, str | None, str | None]:
     """Return (pin_style, version_for_record, npm_alias_target_or_None).
 
     For an alias like ``"npm:lodash@^4.17.0"``, the alias target is
-    returned so the purl reflects the actual installed package; the spec
+    returned so the dep records the actual installed package; the spec
     governing the pin style is the right-hand side.
     """
     if not spec:
@@ -437,16 +463,21 @@ def _classify(spec: str) -> tuple[PinStyle, str | None, str | None]:
 
     # npm: alias → recurse on the right-hand side.
     if spec.startswith("npm:"):
-        rest = spec[len("npm:"):]
-        if "@" in rest[1:]:
-            sep = rest.rindex("@")
-            target = rest[:sep] if sep > 0 else rest
-            inner_spec = rest[sep + 1:] if sep > 0 else ""
-        else:
-            target = rest
-            inner_spec = ""
+        split = _split_npm_alias(spec)
+        if split is None:
+            rest = spec[len("npm:"):]
+            if rest.startswith("@"):
+                # Malformed scope-shaped target (``npm:@scope`` with
+                # no name) — not a range either; don't let the scope
+                # marker leak into the version/purl.
+                return PinStyle.UNKNOWN, None, None
+            # ``npm:<range>`` protocol form — classify the range for
+            # the declared name itself.
+            pin, ver, _ = _classify(rest)
+            return pin, ver, None
+        target, inner_spec = split
         pin, ver, _ = _classify(inner_spec)
-        return pin, ver, target or None
+        return pin, ver, target
 
     # ``workspace:`` references (pnpm + Yarn Berry) — internal
     # workspace package, not a registry entry. Marked as PATH so OSV
