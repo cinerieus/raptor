@@ -9,7 +9,7 @@
 # Usage:
 #   run-matrix.sh [--repo PATH] [--ref REF] [--image 24|26|both]
 #                 [--lanes l1,l2,...] [--e2e | --full]
-#                 [--skip-build] [--lane-timeout SECS]
+#                 [--skip-build | --build-only] [--lane-timeout SECS]
 #                 [--py-version X.Y.Z] [--results DIR]
 #                 [--self-test]
 #
@@ -27,6 +27,13 @@
 # --self-test: docker-free wiring check — generates the lane seccomp
 # profiles, runs the feature probe on the host, and exercises the
 # report aggregator on synthetic fixtures (clean + shape-diverged).
+#
+# --build-only: build the selected images (with the sxv.reqhash label
+# and the same build args as a full run) and stop before any lane
+# executes. Single-sources the image recipe for publishers — the
+# GHCR publish workflow tags and pushes the local tags this leaves
+# behind — so a registry copy can never drift from what a full run
+# would have built. Mutually exclusive with --skip-build.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -126,6 +133,7 @@ IMAGE_SEL=both
 LANES="$(python3 "$HERE/profiles/lanes.py" list | paste -sd, -)"
 TIER=default
 SKIP_BUILD=0
+BUILD_ONLY=0
 LANE_TIMEOUT=3600
 PY_VERSION=3.14.7
 RESULTS_BASE="${RAPTOR_MATRIX_RESULTS:-${RUNNER_TEMP:-/tmp}/raptor-sandbox-matrix}"
@@ -138,10 +146,11 @@ while [ $# -gt 0 ]; do
         --e2e)          TIER=e2e; shift ;;
         --full)         TIER=full; shift ;;
         --skip-build)   SKIP_BUILD=1; shift ;;
+        --build-only)   BUILD_ONLY=1; shift ;;
         --lane-timeout) LANE_TIMEOUT="$2"; shift 2 ;;
         --py-version)   PY_VERSION="$2"; shift 2 ;;
         --results)      RESULTS_BASE="$2"; shift 2 ;;
-        -h|--help)      sed -n '2,30p' "$0"; exit 0 ;;
+        -h|--help)      sed -n '2,36p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
@@ -152,6 +161,11 @@ case "$IMAGE_SEL" in
     both) IMAGES=(u24 u26) ;;
     *) echo "--image must be 24|26|both" >&2; exit 2 ;;
 esac
+
+if [ "$BUILD_ONLY" = 1 ] && [ "$SKIP_BUILD" = 1 ]; then
+    echo "--build-only and --skip-build are mutually exclusive" >&2
+    exit 2
+fi
 
 # Validate every requested lane UP FRONT. A bogus lane name must abort
 # here: the per-lane `lanes.py args` call runs in a process
@@ -227,6 +241,17 @@ raise SystemExit('no linux-24.04 x64 artifact for ' + want)
                  tail -30 "$RUN/build-$img.log" >&2; exit 3; }
     done
     rm -rf "$CTX"
+fi
+
+if [ "$BUILD_ONLY" = 1 ]; then
+    # keep only the build logs: the clone, tarball and lane profiles
+    # exist for lane runs that will never happen
+    rm -rf "$RUN/repo" "$RUN/repo.tar" "$RUN/profiles"
+    echo "== build-only: stopping before lane runs"
+    for img in "${IMAGES[@]}"; do
+        echo "== built raptor-sandbox-matrix:$img (sxv.reqhash=$REQHASH)"
+    done
+    exit 0
 fi
 
 # ---- lane runs -----------------------------------------------------------
