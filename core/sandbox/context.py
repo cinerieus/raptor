@@ -15,7 +15,7 @@ import signal
 import stat
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import threading
 import time
 from contextlib import contextmanager
@@ -804,11 +804,14 @@ _UNSET = object()
 
 # Containment tier each execution lane DELIVERS, keyed by the lane name
 # used at its dispatch site (core/sandbox/tiers.py holds the lattice).
-# The dispatch-site floor check resolves its declared tier through this
-# table so (a) the declaration is auditable in one place, (b) the
-# "future lane" contract test can inject a below-floor lane and prove
-# the assertion catches it, and (c) a new dispatch site cannot ship
-# without an explicit entry (KeyError fails closed). Per-call caps
+# The checked dispatch resolves its declared tier through this table so
+# (a) the declaration is auditable in one place, (b) the "future lane"
+# contract test can inject a below-floor lane and prove the assertion
+# catches it, and (c) a lane routed through the chokepoint cannot ship
+# without an explicit entry (KeyError fails closed) — while the AST
+# executor gate in the contract tests forbids spawning a process in
+# this module ANY other way, so the chokepoint cannot be routed
+# around by a new bare call site either. Per-call caps
 # (skip_pid_ns keeps host procfs on the mount lane; a Landlock-less
 # kernel reduces the plain-subprocess lane to rlimits+seccomp) are
 # applied at the call sites via the check's ``cap=``.
@@ -2845,6 +2848,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             operator_disabled=effectively_disabled,
             require_fresh_procfs=_rfp_kwarg,
             untrusted_workload=_untrusted_workload,
+            # tiers.py reads no environment by design — hand it the
+            # env truth so the floor source is attributed honestly
+            # (a literal require_fresh_procfs=False without the
+            # waiver must not banner/warn in the waiver's name).
+            waiver_active=not untrusted_fresh_procfs_required(),
         )
         if (_floor_source == _tiers.FLOOR_SOURCE_ENV
                 and sys.platform == "linux"
@@ -2929,24 +2937,32 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
 
         def _dispatch_floor_check(
                 lane: str, *,
+                executor: "Callable[[], subprocess.CompletedProcess]",
                 cap: "_tiers.ContainmentTier | None" = None,
                 cause: BaseException | None = None,
                 detail: str = "",
                 remedy: str = "",
-                setup_category: str | None = None) -> None:
-            """Containment-floor contract, side 2: the hard pre-exec
-            assertion at a dispatch site.
+                setup_category: str | None = None,
+        ) -> subprocess.CompletedProcess:
+            """Containment-floor contract, side 2: the checked dispatch
+            CHOKEPOINT — the only way run() hands a command to an
+            executor.
 
-            Every executor hand-off in run() calls this immediately
-            before running the command, with its lane's declared tier
-            resolved through the module-level _LANE_TIERS registry
-            (KeyError on an unregistered lane fails closed; the
-            dispatch-site tripwire test enforces coverage). ``cap``
-            lowers the declared tier for per-call posture reductions
-            (skip_pid_ns keeps host procfs on the mount lane; a
-            Landlock-less kernel or the operator disable reduces the
-            plain-subprocess lane to rlimits-only). ``cause`` chains
-            the original backend failure that demoted the call here.
+            The lane's declared tier resolves through the module-level
+            _LANE_TIERS registry (KeyError on an unregistered lane
+            fails closed), the hard pre-exec assertion runs, and only
+            then is ``executor`` invoked. Structural guarantee: the
+            AST gate in the contract tests forbids bare
+            process-spawning calls in this module outside this
+            chokepoint (and the named executor helpers it invokes), so
+            a future lane cannot ship an unchecked executor — the
+            check is not a convention beside the spawn, it IS the
+            spawn's entry point. ``cap`` lowers the declared tier for
+            per-call posture reductions (skip_pid_ns keeps the host
+            procfs on both spawn lanes; a Landlock-less kernel or the
+            operator disable reduces the plain-subprocess lane to
+            rlimits-only). ``cause`` chains the original backend
+            failure that demoted the call here.
 
             When the floor holds only because the operator's waiver
             lowered it (floor source "env") and the lane leaves the
@@ -2975,6 +2991,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                "this call"),
                     lane,
                 )
+            _executed = executor()
+            # Runtime dominance stamp: run()'s epilogue refuses any
+            # result that did not come through this chokepoint, so an
+            # executor added in ANOTHER module (out of the AST gate's
+            # sight) is caught at its first use instead of silently
+            # feeding results downstream.
+            _executed._floor_checked = True  # type: ignore[attr-defined]
+            return _executed
         _inherit_netns = kwargs.pop("inherit_netns", False)
         # inherit_netns drops CLONE_NEWNET / `--net` from every Linux
         # lane, so a block_network run keeps the CALLER's network
@@ -4152,6 +4176,18 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     f"achievable ({_mountless_abi_block})")
                 _spawn_ladder_err = _errors.SandboxSetupError(
                     _mount_ns_degraded, setup_category="X")
+                if state.warn_once("_mountless_unachievable_warned"):
+                    # Loud like every other demotion route — see the
+                    # M/X reroute's rationale.
+                    logger.warning(
+                        "Sandbox: the mountless namespace backend is "
+                        "not achievable for this call (%s) — "
+                        "continuing down the demotion ladder; the "
+                        "containment floor decides admission, and the "
+                        "demoted lane enforces read/write policy with "
+                        "Landlock alone.",
+                        _mountless_abi_block,
+                    )
         if _prefer_mountless_spawn:
             if state.warn_once("_mountless_backend_warned"):
                 logger.warning(
@@ -4278,7 +4314,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # neither is set, the call's audit was already demoted
             # silently upstream — no marker needed.
             _marker_dir = audit_run_dir or output
-            if _marker_dir:
+            # Floor guard: a call whose containment floor sits above
+            # every fallback lane is about to REFUSE, not degrade —
+            # writing the audit-degraded marker for a run that never
+            # executes would make marker consumers count phantom
+            # degraded runs.
+            if _marker_dir and _floor <= _tiers.ContainmentTier.NS_NOMOUNT:
                 from pathlib import Path as _Path
 
                 from . import summary as _summary_mod
@@ -4330,10 +4371,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         _mac_readable.append(_tp)
                 # Containment-floor contract, side 2: seatbelt is the
                 # platform's top tier — the check never refuses here,
-                # but every dispatch site carries its declaration so
-                # the contract (and its tripwire test) stays total.
-                _dispatch_floor_check("seatbelt spawn")
-                result = _macos_mod.run_sandboxed(
+                # but every executor routes through the checked
+                # dispatch so the contract stays total.
+                result = _dispatch_floor_check(
+                    "seatbelt spawn",
+                    executor=lambda: _macos_mod.run_sandboxed(
                     cmd,
                     target=target, output=output,
                     block_network=block_network,
@@ -4388,7 +4430,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     # host /tmp.  Direct backend callers still retain the
                     # backend's defence-in-depth filtering.
                     strict_env=False,
-                )
+                ))
                 used_spawn = True
                 # Fail-loud parity with the Linux exec-status pipe. The macOS
                 # seatbelt shim reports via result._setup_status:
@@ -4605,13 +4647,17 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         if (_prefer_mountless_spawn
                                 and _b_fallback_reason):
                             _mount_ns_degraded = _b_fallback_reason
-                        # Containment-floor contract, side 2: declared
-                        # tier of THIS dispatch, asserted against the
-                        # floor before the backend runs. The mountless
-                        # lane is below the unwaived untrusted floor —
-                        # the B-fallback / speculative-cache / per-call
-                        # skip_mount_ns routes refuse here with the
-                        # route's own remedy.
+                        # Containment-floor contract, side 2: the
+                        # spawn dispatch routes through the checked
+                        # chokepoint with its lane's declared tier.
+                        # The mountless lane is below the unwaived
+                        # untrusted floor — the B-fallback /
+                        # speculative-cache / per-call skip_mount_ns
+                        # routes refuse here with the route's own
+                        # remedy. skip_pid_ns keeps the HOST procfs on
+                        # both spawn lanes (the fresh-proc remount
+                        # rides the pid-ns grandchild fork) — it caps
+                        # the declared tier on both.
                         if _spawn_without_mount:
                             if (_b_fallback_reason
                                     and "previously failed mount-ns"
@@ -4629,38 +4675,34 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     "so the mount-ns lane can serve it.")
                             else:
                                 _mountless_fix = _b_fallback_instr or ""
-                            _dispatch_floor_check(
-                                "mountless namespace backend",
-                                # skip_pid_ns keeps the HOST procfs
-                                # even on the spawn backend (the
-                                # fresh-proc remount rides the pid-ns
-                                # grandchild fork) — cap the declared
-                                # tier accordingly, same as the mount
-                                # branch below.
-                                cap=(_tiers.ContainmentTier.NS_NOMOUNT
-                                     if _skip_pid_ns else None),
-                                detail=(_b_fallback_reason
-                                        or ("per-call skip_mount_ns=True "
-                                            "bypasses the mount-ns "
-                                            "backend")),
-                                remedy=_floor_remedy(_mountless_fix),
-                                setup_category=(
+                            _spawn_lane = "mountless namespace backend"
+                            _spawn_lane_kwargs: dict = {
+                                "detail": (_b_fallback_reason
+                                           or ("per-call "
+                                               "skip_mount_ns=True "
+                                               "bypasses the mount-ns "
+                                               "backend")),
+                                "remedy": _floor_remedy(_mountless_fix),
+                                "setup_category": (
                                     "X" if _prefer_mountless_spawn
                                     else None),
-                            )
+                            }
                         else:
-                            _dispatch_floor_check(
-                                "mount-ns spawn",
-                                cap=(_tiers.ContainmentTier.NS_NOMOUNT
-                                     if _skip_pid_ns else None),
-                            )
+                            _spawn_lane = "mount-ns spawn"
+                            _spawn_lane_kwargs = {}
                         _grant_ids_before = (
                             _grant_path_identities()
                             if not _spawn_without_mount else None
                         )
                         try:
-                            result = _run_spawn_backend(
-                                skip_mount=_spawn_without_mount,
+                            result = _dispatch_floor_check(
+                                _spawn_lane,
+                                executor=lambda: _run_spawn_backend(
+                                    skip_mount=_spawn_without_mount,
+                                ),
+                                cap=(_tiers.ContainmentTier.NS_NOMOUNT
+                                     if _skip_pid_ns else None),
+                                **_spawn_lane_kwargs,
                             )
                         finally:
                             for _pp in _lane_peer_pids:
@@ -4855,25 +4897,16 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             # subprocess fallback on kernels/filesystems that
                             # reject one of the bind mounts with EINVAL.
                             _failed_setup_status = _setup_status
-                            # Containment-floor contract, side 2:
-                            # the mountless retry's declared tier,
-                            # asserted before the retry runs. An
-                            # unwaived untrusted call refuses here
-                            # with the child's own M/X diagnostic
-                            # chained (synthesised carrier — the
-                            # status byte is in-band, not an
-                            # exception).
+                            # Synthesised carrier for the child's M/X
+                            # diagnostic (the status byte is in-band,
+                            # not an exception) — chained by the
+                            # checked dispatch below, or by the
+                            # fallback lanes when the mountless
+                            # backend is unachievable.
                             _mx_cause = _errors.SandboxSetupError(
                                 f"sandbox mount-ns setup or exec "
                                 f"failed ({_setup_status[0]}: "
                                 f"{_setup_status[1]})",
-                                setup_category=_setup_status[0],
-                            )
-                            _dispatch_floor_check(
-                                "mountless namespace backend",
-                                cause=_mx_cause,
-                                detail=(f"{_setup_status[0]}: "
-                                        f"{_setup_status[1]}"),
                                 setup_category=_setup_status[0],
                             )
                             _mx_abi_block = (
@@ -4894,7 +4927,57 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     f"achievable ({_mx_abi_block})")
                                 _spawn_ladder_err = _mx_cause
                                 used_spawn = False
+                                if state.warn_once(
+                                        "_mountless_unachievable_warned"):
+                                    # The reroute must be as loud as
+                                    # every other demotion on this
+                                    # file: pre-fix shapes either
+                                    # refused with an explanatory
+                                    # message or warned — a silent
+                                    # stamp-only degrade of a
+                                    # read-restricted run to a
+                                    # host-visible lane is not
+                                    # acceptable.
+                                    logger.warning(
+                                        "Sandbox: the mountless "
+                                        "namespace backend is not "
+                                        "achievable for this call "
+                                        "(%s) — continuing down the "
+                                        "demotion ladder; the "
+                                        "containment floor decides "
+                                        "admission, and the demoted "
+                                        "lane enforces read/write "
+                                        "policy with Landlock alone.",
+                                        _mx_abi_block,
+                                    )
                             else:
+                                # Refuse BEFORE the speculative-cache
+                                # write and the grant-pin re-check: a
+                                # refused run must not steer FUTURE
+                                # runs onto the mountless lane (the
+                                # cache is consulted by every later
+                                # call for the same binary, trusted
+                                # ones included). The checked dispatch
+                                # below re-asserts at the executor.
+                                _mx_declared = _LANE_TIERS[
+                                    "mountless namespace backend"]
+                                if (_skip_pid_ns
+                                        and _tiers.ContainmentTier
+                                        .NS_NOMOUNT < _mx_declared):
+                                    _mx_declared = (
+                                        _tiers.ContainmentTier
+                                        .NS_NOMOUNT)
+                                _tiers.assert_floor(
+                                    _mx_declared, _floor,
+                                    lane="mountless namespace backend",
+                                    cause=_mx_cause,
+                                    detail=(f"{_setup_status[0]}: "
+                                            f"{_setup_status[1]}"),
+                                    remedy=_floor_remedy(
+                                        "fix the bind-tree/tool-path "
+                                        "failure."),
+                                    setup_category=_setup_status[0],
+                                )
                                 if (_grant_ids_before is not None
                                         and _grant_path_identities()
                                         != _grant_ids_before):
@@ -4930,7 +5013,21 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                         "for cmd[0]=%r.",
                                         cmd[0],
                                     )
-                                result = _run_spawn_backend(skip_mount=True)
+                                result = _dispatch_floor_check(
+                                    "mountless namespace backend",
+                                    executor=lambda: _run_spawn_backend(
+                                        skip_mount=True),
+                                    cap=(_tiers.ContainmentTier
+                                         .NS_NOMOUNT
+                                         if _skip_pid_ns else None),
+                                    cause=_mx_cause,
+                                    detail=(f"{_setup_status[0]}: "
+                                            f"{_setup_status[1]}"),
+                                    remedy=_floor_remedy(
+                                        "fix the bind-tree/tool-path "
+                                        "failure."),
+                                    setup_category=_setup_status[0],
+                                )
                                 _retry_status = getattr(
                                     result, "_setup_status", None)
                                 if _retry_status is not None:
@@ -5268,14 +5365,32 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         "demoted from the mount-ns backend (per-call "
                         "pass_fds= is not plumbed through the "
                         "fork-based spawn path)")
+                elif (sys.platform == "linux" and not landlock_available
+                        and not effectively_disabled):
+                    # No demotion happened — the plain lane simply
+                    # cannot deliver its nominal tier on this kernel.
+                    # The remedy must name THAT, not a spawn failure
+                    # that never occurred.
+                    _fallback_floor_detail = (
+                        "the kernel has no Landlock, so this lane "
+                        "delivers rlimits/seccomp only")
                 else:
                     _fallback_floor_detail = ""
-                _fallback_floor_remedy = _floor_remedy(
-                    "these lanes expose the host-pid /proc to the "
-                    "target; fix the demotion cause (see the sandbox "
-                    "log for the spawn failure; typical hosts need the "
-                    "uidmap package and the userns sysctl)."
-                    if sys.platform == "linux" else "")
+                if (sys.platform == "linux" and not landlock_available
+                        and not effectively_disabled
+                        and _spawn_ladder_err is None
+                        and not (_mount_ns_degraded
+                                 or _b_fallback_reason)):
+                    _fallback_floor_remedy = _floor_remedy(
+                        "upgrade to a kernel with Landlock (5.13+) so "
+                        "the floor can be met.")
+                else:
+                    _fallback_floor_remedy = _floor_remedy(
+                        "these lanes expose the host-pid /proc to the "
+                        "target; fix the demotion cause (see the sandbox "
+                        "log for the spawn failure; typical hosts need the "
+                        "uidmap package and the userns sysctl)."
+                        if sys.platform == "linux" else "")
                 # Declared tier of the plain-subprocess lane: rlimits
                 # only when the operator disabled the sandbox or the
                 # kernel has no Landlock to enforce with (dispatch
@@ -5284,6 +5399,24 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     _tiers.ContainmentTier.BARE
                     if (effectively_disabled or not landlock_available)
                     else None)
+                # Refuse the fallback lanes BEFORE any audit machinery
+                # runs: a refused call must not write audit-degraded
+                # markers or trade its floor refusal for an
+                # audit_required one. The checked dispatches below
+                # remain the hard per-executor guarantee; this early
+                # assert only fixes refusal PRIORITY.
+                _fallback_lane = ("unshare-CLI subprocess" if need_unshare
+                                  else "Landlock-only subprocess")
+                _fallback_delivered = _LANE_TIERS[_fallback_lane]
+                if (not need_unshare and _plain_lane_cap is not None
+                        and _plain_lane_cap < _fallback_delivered):
+                    _fallback_delivered = _plain_lane_cap
+                _tiers.assert_floor(
+                    _fallback_delivered, _floor, lane=_fallback_lane,
+                    cause=_spawn_ladder_err,
+                    detail=_fallback_floor_detail,
+                    remedy=_fallback_floor_remedy,
+                )
                 if _exec_pid_callback is not None:
                     logger.debug(
                         "Sandbox: exec_pid_callback supplied but this "
@@ -5387,17 +5520,17 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             # same full_cmd as the plain dispatches
                             # below (tracer is observability, not
                             # containment — same tier as its lane).
-                            _dispatch_floor_check(
-                                "unshare-CLI subprocess" if need_unshare
-                                else "Landlock-only subprocess",
-                                cap=(None if need_unshare
-                                     else _plain_lane_cap),
-                                cause=_spawn_ladder_err,
-                                detail=_fallback_floor_detail,
-                                remedy=_fallback_floor_remedy,
-                            )
                             try:
-                                result = _la.run_landlock_audit(
+                                result = _dispatch_floor_check(
+                                    "unshare-CLI subprocess"
+                                    if need_unshare
+                                    else "Landlock-only subprocess",
+                                    cap=(None if need_unshare
+                                         else _plain_lane_cap),
+                                    cause=_spawn_ladder_err,
+                                    detail=_fallback_floor_detail,
+                                    remedy=_fallback_floor_remedy,
+                                    executor=lambda: _la.run_landlock_audit(
                                     full_cmd,
                                     audit_run_dir=str(_audit_run_dir_la),
                                     audit_verbose=audit_verbose_active,
@@ -5452,7 +5585,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     text=kwargs.get("text", False),
                                     stdin=kwargs.get("stdin"),
                                     start_new_session=_start_new_session,
-                                )
+                                ))
                                 _audit_landlock_engaged = True
                             except (RuntimeError, OSError) as _la_err:
                                 # Environmental tracer-fork failures
@@ -5575,19 +5708,13 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                    "degradation.",
                             )
                     if need_unshare:
-                        # Containment-floor contract, side 2: declared
-                        # tier of the unshare-CLI lane (namespaces via
-                        # the CLI chain, host procfs visible), asserted
-                        # before the subprocess runs — the mid-setup
+                        # Containment-floor contract, side 2: the
+                        # unshare-CLI lane (namespaces via the CLI
+                        # chain, host procfs visible) — the mid-setup
                         # spawn-exception ladder, the kwarg demotions,
                         # and the achievability rerouting all land
-                        # here, with the original failure chained.
-                        _dispatch_floor_check(
-                            "unshare-CLI subprocess",
-                            cause=_spawn_ladder_err,
-                            detail=_fallback_floor_detail,
-                            remedy=_fallback_floor_remedy,
-                        )
+                        # here, with the original failure chained at
+                        # the checked dispatch below.
                         # Orphan-teardown: the shim (pid-1 of the new pid-ns)
                         # would otherwise outlive an ORCHESTRATOR that is
                         # hard-killed (SIGKILL/OOM/crash) mid-run — the
@@ -5641,13 +5768,24 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             _denv["_RAPTOR_DEATH_FD"] = str(_death_r)
                             _dk["env"] = _denv
                             try:
-                                result = subprocess.run(full_cmd, **_dk, check=False)
+                                result = _dispatch_floor_check(
+                                    "unshare-CLI subprocess",
+                                    cause=_spawn_ladder_err,
+                                    detail=_fallback_floor_detail,
+                                    remedy=_fallback_floor_remedy,
+                                    executor=lambda: subprocess.run(
+                                        full_cmd, **_dk, check=False),
+                                )
                             except OSError as _ebadf:
                                 if _ebadf.errno != errno.EBADF:
                                     raise
                                 result = subprocess.CompletedProcess(
                                     full_cmd, returncode=-9,
                                 )
+                                # Synthetic result for an executor that
+                                # died post-check — the floor was
+                                # asserted before it ran.
+                                result._floor_checked = True  # type: ignore[attr-defined]
                         finally:
                             for _dfd in (_death_r, _death_w):
                                 try:
@@ -5655,19 +5793,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 except OSError:
                                     pass
                     else:
-                        # Containment-floor contract, side 2: declared
-                        # tier of the plain-subprocess lane (Landlock +
-                        # seccomp + rlimits, host namespaces; rlimits
-                        # only under the operator disable or on a
-                        # Landlock-less kernel), asserted before the
-                        # subprocess runs.
-                        _dispatch_floor_check(
-                            "Landlock-only subprocess",
-                            cap=_plain_lane_cap,
-                            cause=_spawn_ladder_err,
-                            detail=_fallback_floor_detail,
-                            remedy=_fallback_floor_remedy,
-                        )
+                        # Containment-floor contract, side 2: the
+                        # plain-subprocess lane (Landlock + seccomp +
+                        # rlimits, host namespaces; rlimits only under
+                        # the operator disable or on a Landlock-less
+                        # kernel) — both executor shapes below route
+                        # through the checked dispatch.
                         # No shim, no pid namespace on this path —
                         # teardown containment comes from the preexec
                         # sweeper (reaper cell) plus a parent-side
@@ -5714,16 +5845,33 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 # pipe FIRST so the sweeper reaps its
                                 # subtree and exits on its own; only
                                 # then kill.
-                                result = _run_teardown_first_timeout(
-                                    full_cmd, _pk, _death_w_holder,
-                                    _start_new_session,
+                                result = _dispatch_floor_check(
+                                    "Landlock-only subprocess",
+                                    cap=_plain_lane_cap,
+                                    cause=_spawn_ladder_err,
+                                    detail=_fallback_floor_detail,
+                                    remedy=_fallback_floor_remedy,
+                                    executor=lambda:
+                                        _run_teardown_first_timeout(
+                                            full_cmd, _pk,
+                                            _death_w_holder,
+                                            _start_new_session,
+                                        ),
                                 )
                             else:
-                                result = subprocess.run(
-                                    full_cmd,
-                                    start_new_session=_start_new_session,
-                                    **_pk,
-                                    check=False,
+                                result = _dispatch_floor_check(
+                                    "Landlock-only subprocess",
+                                    cap=_plain_lane_cap,
+                                    cause=_spawn_ladder_err,
+                                    detail=_fallback_floor_detail,
+                                    remedy=_fallback_floor_remedy,
+                                    executor=lambda: subprocess.run(
+                                        full_cmd,
+                                        start_new_session=(
+                                            _start_new_session),
+                                        **_pk,
+                                        check=False,
+                                    ),
                                 )
                         except OSError as _ebadf:
                             if _ebadf.errno != errno.EBADF:
@@ -5731,6 +5879,8 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                             result = subprocess.CompletedProcess(
                                 full_cmd, returncode=-9,
                             )
+                            # Post-check executor death — see above.
+                            result._floor_checked = True  # type: ignore[attr-defined]
                         finally:
                             if _reaper_cell is not None:
                                 _reaper_cell["death_local"].fd = None
@@ -5752,6 +5902,25 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # run() calls within one `with sandbox()` block.
         _sandbox_events.extend(events)
 
+        # Runtime dominance backstop for the chokepoint: every result
+        # consumed by run() must carry the checked-dispatch stamp. The
+        # AST gate covers executors added in THIS module; this covers
+        # a lane that spawns from another module entirely — post-exec
+        # (a lane the contract does not know about cannot be asserted
+        # pre-exec), so it converts a silent bypass into a loud
+        # failure at first use rather than preventing the first run.
+        if not getattr(result, "_floor_checked", False):
+            raise _errors.SandboxFloorError(
+                "sandbox internal invariant violated: a result reached "
+                "run()'s epilogue without passing the checked-dispatch "
+                "chokepoint — an executor lane is bypassing the "
+                "containment-floor contract.",
+                "route the lane through _dispatch_floor_check(lane, "
+                "executor=...) so its declared tier is asserted "
+                "against the floor.",
+                achievable=_tiers.ContainmentTier.BARE,
+                floor=_floor,
+            )
         # Interpret process termination for observability
         _interpret_result(result, cmd_display)
 

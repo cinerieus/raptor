@@ -138,14 +138,23 @@ implicitly.
 
 Enforcement is two-sided: an entry-time check refuses
 statically-knowable shapes up front with the full remedy text, and a
-hard runtime assertion at **every dispatch site** compares the lane's
-declared tier against the floor immediately before the command
-executes. A demotion that would cross the floor converts into a typed
-`SandboxFloorError` (a `SandboxSetupError` subtype carrying
-`floor`/`achievable`/`setup_category`) chained to the original backend
-failure — so a future demotion lane added without any thought for the
-contract fails closed instead of silently running attacker-derived
-code below the floor.
+hard runtime assertion inside the **checked dispatch chokepoint** —
+the only construct in the sandbox module that hands a command to an
+executor — compares the lane's declared tier against the floor
+immediately before invoking it. A demotion that would cross the floor
+converts into a typed `SandboxFloorError` (a `SandboxSetupError`
+subtype carrying `floor`/`achievable`/`setup_category`) chained to the
+original backend failure. A future demotion lane routed through the
+chokepoint therefore fails closed if it sits below the floor. Two
+backstops guard the chokepoint itself: an AST executor gate in the
+contract tests forbids in-module spawning outside it (bare
+`subprocess.run`/`Popen`/`os.exec*` calls, module aliasing, and
+direct spawn-callable imports all refuse), and a runtime dominance
+stamp makes run()'s epilogue reject any result that did not pass
+through the chokepoint — catching an executor added in another
+module at its first use. In-process code that deliberately subverts
+the module is outside the threat model — it is already the
+orchestrator.
 
 Every result stamps the posture: `sandbox_info["containment_tier"]`
 (the tier the call actually ran at — per-call posture reductions such

@@ -129,15 +129,22 @@ def resolve_call_floor(
     operator_disabled: bool,
     require_fresh_procfs: bool | None,
     untrusted_workload: bool,
+    waiver_active: bool = False,
 ) -> tuple[ContainmentTier, str]:
     """Resolve one run() call's containment floor and its source.
 
     ``require_fresh_procfs`` is tri-state: ``None`` = the kwarg was
     never passed (trusted default); ``True`` = the resolved untrusted
     contract is in force; ``False`` = the caller passed the kwarg but
-    the operator's ``RAPTOR_ALLOW_DEGRADED_UNTRUSTED`` waiver (or the
-    caller's own derivation) zeroed it — an untrusted-class call
-    running at the waived floor.
+    zeroed — either the env-var-honouring derivation under the
+    operator's waiver, or a caller-level literal relaxation.
+    ``waiver_active`` carries the env truth (the caller reads
+    ``RAPTOR_ALLOW_DEGRADED_UNTRUSTED`` — this module deliberately
+    reads no environment) so the floor SOURCE is attributed
+    truthfully: "env" only when the waiver really is in force; a
+    literal ``False`` without the waiver gets the same floor with the
+    default source, so no banner or waiver-named warning fires for
+    consent nobody gave.
 
     Precedence (highest wins): operator-explicit disable (``--sandbox
     none`` / ``--no-sandbox`` / ``disabled=True`` — the documented
@@ -151,17 +158,17 @@ def resolve_call_floor(
     if require_fresh_procfs:
         return untrusted_default_floor(), FLOOR_SOURCE_DEFAULT
     if require_fresh_procfs is False:
-        # Kwarg present-but-zeroed: the env-var-honouring derivation
-        # (untrusted_fresh_procfs_required) is the only in-tree minter
-        # of this shape, so the waived floor is correctly attributed
-        # to the env consent source.
-        return waived_untrusted_floor(), FLOOR_SOURCE_ENV
+        # Kwarg present-but-zeroed: an untrusted-class call running at
+        # the waived floor.
+        return (waived_untrusted_floor(),
+                FLOOR_SOURCE_ENV if waiver_active
+                else FLOOR_SOURCE_DEFAULT)
     if untrusted_workload:
         # Untrusted-marked call that never derived the contract kwarg:
         # fail CLOSED at the class default. Granting the waived floor
-        # here would attribute consent nobody verified — the resolver
-        # never reads the env var itself, so the lowered floor belongs
-        # only to callers that carried the derivation through.
+        # here would attribute consent nobody verified — the lowered
+        # floor belongs only to callers that carried the derivation
+        # through.
         return untrusted_default_floor(), FLOOR_SOURCE_DEFAULT
     return ContainmentTier.BARE, FLOOR_SOURCE_DEFAULT
 

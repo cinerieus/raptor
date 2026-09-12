@@ -166,6 +166,11 @@ _floor_lowered_banner_warned = False
 # a host-netns caller lost the requested block). Once per process;
 # the per-run netns_inherited posture stamp records every instance.
 _inherit_netns_block_warned = False
+# The mountless namespace backend left the achievable set for a call
+# (Landlock ABI below 3 with untrusted/read-restricted write policy)
+# and the demotion continued down the ladder. Once per process; the
+# per-run mount_ns_degraded stamp records every instance.
+_mountless_unachievable_warned = False
 _bare_run_posture_warned = False
 _net_and_tcp_allowlist_warned = False
 # Degraded-mode Landlock TCP-connect deny (block_network without a

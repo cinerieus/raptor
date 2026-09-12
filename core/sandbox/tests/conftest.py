@@ -93,6 +93,7 @@ def _sandbox_state_guard():
         "_mountless_backend_warned",
         "_floor_lowered_banner_warned",
         "_inherit_netns_block_warned",
+        "_mountless_unachievable_warned",
         "_bare_run_posture_warned",
         "_net_and_tcp_allowlist_warned",
         "_degraded_tcp_deny_warned",

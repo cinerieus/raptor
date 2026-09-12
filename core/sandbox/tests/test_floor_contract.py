@@ -80,26 +80,45 @@ def test_consent_chain_matrix(monkeypatch):
     monkeypatch.setattr(_tiers, "sys",
                         types.SimpleNamespace(platform="linux"))
     cases = {
-        # (disabled, require_fresh_procfs, untrusted): (floor, source)
-        (True, True, True): (ContainmentTier.BARE, "operator-disable"),
-        (True, None, False): (ContainmentTier.BARE, "operator-disable"),
-        (False, True, True): (ContainmentTier.MOUNT_NS, "default"),
-        (False, True, False): (ContainmentTier.MOUNT_NS, "default"),
-        (False, False, True): (ContainmentTier.LANDLOCK_ONLY, "env"),
-        (False, False, False): (ContainmentTier.LANDLOCK_ONLY, "env"),
+        # (disabled, require_fresh_procfs, untrusted, waiver_active):
+        #     (floor, source)
+        (True, True, True, True): (ContainmentTier.BARE,
+                                   "operator-disable"),
+        (True, None, False, False): (ContainmentTier.BARE,
+                                     "operator-disable"),
+        (False, True, True, False): (ContainmentTier.MOUNT_NS,
+                                     "default"),
+        (False, True, False, False): (ContainmentTier.MOUNT_NS,
+                                      "default"),
+        # Kwarg present-but-zeroed under the waiver: the lowered floor
+        # is attributed to the env consent source.
+        (False, False, True, True): (ContainmentTier.LANDLOCK_ONLY,
+                                     "env"),
+        (False, False, False, True): (ContainmentTier.LANDLOCK_ONLY,
+                                      "env"),
+        # Same shape WITHOUT the waiver (caller-level literal False):
+        # same floor, but no "env" attribution — no banner or
+        # waiver-named warning may fire for consent nobody gave.
+        (False, False, True, False): (ContainmentTier.LANDLOCK_ONLY,
+                                      "default"),
+        (False, False, False, False): (ContainmentTier.LANDLOCK_ONLY,
+                                       "default"),
         # Untrusted-marked call that never derived the contract kwarg:
-        # fail CLOSED at the class default — the waived floor (and its
-        # "env" attribution) belongs only to callers that carried the
-        # env-var-honouring derivation through; the resolver must not
-        # attribute consent nobody verified.
-        (False, None, True): (ContainmentTier.MOUNT_NS, "default"),
-        (False, None, False): (ContainmentTier.BARE, "default"),
+        # fail CLOSED at the class default — the waived floor belongs
+        # only to callers that carried the env-var-honouring
+        # derivation through; the resolver must not attribute consent
+        # nobody verified.
+        (False, None, True, True): (ContainmentTier.MOUNT_NS,
+                                    "default"),
+        (False, None, True, False): (ContainmentTier.MOUNT_NS,
+                                     "default"),
+        (False, None, False, False): (ContainmentTier.BARE, "default"),
     }
-    for (disabled, rfp, untrusted), expected in cases.items():
+    for (disabled, rfp, untrusted, waiver), expected in cases.items():
         got = _tiers.resolve_call_floor(
             operator_disabled=disabled, require_fresh_procfs=rfp,
-            untrusted_workload=untrusted)
-        assert got == expected, (disabled, rfp, untrusted, got)
+            untrusted_workload=untrusted, waiver_active=waiver)
+        assert got == expected, (disabled, rfp, untrusted, waiver, got)
     monkeypatch.setattr(_tiers, "sys",
                         types.SimpleNamespace(platform="darwin"))
     assert _tiers.resolve_call_floor(
@@ -107,14 +126,18 @@ def test_consent_chain_matrix(monkeypatch):
         untrusted_workload=True) == (ContainmentTier.SEATBELT, "default")
     assert _tiers.resolve_call_floor(
         operator_disabled=False, require_fresh_procfs=False,
-        untrusted_workload=True) == (ContainmentTier.BARE, "env")
+        untrusted_workload=True,
+        waiver_active=True) == (ContainmentTier.BARE, "env")
 
 
 def test_rfp_kwarg_falsy_literals_normalise_to_false(
         tmp_path, monkeypatch):
     """A literal falsy require_fresh_procfs (0, '') must resolve like
-    the derived False (waived untrusted class), not like an absent
-    kwarg — the tri-state boundary normalises before resolution."""
+    the derived False (waived-class floor), not like an absent kwarg —
+    the tri-state boundary normalises before resolution. The floor
+    SOURCE follows the env truth: "env" only when the waiver really
+    is set; a bare literal gets the same floor with the default
+    source (no banner in the waiver's name)."""
     import subprocess as _subprocess
 
     from core.sandbox import _spawn as _spawn_mod
@@ -125,12 +148,20 @@ def test_rfp_kwarg_falsy_literals_normalise_to_false(
                                             stdout="", stderr="")
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
     try:
         r = _ctx.run(["true"], target=str(tmp_path),
                      output=str(tmp_path), timeout=60,
                      require_fresh_procfs=0)
     except BaseException as e:  # noqa: BLE001 — host capability gate
         pytest.skip(f"mount-ns lane unavailable: {e}")
+    assert r.sandbox_info["floor_source"] == "default"
+    assert r.sandbox_info["containment_floor"] == "landlock"
+
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+    r = _ctx.run(["true"], target=str(tmp_path),
+                 output=str(tmp_path), timeout=60,
+                 require_fresh_procfs=0)
     assert r.sandbox_info["floor_source"] == "env"
     assert r.sandbox_info["containment_floor"] == "landlock"
 
@@ -213,44 +244,129 @@ def test_no_debug_gating_in_contract_source():
     assert "_tiers.assert_floor" in check_def
 
 
-def test_every_dispatch_site_carries_a_floor_check():
-    """Dispatch-site completeness tripwire: every executor hand-off in
-    context.py is lexically preceded by a ``_dispatch_floor_check(``
-    within its dispatch block. Crude but effective (same spirit as the
-    pid1-shim tuple-sync tripwire): a new executor added without a
-    declared tier fails this test before it can ship an ungated lane.
-    """
+def test_no_bare_executor_calls_outside_the_checked_dispatch():
+    """Structural executor gate (AST, not a lexical window): every
+    process-spawning call in context.py must live inside the
+    ``executor=`` thunk of a ``_dispatch_floor_check`` call — the
+    checked dispatch chokepoint that performs the floor assertion and
+    then invokes the executor — or inside one of the two named
+    executor-implementation defs it dispatches
+    (``_run_teardown_first_timeout``, ``_run_spawn_backend``). A
+    future lane that spawns a process any other way IN THIS MODULE
+    (bare subprocess.run/Popen, os.exec*, a new in-file helper)
+    fails this gate regardless of where in the file it sits — closing
+    the lexical-window and anchor-spelling evasions a plain grep
+    tripwire allows. An executor hidden in ANOTHER module is out of
+    this gate's sight by construction; the runtime dominance stamp
+    (run()'s epilogue rejects unstamped results — see
+    test_unstamped_result_is_refused_at_the_epilogue) is the
+    cross-module backstop."""
+    import ast as _ast
+
     src = (_REPO_ROOT / "core/sandbox/context.py").read_text(
         encoding="utf-8")
-    anchors = [
-        "_macos_mod.run_sandboxed(",
-        "result = _run_spawn_backend(",
-        "_la.run_landlock_audit(",
-        "result = subprocess.run(",
-        "result = _run_teardown_first_timeout(",
-    ]
-    check_positions = [
-        i for i in range(len(src))
-        if src.startswith("_dispatch_floor_check(", i)
-        and not src.startswith("def _dispatch_floor_check(", i - 4)
-    ]
-    assert check_positions, "no dispatch floor checks found"
-    window = 7000
-    for anchor in anchors:
-        start = 0
-        found_any = False
-        while True:
-            pos = src.find(anchor, start)
-            if pos == -1:
+    tree = _ast.parse(src)
+    parents: dict = {}
+    for node in _ast.walk(tree):
+        for child in _ast.iter_child_nodes(node):
+            parents[child] = node
+
+    def _is_spawn_call(call: "_ast.Call") -> "str | None":
+        func = call.func
+        if isinstance(func, _ast.Attribute):
+            attr = func.attr
+            base = (func.value.id
+                    if isinstance(func.value, _ast.Name) else None)
+            if base == "subprocess" and attr in (
+                    "run", "Popen", "check_output", "check_call",
+                    "call"):
+                return f"subprocess.{attr}"
+            if base == "os" and (
+                    attr == "system" or attr.startswith("exec")
+                    or attr.startswith("spawn")
+                    or attr.startswith("posix_spawn")):
+                return f"os.{attr}"
+            if attr in ("run_sandboxed", "run_landlock_audit"):
+                return f"{base or '?'}.{attr}"
+            return None
+        if isinstance(func, _ast.Name) and func.id in (
+                "_run_teardown_first_timeout", "_run_spawn_backend",
+                "run_landlock_audit", "run_sandboxed"):
+            return func.id
+        return None
+
+    violations: list = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        spawn = _is_spawn_call(node)
+        if spawn is None:
+            continue
+        cur = node
+        ok = False
+        while cur in parents:
+            cur = parents[cur]
+            if (isinstance(cur, _ast.FunctionDef)
+                    and cur.name in ("_run_teardown_first_timeout",
+                                     "_run_spawn_backend")):
+                # The named executor implementations — reachable only
+                # through the checked dispatch's executor thunks.
+                ok = True
                 break
-            found_any = True
-            assert any(pos - window < c < pos for c in check_positions), (
-                f"executor {anchor!r} at offset {pos} has no "
-                f"_dispatch_floor_check within its dispatch block — "
-                f"a lane is shipping without a declared tier")
-            start = pos + 1
-        assert found_any, f"executor anchor {anchor!r} vanished — " \
-                          f"update the tripwire with the new spelling"
+            if isinstance(cur, _ast.Lambda):
+                kw = parents.get(cur)
+                outer = parents.get(kw) if kw is not None else None
+                if (isinstance(kw, _ast.keyword)
+                        and kw.arg == "executor"
+                        and isinstance(outer, _ast.Call)
+                        and isinstance(outer.func, _ast.Name)
+                        and outer.func.id == "_dispatch_floor_check"):
+                    ok = True
+                    break
+        if not ok:
+            violations.append((node.lineno, spawn))
+    assert not violations, (
+        f"process-spawning calls outside the checked dispatch "
+        f"chokepoint: {violations} — route them through "
+        f"_dispatch_floor_check(lane, executor=...) so the floor "
+        f"assertion cannot be bypassed")
+    # Anti-aliasing: the spawn-name matcher above keys on the literal
+    # `subprocess.` / `os.` bases, so re-binding either module to
+    # another name (or importing spawn callables directly) would blind
+    # it. Refuse the aliasing shapes themselves.
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Assign) and isinstance(
+                node.value, _ast.Name) and node.value.id in (
+                    "subprocess", "os"):
+            pytest.fail(f"context.py:{node.lineno} re-binds the "
+                        f"{node.value.id} module — this would blind "
+                        f"the executor gate")
+        if isinstance(node, _ast.ImportFrom) and node.module in (
+                "subprocess", "os"):
+            spawny = [a.name for a in node.names
+                      if a.name in ("run", "Popen", "check_output",
+                                    "check_call", "call", "system")
+                      or a.name.startswith(("exec", "spawn",
+                                            "posix_spawn"))]
+            assert not spawny, (
+                f"context.py:{node.lineno} imports spawn callables "
+                f"directly ({spawny}) — this would blind the "
+                f"executor gate")
+        if isinstance(node, _ast.Import):
+            for a in node.names:
+                if a.name in ("subprocess", "os") and a.asname:
+                    pytest.fail(
+                        f"context.py:{node.lineno} imports "
+                        f"{a.name} under an alias — this would "
+                        f"blind the executor gate")
+    # Sanity: the gate actually saw the real dispatch sites.
+    thunked = sum(
+        1 for node in _ast.walk(tree)
+        if isinstance(node, _ast.Call)
+        and isinstance(node.func, _ast.Name)
+        and node.func.id == "_dispatch_floor_check"
+    )
+    assert thunked >= 6, f"expected >=6 checked dispatches, saw {thunked}"
 
 
 def test_lane_registry_covers_every_lane_and_matches_the_lattice():
@@ -380,6 +496,16 @@ def test_mount_and_mountless_lanes_stamp_the_same_posture_surface(
     for key in ("containment_tier", "containment_floor", "floor_source",
                 "mount_ns_active", "restrict_reads"):
         assert key in mi and key in li, key
+    # Symmetric key-set parity: the two lanes may differ ONLY by the
+    # declared asymmetries — a new posture key stamped on one lane
+    # but not the other is a parity regression.
+    allowed_asymmetry = {
+        "backend", "fresh_procfs", "mount_ns_degraded",
+        "landlock_metadata_ops_unrestricted",
+        "landlock_truncate_unrestricted", "private_scratch",
+    }
+    assert set(mi) ^ set(li) <= allowed_asymmetry, (
+        sorted(set(mi) ^ set(li)))
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
@@ -443,6 +569,7 @@ def test_skip_pid_ns_caps_spawn_lane_tier_and_warning(
     # Waived untrusted-class shape on the same lane: the capped
     # delivered tier sits at/below ns-only, so the per-call HOST
     # process table warning must fire.
+    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
     with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
         waived = _ctx.run(["true"], target=str(tmp_path),
                           output=str(tmp_path), timeout=60,
@@ -555,3 +682,209 @@ def test_inherit_netns_drop_is_stamped_warned_and_floor_gated(
                  target=str(tmp_path), output=str(tmp_path),
                  timeout=60, require_fresh_procfs=True)
     assert "inherited away" in str(excinfo.value)
+
+
+def _simulate_capable_host(monkeypatch):
+    """Patch the capability probes at their module seams so the
+    dispatch routes run on hosts that cannot create namespaces —
+    exactly the CI class the contract protects. No real namespace
+    work happens (the spawn backend is always stubbed alongside)."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox import probes as _probes_mod
+    from core.sandbox import seccomp as _seccomp_mod
+    if not _seccomp_mod.check_seccomp_available():
+        # libseccomp is a real dependency of the filter BUILDER (a
+        # patched-True probe would hand the preexec a null lib) —
+        # namespaces are the constrained axis these simulations
+        # exercise, so require the library for real.
+        pytest.skip("libseccomp required for the simulated-host tests")
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: True)
+    monkeypatch.setattr(_ctx, "check_mount_available", lambda: True)
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
+    monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 4)
+    monkeypatch.setattr(_spawn_mod, "mount_ns_available", lambda: True)
+    monkeypatch.setattr(_probes_mod, "check_unshare_engages",
+                        lambda flags: (True, ""))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_future_below_floor_lane_caught_on_constrained_hosts(
+        tmp_path, monkeypatch):
+    """The future-lane guarantee, exercised with SIMULATED host
+    capability (probe seams patched, backend stubbed) so the dispatch
+    route runs even on namespace-less CI hosts where the live variant
+    skips."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    _simulate_capable_host(monkeypatch)
+
+    injected = OSError("forced spawn setup failure")
+    sentinel = tmp_path / "future-lane-constrained.marker"
+
+    def raising_spawn(cmd, **kwargs):
+        raise injected
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", raising_spawn)
+    monkeypatch.setitem(_ctx._LANE_TIERS, "unshare-CLI subprocess",
+                        ContainmentTier.LANDLOCK_ONLY)
+    with pytest.raises(SandboxFloorError) as excinfo:
+        _ctx.run_untrusted(["touch", str(sentinel)],
+                           target=str(tmp_path), output=str(tmp_path),
+                           timeout=60)
+    e = excinfo.value
+    assert e.floor is ContainmentTier.MOUNT_NS
+    assert e.achievable is ContainmentTier.LANDLOCK_ONLY
+    assert e.__cause__ is injected
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+@pytest.mark.parametrize("cell", [
+    "uns-denied", "mount-denied", "uidmap-missing", "ll-enosys",
+    "ll-enosys-mount-denied", "healthy",
+])
+def test_matrix_cells_unwaived_untrusted_outcomes(
+        tmp_path, monkeypatch, cell):
+    """The degraded-environment matrix cells, as entry-contract test
+    vectors for the unwaived untrusted class: every cell that cannot
+    deliver the mount-tier floor REFUSES up front (no spawn attempt,
+    no execution); the healthy cell runs. This is the post-lattice
+    truth for the sandbox feature-matrix sweep's untrusted rows."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    _simulate_capable_host(monkeypatch)
+    spawns: list = []
+
+    def ok_spawn(cmd, **kwargs):
+        spawns.append(1)
+        return subprocess.CompletedProcess(cmd, returncode=0,
+                                           stdout="", stderr="")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
+    if cell == "uns-denied":
+        # The consent-resolver entry gate (_require_userns_or_optin,
+        # kept per the phase-2 scope) fires before the entry contract
+        # for the run_untrusted class — its message is the cell truth.
+        monkeypatch.setattr(_ctx, "check_net_available", lambda: False)
+        expect = "cannot create unprivileged user namespaces"
+    elif cell == "mount-denied":
+        monkeypatch.setattr(_ctx, "check_mount_available", lambda: False)
+        expect = "mount-namespace backend is unavailable"
+    elif cell == "uidmap-missing":
+        monkeypatch.setattr(_spawn_mod, "mount_ns_available",
+                            lambda: False)
+        expect = "mount-namespace backend is unavailable"
+    elif cell == "ll-enosys":
+        # Landlock-less but mount-capable: the bind tree is the
+        # filesystem enforcement, so the mount lane still delivers
+        # the floor — the cell RUNS at mount-ns.
+        monkeypatch.setattr(_ctx, "check_landlock_available",
+                            lambda: False)
+        expect = None
+    elif cell == "ll-enosys-mount-denied":
+        # Landlock-less AND mount-less: nothing can enforce the
+        # requested filesystem policy — the construction-time
+        # enforceability refusal (kept verbatim, not a floor) fires.
+        monkeypatch.setattr(_ctx, "check_landlock_available",
+                            lambda: False)
+        monkeypatch.setattr(_ctx, "check_mount_available", lambda: False)
+        expect = "Landlock is unavailable"
+    else:
+        expect = None
+
+    if expect is None:
+        r = _ctx.run_untrusted(["true"], target=str(tmp_path),
+                               output=str(tmp_path), timeout=60)
+        assert r.returncode == 0
+        assert r.sandbox_info["containment_tier"] == "mount-ns"
+        assert len(spawns) == 1
+        return
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run_untrusted(["true"], target=str(tmp_path),
+                           output=str(tmp_path), timeout=60)
+    assert expect in str(excinfo.value), str(excinfo.value)
+    assert not spawns, "a refused matrix cell reached the spawn backend"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux probe seam")
+def test_unstamped_result_is_refused_at_the_epilogue(
+        tmp_path, monkeypatch):
+    """Runtime dominance backstop: a result produced by an executor
+    the chokepoint never saw (e.g. a lane added in ANOTHER module,
+    out of the AST gate's sight) must not survive run()'s epilogue —
+    the bypass converts to a loud typed failure at first use.
+    Simulated by stripping the chokepoint's stamp."""
+    import subprocess as _subprocess
+
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+
+    def ok_spawn(cmd, **kwargs):
+        return _subprocess.CompletedProcess(cmd, returncode=0,
+                                            stdout="", stderr="")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
+    try:
+        baseline = _ctx.run(["true"], target=str(tmp_path),
+                            output=str(tmp_path), timeout=60)
+    except BaseException as e:  # noqa: BLE001 — host capability gate
+        pytest.skip(f"spawn lane unavailable: {e}")
+    assert getattr(baseline, "_floor_checked", False) is True
+
+    class _Unstamped(_subprocess.CompletedProcess):
+        # Refuses the stamp: the chokepoint's setattr is silently
+        # dropped, modelling a result object minted outside it.
+        __slots__ = ()
+
+        def __setattr__(self, name, value):
+            if name == "_floor_checked":
+                return
+            super().__setattr__(name, value)
+
+    def unstampable_spawn(cmd, **kwargs):
+        return _Unstamped(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", unstampable_spawn)
+    with pytest.raises(SandboxFloorError) as excinfo:
+        _ctx.run(["true"], target=str(tmp_path), output=str(tmp_path),
+                 timeout=60)
+    assert "checked-dispatch chokepoint" in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_refused_mx_run_does_not_pollute_the_speculative_cache(
+        tmp_path, monkeypatch):
+    """A refused unwaived-untrusted M/X run must not write the
+    speculative-failure cache — the cache steers every LATER call for
+    the same binary (trusted ones included) onto the mountless lane,
+    so a refusal would silently demote future trusted runs."""
+    import subprocess as _subprocess
+
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox import state
+    from core.sandbox.errors import SandboxFloorError
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    monkeypatch.setattr(state, "_speculative_failure_cache", {})
+
+    def fail_bind(cmd, **kwargs):
+        cp = _subprocess.CompletedProcess(cmd, returncode=126,
+                                          stdout="", stderr="")
+        cp._setup_status = ("M", "forced mount-ns failure")
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fail_bind)
+    try:
+        with pytest.raises(SandboxFloorError):
+            _ctx.run_untrusted(["true"], target=str(tmp_path),
+                               output=str(tmp_path), timeout=60)
+    except (pytest.skip.Exception, pytest.fail.Exception):
+        raise
+    except Exception as e:  # noqa: BLE001 — host capability gate
+        pytest.skip(f"mount-ns lane unavailable: {e}")
+    assert state._speculative_failure_cache == {}, (
+        "a refused run polluted the speculative-failure cache and "
+        "would demote future trusted runs")
