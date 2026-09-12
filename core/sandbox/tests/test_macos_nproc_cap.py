@@ -19,6 +19,16 @@ helper on macOS, and via a monkeypatched clamp for the emulated
 darwin-shape cases on Linux (where the helper is platform-gated to
 None).
 
+Emulation stacks on reality: monkeypatching the production sysctl
+helper fakes what production REQUESTS, but the actual setrlimit
+syscall still hits the actual kernel — on a real darwin host the real
+kern.maxprocperuid clamp applies underneath any emulated value (a
+fake clamp above the ceiling cannot stop the real kernel storing
+less). Every expectation therefore carries the REAL clamp (captured
+at import, before any monkeypatch) as an unconditional floor, and the
+anti-mask test picks its fake values relative to the real clamp on
+darwin so the observed number is the true count+budget.
+
 Cross-platform: SANDBOX_EXEC is swapped for a pass-through script so
 the REAL shim + trampoline apply the preexec on Linux too; the count
 is monkeypatched to a deterministic value well above any plausible
@@ -44,6 +54,11 @@ _SOFT_DUMP = [sys.executable, "-c",
               "import resource; "
               "print(resource.getrlimit(resource.RLIMIT_NPROC)[0])"]
 
+# The REAL kernel clamp (None on Linux), captured at import time —
+# i.e. before any test monkeypatches the production helper. The
+# actual kernel applies this underneath every emulated value.
+_REAL_KERNEL_CLAMP = _macos_spawn._darwin_nproc_kernel_clamp()
+
 
 def _fake_sandbox_exec(tmp_path):
     fake = tmp_path / "fake-sandbox-exec"
@@ -62,13 +77,17 @@ def test_same_uid_process_count_works_here():
 
 def _expected_soft(requested: int, kernel_clamp: "int | None") -> int:
     """The soft limit the child must observe: count+budget, bounded by
-    the inherited hard limit and — on darwin — the kernel's silent
-    kern.maxprocperuid clamp (which applies whether or not we ask)."""
+    the inherited hard limit, by the clamp PRODUCTION saw (real or
+    monkeypatched — it bounds what production requests), and by the
+    REAL kernel clamp, which the actual setrlimit hits regardless of
+    any emulation (emulation stacks on reality; see module docstring)."""
     _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
     expected = (requested if hard == resource.RLIM_INFINITY
                 else min(requested, hard))
     if kernel_clamp is not None:
         expected = min(expected, kernel_clamp)
+    if _REAL_KERNEL_CLAMP is not None:
+        expected = min(expected, _REAL_KERNEL_CLAMP)
     return expected
 
 
@@ -130,10 +149,36 @@ def test_clamp_above_ceiling_keeps_relative_arithmetic(tmp_path,
     """Anti-degeneration guard: with the kernel clamp ABOVE
     count+budget, the child must still observe the RELATIVE ceiling —
     the clamp must never swallow the count+budget assertion (an
-    absolute-cap regression stays red under a sub-clamp count)."""
-    fake_count = 100000
+    absolute-cap regression stays red under a sub-clamp count).
+
+    On a real darwin host a fake clamp cannot lift the REAL one (the
+    actual setrlimit still hits the actual kernel), so the fake
+    values are picked relative to the real kern.maxprocperuid: the
+    whole request sits strictly below it — the kernel never
+    interferes and the child observes the true count+budget — with
+    headroom above live usage so the shim's own fork survives the
+    lowered limit (no window: skip; the absolute-cap mutation stays
+    red on darwin via the other two ceiling tests). On Linux there is
+    no kernel clamp underneath and the emulation is exact."""
     budget = 64
-    fake_clamp = 200000  # above the ceiling: must not matter
+    if _REAL_KERNEL_CLAMP is None:
+        fake_count = 100000  # far above live usage: ceiling only RAISES
+        fake_clamp = 200000  # above the ceiling: must not matter
+    else:
+        real_usage = _macos_spawn._same_uid_process_count()
+        if real_usage is None:
+            # Broken ps already fails its own test in this file; do
+            # not let a None usage open the window guard blindly (an
+            # unguarded lowered limit could EAGAIN the shim's fork).
+            pytest.skip("same-UID process count unavailable — cannot "
+                        "size the sub-clamp window safely")
+        fake_count = _REAL_KERNEL_CLAMP - budget - 128
+        if fake_count <= real_usage + 128:
+            pytest.skip(
+                "no window between live same-UID usage and "
+                "kern.maxprocperuid to observe the relative ceiling "
+                "below the real kernel clamp")
+        fake_clamp = _REAL_KERNEL_CLAMP  # above the request by construction
     monkeypatch.setattr(_macos_spawn, "_same_uid_process_count",
                         lambda: fake_count)
     monkeypatch.setattr(_macos_spawn, "_darwin_nproc_kernel_clamp",
@@ -149,8 +194,11 @@ def test_clamp_above_ceiling_keeps_relative_arithmetic(tmp_path,
         capture_output=True, text=True, timeout=20,
     )
     assert r.returncode == 0, r.stderr
-    assert int(r.stdout.strip()) == _expected_soft(fake_count + budget,
-                                                   fake_clamp)
+    soft = int(r.stdout.strip())
+    expected = _expected_soft(fake_count + budget, fake_clamp)
+    assert soft == expected, (
+        f"child soft NPROC {soft} != relative ceiling {expected} "
+        f"(clamp-masking or absolute-cap regression?)")
 
 
 def test_kernel_clamp_helper_platform_gated():
