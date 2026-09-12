@@ -243,9 +243,10 @@ jobs:
   # direct push to main cannot smuggle a finding either.
   #
   # Pure stdlib Python; no setup beyond checkout + interpreter.
-  # Wall-clock budget: ~2 min total for all five, dominated by
-  # check_miswiring's full-repo AST index (~70 s); the others are
-  # ~5-20 s each. timeout-minutes: 10 leaves generous headroom.
+  # Wall-clock budget: ~1 min total for all five; check_miswiring's
+  # single-pass parallel AST index is ~5-10 s on 4-vCPU runners; the
+  # others are ~5-20 s each. timeout-minutes: 10 leaves generous
+  # headroom.
   repo-invariants:
     needs: pre_check
     if: needs.pre_check.outputs.should_skip != 'true'
