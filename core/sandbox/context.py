@@ -6198,6 +6198,18 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # telemetry-MAC key and mint valid tokens — triage demotes
         # token-verified telemetry for such runs. Recorded per call
         # so multi-call runs take the weakest posture.
+        # Seatbelt audit runs stamp what is ENFORCED: audit mode drops
+        # the SBPL read deny for allow-with-report (observe, don't
+        # block), so restrict_reads was requested but NOT delivered —
+        # the honest value is False, and weakest-wins then does the
+        # right thing across the run. Linux keeps Landlock enforcing
+        # under its audit tier, so the requested value stays honest
+        # there.
+        _seatbelt_audit_observe_only = bool(
+            used_spawn and use_seatbelt and nonlocal_audit_mode
+            and restrict_reads)
+        _reads_enforced = bool(
+            restrict_reads and not _seatbelt_audit_observe_only)
         _posture_dir = audit_run_dir or output
         if _posture_dir and not effectively_disabled:
             try:
@@ -6206,7 +6218,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     Path(_posture_dir),
                     mount_ns_active=bool(
                         result.sandbox_info["mount_ns_active"]),
-                    restrict_reads=bool(restrict_reads),
+                    restrict_reads=_reads_enforced,
                     mountless_backend=bool(
                         used_spawn and _spawn_without_mount),
                     containment_tier=_tiers.tier_label(_delivered_tier),
@@ -6217,10 +6229,17 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                              exc_info=True)
         if _mount_ns_degraded:
             result.sandbox_info["mount_ns_degraded"] = _mount_ns_degraded
-        # restrict_reads is enforced on every engaged path: mount-ns via
-        # the bind tree + Landlock, skip_mount_ns and Landlock-only via
-        # the Landlock read allowlist alone.
-        result.sandbox_info["restrict_reads"] = bool(restrict_reads)
+        # restrict_reads is enforced on every engaged path — mount-ns
+        # via the bind tree + Landlock, skip_mount_ns and Landlock-only
+        # via the Landlock read allowlist alone — EXCEPT the seatbelt
+        # audit tier, where the read wall is observe-only (see the
+        # posture note above): stamp the enforced truth plus an
+        # explicit marker so forensic readers can tell "no read wall"
+        # from "read wall demoted by audit mode".
+        result.sandbox_info["restrict_reads"] = _reads_enforced
+        if _seatbelt_audit_observe_only:
+            result.sandbox_info[  # type: ignore[attr-defined]
+                "read_enforcement"] = "observe-only"
         if _private_scratch_dir or _mountless_private_scratch:
             # Restricted host-visible posture: the host-shared /tmp and
             # /dev/shm grants were replaced by a 0700 TMPDIR-steered scratch

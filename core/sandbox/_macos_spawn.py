@@ -651,12 +651,20 @@ def run_sandboxed(cmd: list[str], *,
     # per invocation, weakest-wins across the run. This layer only
     # knows the run directory when audit_run_dir names it — postures of
     # non-audit invocations are attributed at the dispatching layer.
+    # Stamp what is ENFORCED, not what was requested: audit mode
+    # converts the read deny into (allow file-read* (with report)) —
+    # observe, don't block (seatbelt.build_profile) — so a darwin
+    # audit run's read wall does not exist and an audited hostile
+    # child CAN read the key and mint tokens. Recording the requested
+    # value made triage trust token-verified telemetry it must not
+    # (Linux differs: its audit tier keeps Landlock enforcing, so the
+    # requested value is honest there).
     if audit_run_dir:
         from . import summary as _posture_mod
         _posture_mod.record_run_posture(
             Path(audit_run_dir),
             mount_ns_active=False,
-            restrict_reads=bool(restrict_reads),
+            restrict_reads=bool(restrict_reads) and not audit_mode,
         )
 
     # 0d. Grant-path identity pins — the darwin twin of the Linux
