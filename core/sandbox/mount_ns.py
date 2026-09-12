@@ -53,10 +53,25 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
 from ._fork_safe_warn import warn_post_fork
-from .exit_codes import SANDBOX_EXIT_MOUNT_NS_BIND_FAIL
 
 # See core/sandbox/context.py (_BRANDED_TMP_RE) — same shape.
 _BRANDED_TMP_RE = re.compile(r"/[^/]*raptor[^/]*(/|$)", re.IGNORECASE)
+
+
+class ExtraRoBindError(OSError):
+    """A caller-named ``readable_paths`` entry failed its read-only
+    bind inside the mount namespace — fail-closed by contract (the
+    path would be missing from the sandbox, or worse, still writable
+    when the caller asked for read-only).
+
+    Typed so ``_spawn``'s setup handler can report the fail-closed
+    category ('C') on the exec-status pipe before the child exits:
+    the old direct ``os._exit`` emitted no status byte, so the parent
+    read EOF-no-byte as "the target execed" and returned the aborted
+    setup as a genuine CompletedProcess. ``errno`` is preserved from
+    the underlying mount failure so the bind-source pin tamper check
+    (ESTALE → category 'P') still outranks the fail-closed category.
+    """
 
 if TYPE_CHECKING:
     # Avoid runtime circular import: fingerprint.apply_overlay imports
@@ -1341,10 +1356,14 @@ def setup_mount_ns(target: str | None, output: str | None,
                 # instead of getting a degraded sandbox masquerading
                 # as the requested one.
                 #
-                # Per W35.C convention, fail-CLOSED sites use direct
-                # os.write(2, ...) + os._exit(N) rather than the
-                # warn_post_fork helper (helper is reserved for
-                # DiD warn-only sites).
+                # The stderr line stays the human-readable diagnostic;
+                # the typed raise (instead of the old direct
+                # os._exit, which emitted NO status byte and let the
+                # parent misread the aborted setup as a genuine
+                # rc=126 target result) reaches _spawn's setup
+                # handler, which reports fail-closed category 'C' on
+                # the exec-status pipe and exits — same fail-closed
+                # outcome, now observable and unspoofable.
                 try:
                     _path_b = path.encode("utf-8", errors="replace")
                 except Exception:  # noqa: BLE001
@@ -1360,7 +1379,11 @@ def setup_mount_ns(target: str | None, output: str | None,
                     )
                 except OSError:
                     pass
-                os._exit(SANDBOX_EXIT_MOUNT_NS_BIND_FAIL)
+                _step_s = _step.decode("ascii", "replace")
+                raise ExtraRoBindError(
+                    exc.errno or 0,
+                    f"extra_ro_paths {_step_s} failed for {path!r}",
+                ) from exc
 
     # 8c. Host-fingerprint overlay (opt-in via sanitise_host_fingerprint).
     # MUST happen BEFORE pivot_root — the persona's source files live

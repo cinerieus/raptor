@@ -77,6 +77,7 @@ from . import _pathpin, state
 from ._fork_safe_warn import warn_post_fork
 from ._unix_scope import UnixScopeSupervisor as _UnixScopeSupervisor
 from .landlock import _make_landlock_preexec
+from .mount_ns import ExtraRoBindError as _ExtraRoBindError
 from .mount_ns import _ESTALE as _PIN_TAMPER_ERRNO
 from .mount_ns import setup_mount_ns
 from .probes import _find_sandbox_binary
@@ -192,6 +193,15 @@ def _write_setup_status(fd: int, category: bytes, reason: str = "") -> None:
              (host-procfs visibility refused for an untrusted
              target — fail loud, operator override via
              RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1)
+        b'C' fail-closed child setup abort (unusable caller cwd=
+             inside the pivoted root; a caller-named readable path
+             that failed its ro bind; a mandatory hardening rlimit
+             that could not apply) — fail loud, no degrade path.
+             EVERY fail-closed child exit must write its byte first:
+             a bare os._exit reads as EOF-no-byte, i.e. "the target
+             execed", and the parent returns the aborted setup as a
+             genuine target result. The parent default-DENIES
+             categories it does not recognise.
     ``reason`` is a short diagnostic. The whole payload is one ``os.write``
     well under PIPE_BUF (4096) so it lands atomically. Runs in a dying
     child after fork — must not raise and must not touch the Python logger
@@ -461,7 +471,7 @@ def _run_newuidmap(child_pid: int, binary: str, mapping_lines: Sequence[str]) ->
         raise RuntimeError(msg)
 
 
-def _set_rlimits(limits: dict) -> None:
+def _set_rlimits(limits: dict, status_fd: "int | None" = None) -> None:
     """Apply rlimits in the child. Mirrors preexec.py's _set_limits but
     designed to run before mount ops / Landlock / seccomp.
 
@@ -469,8 +479,10 @@ def _set_rlimits(limits: dict) -> None:
     aborts the rest. Failures surface via fork-safe stderr warning so
     operators can spot when a documented cap silently became a no-op.
     One deliberate exception: RLIMIT_CORE is fail-closed — if
-    suppressing coredumps fails, the child warns and os._exit(99)s
-    rather than continuing (see the inline rationale).
+    suppressing coredumps fails, the child reports category 'C' on
+    ``status_fd`` (the exec-status pipe — a bare exit would read as
+    "target execed" in the parent), warns, and os._exit(99)s rather
+    than continuing (see the inline rationale).
     """
     import resource
 
@@ -514,6 +526,11 @@ def _set_rlimits(limits: dict) -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     except (ValueError, OSError) as exc:
         _errno = getattr(exc, "errno", 0) or 0
+        if status_fd is not None:
+            _write_setup_status(
+                status_fd, b"C",
+                f"RLIMIT_CORE setrlimit failed (errno={_errno}) — "
+                f"coredump suppression is mandatory")
         try:
             os.write(2, b"sandbox: _spawn: RLIMIT_CORE setrlimit failed "
                      b"(errno=%d), exiting\n" % _errno)
@@ -2113,7 +2130,7 @@ def run_sandboxed(
                 os._exit(124)
 
             # rlimits as early as possible so later setup is constrained.
-            _set_rlimits(limits)
+            _set_rlimits(limits, status_fd=status_w)
 
             # Step 8.5 (fingerprint sanitisation): sethostname /
             # setdomainname inside our fresh UTS namespace. Done before
@@ -2234,9 +2251,22 @@ def run_sandboxed(
                     # planted symlink resolves on the HOST filesystem
                     # and the steering this pin exists to refuse
                     # succeeds at the fallback tier instead.
+                    # The tamper check outranks the fail-closed
+                    # category below: an ExtraRoBindError wraps the
+                    # underlying errno, so a pinned readable-path
+                    # bind that hit ESTALE is still reported as 'P'
+                    # (previously the extra_ro fail-closed exit
+                    # shadowed the pin signal entirely).
                     if (_bind_src_fds
                             and _mnt_exc.errno == _PIN_TAMPER_ERRNO):
                         _status_step = b"P"
+                    elif isinstance(_mnt_exc, _ExtraRoBindError):
+                        # Caller-named readable path failed its ro
+                        # bind — fail-closed by contract ('C': the
+                        # parent refuses loudly; the 'M' degrade path
+                        # would silently drop a protection the caller
+                        # explicitly asked for).
+                        _status_step = b"C"
                     raise
                 # The validation-time source pins have served their
                 # one purpose (every bind above verified its source
@@ -2277,15 +2307,21 @@ def run_sandboxed(
             # exist (or isn't executable), surface the error rather
             # than silently running from /. A silent fallback masks
             # genuine caller bugs (wrong repo_path, deleted target).
-            # The stderr write lets the parent's observability layer
-            # see what happened; the os._exit(127) code matches
-            # subprocess's ENOENT-during-exec convention so callers
-            # testing `result.returncode == 127` behave identically
-            # across the two sandbox paths.
+            # Status byte FIRST ('C', fail-closed child abort): a bare
+            # os._exit here reads as EOF-no-byte to the parent, i.e.
+            # "the target execed" — the aborted setup came back as a
+            # genuine CompletedProcess whose rc=127 collided with the
+            # shell command-not-found convention and fed downstream
+            # returncode oracles a fabricated target result. The
+            # stderr write stays as the human-readable diagnostic.
             if cwd:
                 try:
                     os.chdir(cwd)
                 except OSError as e:
+                    _write_setup_status(
+                        status_w, b"C",
+                        f"cwd {cwd!r} unusable inside sandbox "
+                        f"({e.__class__.__name__}: {e})")
                     try:
                         os.write(2,
                             f"sandbox: cwd={cwd!r} unusable inside "

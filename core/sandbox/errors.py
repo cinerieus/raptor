@@ -72,7 +72,7 @@ class SandboxSetupError(BaseException):
     diagnostic.
 
     ``setup_category`` carries the exec-status-pipe category letter
-    (M/L/S/U/X/P/F — see ``core/sandbox/_spawn._write_setup_status``)
+    (M/L/S/U/X/P/F/C — see ``core/sandbox/_spawn._write_setup_status``)
     when the raise site holds one, else ``None``. The distinction a
     consumer can act on: ``"X"`` means every isolation layer engaged
     and the failure was the target's own exec inside the sandbox — a

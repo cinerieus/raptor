@@ -96,6 +96,10 @@ def test_dispatch_picks_linux_backend_on_linux(reset_caches):
     fake_linux_result.returncode = 0
     fake_linux_result.stderr = b""
     fake_linux_result.sandbox_info = {"backend": "mount-ns"}
+    # The status-pipe contract is default-deny: an unset MagicMock
+    # attribute reads as a truthy unknown status and is (correctly)
+    # refused. Model a clean spawn explicitly.
+    fake_linux_result._setup_status = None
 
     with mock.patch.object(sys, "platform", "linux"), \
          mock.patch.object(context, "check_seatbelt_available",

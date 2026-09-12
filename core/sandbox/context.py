@@ -4545,6 +4545,38 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 + _fresh_procfs_override_hint(),
                                 setup_category=_setup_status[0],
                             )
+                        if _setup_status is not None and _setup_status[0] == "C":
+                            # Fail-closed child setup abort: the spawn
+                            # child refused to continue (unusable
+                            # caller cwd= inside the pivoted root, a
+                            # caller-named readable path that failed
+                            # its read-only bind, a mandatory
+                            # hardening rlimit that could not apply)
+                            # and reported it on the exec-status pipe.
+                            # Pre-fix these sites os._exit'd with NO
+                            # status byte, so the parent read
+                            # EOF-no-byte as "the target execed" and
+                            # returned the aborted setup as a genuine
+                            # CompletedProcess whose rc (126/127)
+                            # collided with the shell not-found/not-
+                            # executable conventions — downstream
+                            # returncode oracles were fed fabricated
+                            # target results.
+                            from .errors import SandboxSetupError
+                            msg_0 = (
+                                f"sandbox child setup aborted "
+                                f"fail-closed: {_setup_status[1]}"
+                            )
+                            raise SandboxSetupError(
+                                msg_0,
+                                "the target never executed. Fix the "
+                                "named caller input (cwd=, "
+                                "readable_paths=) or host condition "
+                                "and retry — this category is "
+                                "fail-closed by contract and has no "
+                                "degrade path.",
+                                setup_category=_setup_status[0],
+                            )
                         if _setup_status is not None and _setup_status[0] in ("L", "S", "U"):
                             from .errors import SandboxSetupError
                             from .probes import (
@@ -4714,6 +4746,32 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     "debug level.",
                                     cmd[0],
                                 )
+                        elif _setup_status is not None:
+                            # Default-DENY unknown status categories.
+                            # The known letters are handled above; a
+                            # byte from a future writer that none of
+                            # those arms recognise means a setup step
+                            # failed in a way this parent does not
+                            # understand — treating it as a genuine
+                            # run (the old fall-through) is the same
+                            # default-allow shape that produced the
+                            # ungated-ladder bug. The child never
+                            # execed (a successful exec reaps the
+                            # CLOEXEC status fd and the parent reads
+                            # EOF), so fail loud.
+                            from .errors import SandboxSetupError
+                            raise SandboxSetupError(
+                                f"sandbox spawn child reported an "
+                                f"unrecognised setup-status category "
+                                f"{_setup_status[0]!r}: "
+                                f"{_setup_status[1]}",
+                                "the target never executed. This "
+                                "parent predates the status category "
+                                "— update RAPTOR so the parent and "
+                                "spawn backend agree on the status "
+                                "vocabulary.",
+                                setup_category=_setup_status[0],
+                            )
                 except (FileNotFoundError, RuntimeError, OSError,
                         _errors.SandboxSetupError) as _spawn_err:
                     # _spawn raised mid-setup (uidmap uninstalled,
