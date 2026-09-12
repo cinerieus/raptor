@@ -249,6 +249,18 @@ def run_executor_sync(
         nonlocal review_idx
         if not glance_batch or batch_review_fn is None:
             return False
+        # The flush is a dispatch site like any other: tick once per
+        # batch (the batch is one LLM call) so a glance-heavy serial
+        # run still drives the environment guard's pause/probe, then
+        # re-check the stop rails — a tick that concluded the run must
+        # not pay for the batch dispatch. Dropped tasks were never
+        # marked complete, so they stay unreviewed gaps.
+        if on_tick:
+            on_tick(glance_batch[0].gap)
+            if budget_check and budget_check():
+                stats.budget_stopped = True
+                glance_batch.clear()
+                return True
         try:
             _process_glance_batch(
                 glance_batch, batch_review_fn, shared, config,
@@ -339,6 +351,14 @@ def run_executor_sync(
 
         if on_tick:
             on_tick(task.gap)
+            # The tick can pause for a long time and may conclude the
+            # run (resource watchdog / systemic-fault breaker) — re-
+            # check the stop rails before paying for a dispatch into a
+            # faulted environment. The popped task stays incomplete,
+            # i.e. an unreviewed gap.
+            if budget_check and budget_check():
+                stats.budget_stopped = True
+                break
 
         try:
             review_one_fn(
@@ -399,6 +419,11 @@ def run_executor_sync(
                 break
             if on_tick:
                 on_tick(task.gap)
+                # Same post-tick re-check as the main loop: the tick
+                # may have concluded the run while it paused.
+                if budget_check and budget_check():
+                    stats.budget_stopped = True
+                    break
             try:
                 review_one_fn(
                     task.gap, shared, config, review_fn, result,
@@ -662,6 +687,10 @@ async def _run_async_body(
             for task in batch_tasks:
                 if on_tick:
                     on_tick(task.gap)
+            # The tick can pause and may conclude the run — re-check
+            # before dispatching the batch into a faulted environment.
+            if on_tick and _should_stop():
+                return
             async with review_idx_lock:
                 idx = review_idx_box[0]
                 review_idx_box[0] += len(batch_tasks)
@@ -727,6 +756,10 @@ async def _run_async_body(
 
             if on_tick:
                 on_tick(task.gap)
+                # The tick can pause and may conclude the run — re-
+                # check before dispatching into a faulted environment.
+                if _should_stop():
+                    return
 
             async with review_idx_lock:
                 idx = review_idx_box[0]
@@ -846,6 +879,9 @@ async def _run_async_body(
                     return
                 if on_tick:
                     on_tick(task.gap)
+                    # Post-tick stop re-check (see _run_task).
+                    if _should_stop():
+                        return
                 async with review_idx_lock:
                     idx = review_idx_box[0]
                     review_idx_box[0] += 1

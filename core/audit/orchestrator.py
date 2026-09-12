@@ -213,6 +213,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .run_memo import BoundedMemo
+    from core.audit.environment import EnvironmentGuard
 
 logger = logging.getLogger(__name__)
 
@@ -728,6 +729,10 @@ class OrchestratorConfig:
     # timeouts (Joern) clamp to the remaining budget so one stuck
     # query can't hold a worker past the run's end.
     run_deadline_monotonic: float | None = None
+    # The run's EnvironmentGuard (core.audit.environment): resource
+    # watchdog on the executor tick, graceful conclude via the stop
+    # rails. Derived at run start (never set by callers).
+    environment_guard_state: EnvironmentGuard | None = None
     # On-demand Mode-2 checker synthesis for chain-less hypotheses:
     # when a suspicious outcome's (possibly inferred) CWE yields no
     # tool-chain entry and no cheap channel binds the hypothesis, a
@@ -1063,6 +1068,10 @@ class OrchestratorResult:
     llm_spend_usd: float = 0.0
     total_duration_s: float = 0.0
     terminated_by: str = "complete"
+    # Human-readable cause when terminated_by == "environment" (the
+    # guard's conclude reason — resource pressure or a systemic
+    # dispatch fault). Empty otherwise.
+    environment_fault: str = ""
     prefilter_skipped: int = 0
     prefilter_hits: int = 0
     # Vendored/generated triage decisions (run-summary counters;
@@ -1478,6 +1487,23 @@ def run_orchestrator(
         if prep_cache is not None:
             prep_cache["_caches_cleared"] = True
 
+    # ── Environment preflight ──────────────────────────────────────
+    # Refuse the run start when TMPDIR (every dispatch stages files
+    # there) or the run output dir is already under the refuse floor
+    # — starting anyway guarantees a run where every dispatch fails
+    # identically. Runs BEFORE the claudecode probe warm-up below so
+    # "refuses before any LLM spend" holds literally (the probe is a
+    # paid call when its cache is cold).
+    from .environment import (
+        EnvironmentGuard,
+        effective_tmp_dir,
+        preflight_environment,
+    )
+    _env_dirs: list[Path] = [effective_tmp_dir()]
+    if config.out_dir:
+        _env_dirs.append(Path(config.out_dir))
+    preflight_environment(_env_dirs)
+
     # Warm the claudecode probe cache before any workers are derived
     # or dispatched — one tiny disk-cached call resolving the
     # backend's real model identity. Best-effort and non-fatal; the
@@ -1489,6 +1515,19 @@ def run_orchestrator(
     # (Joern) can clamp per-query timeouts to the remaining budget.
     if config.max_seconds:
         config.run_deadline_monotonic = start_time + config.max_seconds
+
+    # ── Environment guard ──────────────────────────────────────────
+    # Keeps watching the preflighted filesystems from the executor
+    # tick. Constructed AFTER the deadline stamp: every pause wait is
+    # clamped to the run deadline minus the drain margin, so a pause
+    # entered near the wall cap still concludes, drains, and reports
+    # inside the budget.
+    config.environment_guard_state = EnvironmentGuard(
+        tmp_dir=_env_dirs[0],
+        out_dir=Path(config.out_dir) if config.out_dir else None,
+        abort_check=is_shutdown_requested,
+        deadline_monotonic=config.run_deadline_monotonic,
+    )
 
     result = OrchestratorResult()
     _jt = _joern_tunables(overrides=config.joern_overrides)
@@ -7050,6 +7089,20 @@ def _run_audit_body(
             gap["_joern_pending"] = True
             shared.reviewed_before_joern.append(gap)
 
+    # --- Environment tick: pause/conclude gate before dispatch ---
+    # Runs FIRST: while the guard pauses (resource pressure) or
+    # probes (systemic-fault breaker), the Joern drain waits with
+    # everything else. The tick blocks the dispatch loop's own
+    # thread, which is the pause mechanism — no new task dispatches
+    # until it returns; in-flight reviews finish on their worker
+    # threads and are harvested afterwards.
+    _env_guard = getattr(config, "environment_guard_state", None)
+
+    def _executor_tick(gap: dict) -> None:
+        if _env_guard is not None:
+            _env_guard.tick()
+        _joern_tick(gap)
+
     # --- Main executor pass ---
     # Schedule: with >1 worker, most-expensive-first (LPT) packing
     # shrinks the makespan; serial runs keep priority order, where
@@ -7193,7 +7246,7 @@ def _run_audit_body(
             on_progress=on_progress,
             collector=collector,
             budget_check=lambda: _check_budget(config, start_time, result),
-            on_tick=_joern_tick,
+            on_tick=_executor_tick,
             reviewed_outcomes=reviewed_outcomes,
             throttle=throttle,
             study_queue=study_queue,
@@ -11378,6 +11431,17 @@ def _check_budget(
         result.terminated_by = "sigterm"
         _persist_spend_floor(config, result, force=True)
         return True
+    # Environment guard conclusion rides the same rails: every loop
+    # that polls the budget (executor, study consumer, deepen, error
+    # retry, trivial batches) stops dispatching into a faulted
+    # environment, and the run concludes through the normal
+    # drain/report path with a resume hint.
+    _guard = getattr(config, "environment_guard_state", None)
+    if _guard is not None and _guard.concluded:
+        result.terminated_by = "environment"
+        if not result.environment_fault:
+            result.environment_fault = _guard.conclude_reason
+        return True
     if (
         not skip_max_seconds
         and config.max_seconds
@@ -11406,6 +11470,7 @@ _BUDGET_STOP_REASONS = {
     "llm_budget_exceeded": "budget exhausted",
     "max_cost_usd": "budget exhausted",
     "max_seconds": "time budget exhausted",
+    "environment": "environment fault",
 }
 
 

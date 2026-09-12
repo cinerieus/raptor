@@ -1719,11 +1719,12 @@ def _finalize_run(
     from core.audit.report import generate_report, write_report
 
     # The lifecycle transition below stamps "interrupted" for a
-    # SIGTERM drain and "completed" otherwise — tell the report which,
-    # so its completeness block names the run's terminal state instead
-    # of the mid-finalisation "running" snapshot.
+    # SIGTERM drain or an environment-fault conclusion and "completed"
+    # otherwise — tell the report which, so its completeness block
+    # names the run's terminal state instead of the mid-finalisation
+    # "running" snapshot.
     _final_status = (
-        "interrupted" if result.terminated_by == "sigterm"
+        "interrupted" if result.terminated_by in ("sigterm", "environment")
         else "completed"
     )
     report = generate_report(out_dir, final_status=_final_status)
@@ -1829,17 +1830,34 @@ def _finalize_run(
             pass
 
     # --- lifecycle transition ---
-    if result.terminated_by == "sigterm":
-        # SIGTERM conclusion: the salvage report above covers whatever
-        # the journal holds; the run stays re-enterable.
+    if result.terminated_by in ("sigterm", "environment"):
+        # Interrupted conclusions (SIGTERM drain, environment-guard
+        # fault): the report above covers whatever the journal holds;
+        # the run stays re-enterable.
         # Surface the child's stderr on failure, same as the complete
         # path below — a swallowed failed transition leaves the run
         # stamped 'running' (so the advertised resume refuses it) while
         # the console claims a clean interrupt.
+        if result.terminated_by == "sigterm":
+            _int_reason = "SIGTERM — salvage report written"
+            _int_line = "Interrupted by SIGTERM — salvage report written."
+            _int_exit = 130
+        else:
+            _fault = (
+                getattr(result, "environment_fault", "")
+                or "systemic dispatch failures"
+            )
+            _int_reason = f"environment fault — {_fault}"
+            _int_line = (
+                f"Interrupted by environment fault ({_fault}) — report "
+                f"written; unreviewed functions stay gaps. Fix the "
+                f"environment, then resume."
+            )
+            _int_exit = 1
         interrupt_cp = subprocess.run(
             [str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
              "interrupt", str(out_dir),
-             "SIGTERM — salvage report written",
+             _int_reason,
              "--command", "audit"],
             capture_output=True, text=True, check=False,
         )
@@ -1851,11 +1869,11 @@ def _finalize_run(
                 file=sys.stderr, flush=True,
             )
         print(
-            f"Interrupted by SIGTERM — salvage report written. "
+            f"{_int_line} "
             f"Resume with: libexec/raptor-audit resume {out_dir}",
             flush=True,
         )
-        return 130
+        return _int_exit
 
     lifecycle_args = [
         str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
