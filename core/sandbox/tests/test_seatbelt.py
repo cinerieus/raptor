@@ -637,12 +637,12 @@ def test_full_profile_ipc_shm_denies():
 
 def test_full_profile_daemon_proxy_denies():
     """Belt-and-braces op-level denies over the mach allowlist drops:
-    distributed notifications (host-wide signalling / covert channel),
+    darwin notifications (host-wide signalling / covert channel),
     AppleEvents (automation of other apps), user-preference-write
     (`defaults write` persistence outside the write scope via the
     cfprefsd proxy)."""
     p = seatbelt.build_profile(seccomp_profile="full")
-    assert "(deny distributed-notification-post)" in p
+    assert "(deny darwin-notification-post)" in p
     assert "(deny appleevent-send)" in p
     assert "(deny user-preference-write)" in p
 
@@ -661,7 +661,7 @@ def test_hardening_absent_from_permissive_profiles():
         for fragment in (
             "process-info", "iokit-open", "(deny signal", "nvram",
             "mach-lookup", "sysctl-read", "ipc-posix-shm", "ipc-sysv",
-            "distributed-notification-post", "appleevent-send",
+            "darwin-notification-post", "appleevent-send",
             "user-preference-write",
         ):
             assert fragment not in p, (kwargs, fragment)
@@ -676,14 +676,14 @@ def test_hardening_audit_duals_report_every_denied_family():
     for family in (
         "process-info*", "iokit-open", "signal", "nvram*",
         "mach-lookup", "sysctl-read", "ipc-posix-shm*", "ipc-sysv*",
-        "distributed-notification-post", "appleevent-send",
+        "darwin-notification-post", "appleevent-send",
         "user-preference-write",
     ):
         assert f"(allow {family} (with report))" in p, family
     for fragment in (
         "(deny process-info", "(deny iokit-open", "(deny signal",
         "(deny nvram", "(deny mach-lookup", "(deny sysctl-read",
-        "(deny ipc-", "(deny distributed-notification-post",
+        "(deny ipc-", "(deny darwin-notification-post",
         "(deny appleevent-send", "(deny user-preference-write",
     ):
         assert fragment not in p, fragment
@@ -709,7 +709,7 @@ def test_untrusted_default_shape_carries_full_hardening():
         "(deny sysctl-read (require-not (require-any",
         "(deny ipc-posix-shm-write*)",
         "(deny ipc-sysv*)",
-        "(deny distributed-notification-post)",
+        "(deny darwin-notification-post)",
         "(deny appleevent-send)",
         "(deny user-preference-write)",
         "(deny network*)",

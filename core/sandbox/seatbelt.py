@@ -304,7 +304,7 @@ def build_profile(*,
           * mach-lookup allowlist-deny (MACOS_BASE_MACH_SERVICES)
           * sysctl-read allowlist-deny (MACOS_SYSCTL_READ_*)
           * POSIX-shm read/write + SysV IPC denies
-          * (deny distributed-notification-post)
+          * (deny darwin-notification-post)
           * (deny appleevent-send)
           * (deny user-preference-write)
         Every deny is either toolchain-battery-validated
@@ -599,7 +599,7 @@ def build_profile(*,
             parts.append("(allow ipc-posix-shm* (with report))")
             parts.append("(allow ipc-sysv* (with report))")
             parts.append(
-                "(allow distributed-notification-post (with report))"
+                "(allow darwin-notification-post (with report))"
             )
             parts.append("(allow appleevent-send (with report))")
             parts.append("(allow user-preference-write (with report))")
@@ -688,11 +688,19 @@ def build_profile(*,
             )
             parts.append("(deny ipc-posix-shm-write*)")
             parts.append("(deny ipc-sysv*)")
-            # Distributed notifications: host-wide signalling / covert
-            # channel that can trigger behaviour in listening apps.
-            # Belt-and-braces with the notifyd drop from the mach
-            # allowlist.
-            parts.append("(deny distributed-notification-post)")
+            # Darwin notifications (notify_post(3) via notifyd):
+            # host-wide signalling / covert channel that can trigger
+            # behaviour in listening processes — confirmed deliverable
+            # cross-sandbox on current macOS. The op name follows
+            # current SBPL vocabulary: Apple's shipped WebProcess
+            # profile denies darwin-notification-post, and the legacy
+            # distributed-notification-post spelling no longer appears
+            # there — an op name the compiler does not know rejects
+            # the WHOLE profile, which fails loud (readiness byte)
+            # but fails everything. The distnoted flavour is covered
+            # by the mach allowlist drop of
+            # com.apple.system.notification_center.
+            parts.append("(deny darwin-notification-post)")
             # AppleEvents: automation of other apps (TCC prompts
             # mitigate per-app; the op-level deny covers non-lookup
             # delivery paths).
