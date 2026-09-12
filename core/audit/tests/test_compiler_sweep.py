@@ -47,8 +47,10 @@ needs_clang = pytest.mark.skipif(not HAVE_CLANG, reason="clang not installed")
 @pytest.fixture(autouse=True)
 def _fresh_probe_cache():
     compiler_sweep._reset_probe_cache()
+    compiler_sweep._reset_tu_cache()
     yield
     compiler_sweep._reset_probe_cache()
+    compiler_sweep._reset_tu_cache()
 
 
 @pytest.fixture

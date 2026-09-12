@@ -29,6 +29,7 @@ registered in :mod:`core.audit.evidence_grade`.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -45,6 +46,7 @@ from core.json import load_json
 from core.run.scratch import scratch_dir
 
 from ._util import safe_join
+from .run_memo import BoundedMemo
 from .sweep import SweepResult
 
 logger = logging.getLogger(__name__)
@@ -314,6 +316,87 @@ def _clang_path() -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Per-TU analysis cache
+# ---------------------------------------------------------------------------
+
+# One full-TU analyzer run emits ALL diagnostics for the translation
+# unit; per-hypothesis dispatch only differs in the post-run filtering
+# (diagnostic family, line range, identifier attribution). Cache the
+# parsed run record per (invocation, compiler identity, TU content)
+# so N hypotheses against one TU pay for one compile per flag family,
+# not N.
+#
+# Size trade-off: smaller → audits whose hypothesis batch spans many
+# (TU, flag-family) combinations re-pay full analyzer compiles
+# (10-120s each) as entries rotate out; larger → more retained
+# diagnostic lists plus capped stderr blobs (~20 KB each) held for
+# the cache's lifetime.
+#
+# Lifetime: the orchestrator passes per-RUN instances owned by its
+# OrchestratorConfig (``tu_cache`` / ``include_dirs_memo``,
+# default_factory — exactly like ``sweep_memo``), because the key's
+# correctness argument is run-scoped: the TU content hash pins the
+# file itself, but its ``#include`` closure is not hashed and only
+# the run's read-only-target-tree contract bounds it (a header edit
+# between in-process runs would otherwise serve stale diagnostics).
+# The module-level instances below serve direct callers and tests
+# only (reset via ``_reset_tu_cache``).
+_TU_CACHE_MAX_ENTRIES = 64
+_tu_cache: BoundedMemo[dict[str, Any]] = BoundedMemo(_TU_CACHE_MAX_ENTRIES)
+
+# The include-dir walk scans the whole target tree; its result is a
+# function of the (target, TU dir) pair only, so derive it once per
+# pair per cache lifetime instead of once per hypothesis. Same bound
+# and lifetime rationale as the TU cache, but entries are small path
+# lists.
+_include_dirs_memo: BoundedMemo[list[str]] = BoundedMemo(_TU_CACHE_MAX_ENTRIES)
+
+
+def _reset_tu_cache() -> None:
+    """Test hook: forget cached TU analyses and include-dir walks."""
+    _tu_cache.clear()
+    _include_dirs_memo.clear()
+
+
+class _AnalyzerSignalKilled(Exception):
+    """The analyzer subprocess died to a signal (negative returncode).
+
+    Raised out of the memoized compute so the TU cache stores nothing
+    — a signal kill is environment pressure (OOM killer, sandbox
+    kill), not a property of the TU, and pinning it would disable the
+    compiler channel for that TU for the cache's whole lifetime.
+    """
+
+    def __init__(self, signal: int) -> None:
+        super().__init__(f"analyzer killed by signal {signal}")
+        self.signal = signal
+
+
+def _tu_cache_key(cmd: list[str], full_path: Path) -> tuple | None:
+    """Cache key for one analyzer invocation.
+
+    ``cmd`` already embeds the compiler path, diagnostics mode /
+    engine, per-family flags, derived include dirs, and the TU path;
+    the TU content hash catches edits to the file and the compiler
+    binary's stat signature catches a toolchain swap at the same
+    path. An unreadable TU returns None — run uncached.
+    """
+    import hashlib
+
+    try:
+        tu_hash = hashlib.sha256(full_path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    bin_sig: tuple | None
+    try:
+        st = os.stat(cmd[0])
+        bin_sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        bin_sig = None
+    return ("compiler_tu", tuple(cmd), bin_sig, tu_hash)
+
+
+# ---------------------------------------------------------------------------
 # Mechanical include-path derivation (never executes anything)
 # ---------------------------------------------------------------------------
 
@@ -351,6 +434,32 @@ def _derive_include_dirs(target_path: Path, file_dir: Path) -> list[str]:
         if d not in dirs:
             dirs.append(d)
     return dirs
+
+
+def _cached_include_dirs(
+    target_path: Path,
+    file_dir: Path,
+    memo: BoundedMemo[list[str]] | None = None,
+) -> list[str]:
+    """Memoized :func:`_derive_include_dirs` per (target, TU dir) pair.
+
+    *memo* is the caller's per-run instance; None falls back to the
+    module-level one. A copy is returned so callers cannot mutate the
+    shared entry.
+    """
+    try:
+        key: tuple | None = (
+            "include_dirs",
+            str(target_path.resolve()),
+            str(file_dir.resolve()),
+        )
+    except OSError:
+        key = None
+    _memo = memo if memo is not None else _include_dirs_memo
+    dirs, _cached = _memo.get_or_compute(
+        key, lambda: _derive_include_dirs(target_path, file_dir),
+    )
+    return list(dirs)
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +713,8 @@ def run_compiler_analyzer_sweep(
     line_start: int = 0,
     line_end: int = 0,
     out_dir: Path | None = None,
+    tu_cache: BoundedMemo[dict[str, Any]] | None = None,
+    include_dirs_memo: BoundedMemo[list[str]] | None = None,
 ) -> SweepResult:
     """Run the compiler's static analyzer on one TU against a hypothesis.
 
@@ -618,6 +729,12 @@ def run_compiler_analyzer_sweep(
         out_dir: Run output directory — scratch space for SARIF output
             and the sandbox's writable surface.  A temp dir is used
             when None.
+        tu_cache: Per-run TU analysis cache. The orchestrator passes
+            its run's ``config.tu_cache`` so cached compiles live
+            exactly one run; None falls back to the module-level
+            instance (direct callers, tests via ``_reset_tu_cache``).
+        include_dirs_memo: Per-run include-dir walk memo, same
+            contract as *tu_cache*.
 
     Returns:
         SweepResult with tool="compiler".  Outcomes:
@@ -675,45 +792,55 @@ def run_compiler_analyzer_sweep(
             "(need gcc >= 10 with -fanalyzer, or clang)",
         )
 
-    include_dirs = _derive_include_dirs(target_path, full_path.parent)
+    include_dirs = _cached_include_dirs(
+        target_path, full_path.parent, memo=include_dirs_memo,
+    )
     include_flags = [f"-I{d}" for d in include_dirs]
 
-    scratch_root = str(out_dir) if out_dir else None
-    with scratch_dir("compiler_sweep_", dir=scratch_root) as workdir:
-        if gcc is not None:
-            gcc_path, mode = gcc
-            compiler_name = "gcc"
+    if gcc is not None:
+        gcc_path, mode = gcc
+        compiler_name = "gcc"
+        cmd = [
+            gcc_path, "-fanalyzer", *spec.gcc_flags,
+            f"-fdiagnostics-format={mode}",
+            *include_flags, "-c", str(full_path), "-o", os.devnull,
+        ]
+    else:
+        compiler_name = "clang"
+        mode = spec.clang_engine
+        if spec.clang_engine == "analyze":
             cmd = [
-                gcc_path, "-fanalyzer", *spec.gcc_flags,
-                f"-fdiagnostics-format={mode}",
-                *include_flags, "-c", str(full_path), "-o", os.devnull,
+                clang, "--analyze", "--analyzer-output", "text",
+                *include_flags, str(full_path),
             ]
         else:
-            compiler_name = "clang"
-            mode = spec.clang_engine
-            if spec.clang_engine == "analyze":
-                cmd = [
-                    clang, "--analyze", "--analyzer-output", "text",
-                    *include_flags, str(full_path),
-                ]
-            else:
-                cmd = [
-                    clang, "-fsyntax-only", *spec.clang_flags,
-                    *include_flags, str(full_path),
-                ]
+            cmd = [
+                clang, "-fsyntax-only", *spec.clang_flags,
+                *include_flags, str(full_path),
+            ]
 
-        try:
-            from core.sandbox.context import run as sandbox_run
-        except ImportError:
-            # Constraint #1: the compiler parses hostile source — never
-            # run it unsandboxed.
-            return _error(
-                file_path, function_name,
-                "core.sandbox unavailable — refusing to run the compiler "
-                "on untrusted source without isolation",
-            )
+    try:
+        from core.sandbox.context import run as sandbox_run
+    except ImportError:
+        # Constraint #1: the compiler parses hostile source — never
+        # run it unsandboxed.
+        return _error(
+            file_path, function_name,
+            "core.sandbox unavailable — refusing to run the compiler "
+            "on untrusted source without isolation",
+        )
 
-        try:
+    def _run_tu_analysis() -> dict[str, Any]:
+        """One sandboxed analyzer run over the whole TU, parsed.
+
+        The record is invocation-shaped, not hypothesis-shaped: every
+        per-hypothesis concern (family filter, line range, identifier
+        attribution, suppression witness) happens on the parsed
+        diagnostics afterwards, so the same record serves every
+        hypothesis sharing the cache key.
+        """
+        scratch_root = str(out_dir) if out_dir else None
+        with scratch_dir("compiler_sweep_", dir=scratch_root) as workdir:
             proc = sandbox_run(
                 cmd,
                 block_network=True,
@@ -725,153 +852,191 @@ def run_compiler_analyzer_sweep(
                 timeout=_COMPILE_TIMEOUT_S,
                 caller_label="audit-compiler-sweep",
             )
-        except subprocess.TimeoutExpired:
-            return _error(
-                file_path, function_name,
-                f"analyzer timed out ({_COMPILE_TIMEOUT_S}s)",
-                rule_id=f"compiler:{norm_cwe.lower()}",
-            )
-        except (subprocess.SubprocessError, OSError, ValueError,
-                TypeError) as exc:
-            return _error(
-                file_path, function_name,
-                f"analyzer invocation failed: {exc}",
-                rule_id=f"compiler:{norm_cwe.lower()}",
-            )
+            if compiler_name == "gcc" and mode == "sarif-file":
+                diags = _parse_gcc_sarif(workdir / f"{full_path.name}.sarif")
+            elif compiler_name == "gcc":
+                diags = _parse_gcc_json(proc.stderr or "")
+            else:
+                diags = _parse_clang_text(proc.stderr or "")
+            if proc.returncode < 0:
+                # Signal-killed compile (OOM killer, sandbox kill):
+                # transient environment pressure, not a property of
+                # the TU — caching it would kill the compiler channel
+                # for this TU for the cache's whole lifetime, exactly
+                # while parallel passes raise memory pressure. Raise
+                # so the memo caches nothing (same contract as
+                # TimeoutExpired) and the caller reports an error.
+                raise _AnalyzerSignalKilled(-proc.returncode)
+            return {
+                "returncode": proc.returncode,
+                "diags": diags,
+                "raw": (proc.stderr or "")[:_MAX_RAW_OUTPUT],
+            }
 
-        if compiler_name == "gcc" and mode == "sarif-file":
-            diags = _parse_gcc_sarif(workdir / f"{full_path.name}.sarif")
-        elif compiler_name == "gcc":
-            diags = _parse_gcc_json(proc.stderr or "")
-        else:
-            diags = _parse_clang_text(proc.stderr or "")
-
-        details: dict[str, Any] = {
-            "compiler": compiler_name,
-            "mode": mode,
-            "cwe": norm_cwe,
-            "diagnostics_total": len(diags),
-        }
-        raw = (proc.stderr or "")[:_MAX_RAW_OUTPUT]
-
-        if proc.returncode != 0:
-            # Compile failure (missing generated headers, dialect gaps,
-            # ICE). The analyzer never saw well-formed code — silence
-            # here proves nothing. NEVER refute from a broken compile.
-            error_msgs = [
-                d["message"] for d in diags
-                if "error" in str(d.get("kind", ""))
-            ][:3]
-            summary = "; ".join(error_msgs) or f"exit code {proc.returncode}"
-            result = _inconclusive(
-                file_path, function_name,
-                f"compile failed — cannot analyse: {summary}",
-                details=details,
-            )
-            result.raw_output = raw
-            return result
-
-        try:
-            source_text = full_path.read_text(errors="replace")
-        except OSError:
-            source_text = ""
-        source_lines = source_text.split("\n")
-        identifiers = extract_hypothesis_identifiers(
-            hypothesis, source_text, function_name,
+    try:
+        # Completed runs are cached whatever the ORDINARY exit code (a
+        # broken compile is deterministic too, and re-paying it per
+        # hypothesis is the dominant waste on ungeneratable-header
+        # targets); exceptions propagate uncached — timeouts,
+        # invocation failures, and signal kills (negative returncode)
+        # are transient and must stay retryable.
+        _cache = tu_cache if tu_cache is not None else _tu_cache
+        record, _cached = _cache.get_or_compute(
+            _tu_cache_key(cmd, full_path), _run_tu_analysis,
         )
-        details["hypothesis_identifiers"] = identifiers
+    except subprocess.TimeoutExpired:
+        return _error(
+            file_path, function_name,
+            f"analyzer timed out ({_COMPILE_TIMEOUT_S}s)",
+            rule_id=f"compiler:{norm_cwe.lower()}",
+        )
+    except _AnalyzerSignalKilled as exc:
+        return _error(
+            file_path, function_name,
+            f"analyzer killed by signal {exc.signal}",
+            rule_id=f"compiler:{norm_cwe.lower()}",
+        )
+    except (subprocess.SubprocessError, OSError, ValueError,
+            TypeError) as exc:
+        return _error(
+            file_path, function_name,
+            f"analyzer invocation failed: {exc}",
+            rule_id=f"compiler:{norm_cwe.lower()}",
+        )
 
-        family_in_range = [
-            d for d in diags
-            if _id_matches(d["id"], spec.gcc_ids + spec.clang_ids)
-            and (
-                compiler_name == "gcc"
-                or not spec.clang_message_re
-                or re.search(spec.clang_message_re, d["message"], re.IGNORECASE)
-            )
-            and _same_file(d["file"], full_path)
-            and _in_range(d["line"], line_start, line_end)
-        ]
-        attributed = [
-            d for d in family_in_range
-            if _diag_implicates(d, identifiers, source_lines)
-        ]
-        details["family_in_range"] = len(family_in_range)
-        details["attributed"] = len(attributed)
+    # The cached record is shared by every hypothesis on this TU —
+    # hand out copies of the diagnostics (isolation parity with the
+    # CodeQL memo) so a consumer mutating its view cannot corrupt
+    # another hypothesis's.
+    diags = copy.deepcopy(record["diags"])
+    returncode: int = record["returncode"]
+    raw: str = record["raw"]
 
-        if attributed:
-            matches = [
-                {
-                    "line": d["line"],
-                    "rule_id": d["id"],
-                    "message": d["message"],
-                    "file": file_path,
-                }
-                for d in attributed
-            ]
-            return SweepResult(
-                tool="compiler",
-                file_path=file_path,
-                function_name=function_name,
-                outcome="confirmed",
-                matches=matches,
-                rule_id=f"compiler:{attributed[0]['id'] or norm_cwe.lower()}",
-                raw_output=raw,
-                details=details,
-            )
+    details: dict[str, Any] = {
+        "compiler": compiler_name,
+        "mode": mode,
+        "cwe": norm_cwe,
+        "diagnostics_total": len(diags),
+    }
 
-        if family_in_range:
-            # Diagnostics of the right family exist in range but none
-            # implicate the identifier the hypothesis names — do not
-            # confirm on someone else's bug, do not refute either.
-            details["unattributed"] = [
-                {"line": d["line"], "id": d["id"], "message": d["message"]}
-                for d in family_in_range[:5]
-            ]
-            result = _inconclusive(
-                file_path, function_name,
-                "family diagnostics in range do not implicate the "
-                "hypothesised identifier(s)",
-                details=details,
-            )
-            result.raw_output = raw
-            return result
-
-        if spec.reliable:
-            # Refutation = analyzer silence on an ATTACKER-AUTHORED
-            # TU. Silence is forgeable: '#pragma GCC diagnostic
-            # ignored "-Wanalyzer-use-after-free"' suppresses the
-            # family diagnostic with rc 0, and '#ifndef
-            # __clang_analyzer__' compiles a clean variant under
-            # clang --analyze. Any suppression construct in the TU
-            # fails toward "unknown" — never toward refuted.
-            suppression = _suppression_witness(source_text)
-            if suppression:
-                details["suppression_witness"] = suppression
-                result = _inconclusive(
-                    file_path, function_name,
-                    f"diagnostic-suppression construct in the TU "
-                    f"({suppression}) — analyzer silence is not "
-                    f"evidence; cannot refute",
-                    details=details,
-                )
-                result.raw_output = raw
-                return result
-            return SweepResult(
-                tool="compiler",
-                file_path=file_path,
-                function_name=function_name,
-                outcome="refuted",
-                rule_id=f"compiler:{norm_cwe.lower()}",
-                raw_output=raw,
-                details=details,
-            )
-
+    if returncode != 0:
+        # Compile failure (missing generated headers, dialect gaps,
+        # ICE). The analyzer never saw well-formed code — silence
+        # here proves nothing. NEVER refute from a broken compile.
+        error_msgs = [
+            d["message"] for d in diags
+            if "error" in str(d.get("kind", ""))
+        ][:3]
+        summary = "; ".join(error_msgs) or f"exit code {returncode}"
         result = _inconclusive(
             file_path, function_name,
-            f"{norm_cwe} is confirm-only for the compiler analyzer; "
-            "no diagnostic does not refute",
+            f"compile failed — cannot analyse: {summary}",
             details=details,
         )
         result.raw_output = raw
         return result
+
+    try:
+        source_text = full_path.read_text(errors="replace")
+    except OSError:
+        source_text = ""
+    source_lines = source_text.split("\n")
+    identifiers = extract_hypothesis_identifiers(
+        hypothesis, source_text, function_name,
+    )
+    details["hypothesis_identifiers"] = identifiers
+
+    family_in_range = [
+        d for d in diags
+        if _id_matches(d["id"], spec.gcc_ids + spec.clang_ids)
+        and (
+            compiler_name == "gcc"
+            or not spec.clang_message_re
+            or re.search(spec.clang_message_re, d["message"], re.IGNORECASE)
+        )
+        and _same_file(d["file"], full_path)
+        and _in_range(d["line"], line_start, line_end)
+    ]
+    attributed = [
+        d for d in family_in_range
+        if _diag_implicates(d, identifiers, source_lines)
+    ]
+    details["family_in_range"] = len(family_in_range)
+    details["attributed"] = len(attributed)
+
+    if attributed:
+        matches = [
+            {
+                "line": d["line"],
+                "rule_id": d["id"],
+                "message": d["message"],
+                "file": file_path,
+            }
+            for d in attributed
+        ]
+        return SweepResult(
+            tool="compiler",
+            file_path=file_path,
+            function_name=function_name,
+            outcome="confirmed",
+            matches=matches,
+            rule_id=f"compiler:{attributed[0]['id'] or norm_cwe.lower()}",
+            raw_output=raw,
+            details=details,
+        )
+
+    if family_in_range:
+        # Diagnostics of the right family exist in range but none
+        # implicate the identifier the hypothesis names — do not
+        # confirm on someone else's bug, do not refute either.
+        details["unattributed"] = [
+            {"line": d["line"], "id": d["id"], "message": d["message"]}
+            for d in family_in_range[:5]
+        ]
+        result = _inconclusive(
+            file_path, function_name,
+            "family diagnostics in range do not implicate the "
+            "hypothesised identifier(s)",
+            details=details,
+        )
+        result.raw_output = raw
+        return result
+
+    if spec.reliable:
+        # Refutation = analyzer silence on an ATTACKER-AUTHORED
+        # TU. Silence is forgeable: '#pragma GCC diagnostic
+        # ignored "-Wanalyzer-use-after-free"' suppresses the
+        # family diagnostic with rc 0, and '#ifndef
+        # __clang_analyzer__' compiles a clean variant under
+        # clang --analyze. Any suppression construct in the TU
+        # fails toward "unknown" — never toward refuted.
+        suppression = _suppression_witness(source_text)
+        if suppression:
+            details["suppression_witness"] = suppression
+            result = _inconclusive(
+                file_path, function_name,
+                f"diagnostic-suppression construct in the TU "
+                f"({suppression}) — analyzer silence is not "
+                f"evidence; cannot refute",
+                details=details,
+            )
+            result.raw_output = raw
+            return result
+        return SweepResult(
+            tool="compiler",
+            file_path=file_path,
+            function_name=function_name,
+            outcome="refuted",
+            rule_id=f"compiler:{norm_cwe.lower()}",
+            raw_output=raw,
+            details=details,
+        )
+
+    result = _inconclusive(
+        file_path, function_name,
+        f"{norm_cwe} is confirm-only for the compiler analyzer; "
+        "no diagnostic does not refute",
+        details=details,
+    )
+    result.raw_output = raw
+    return result

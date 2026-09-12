@@ -224,6 +224,19 @@ def _default_codeql_memo() -> "BoundedMemo":
 
     return _BoundedMemo(_CODEQL_MEMO_MAX_ENTRIES)
 
+
+def _default_tu_cache() -> "BoundedMemo":
+    """Fresh per-run compiler cache at the sweep layer's cap.
+
+    Shared factory for ``tu_cache`` and ``include_dirs_memo`` — the
+    include-dir memo deliberately rides the TU cache's bound (small
+    path-list entries under the same lifetime argument).
+    """
+    from .compiler_sweep import _TU_CACHE_MAX_ENTRIES
+    from .run_memo import BoundedMemo as _BoundedMemo
+
+    return _BoundedMemo(_TU_CACHE_MAX_ENTRIES)
+
 # Single-entry cache for per-run call-graph extraction: three phases
 # (IRIS compositional analysis, the postcondition tier, structural
 # detectors) load call graphs with identical (target, checklist)
@@ -797,6 +810,12 @@ class OrchestratorConfig:
     # callers/tests.
     codeql_memo: "BoundedMemo" = field(
         default_factory=_default_codeql_memo, repr=False,
+    )
+    tu_cache: "BoundedMemo" = field(
+        default_factory=_default_tu_cache, repr=False,
+    )
+    include_dirs_memo: "BoundedMemo" = field(
+        default_factory=_default_tu_cache, repr=False,
     )
     # Tool-chain early exit: once a chain step yields a receipt the
     # dispatching site would accept as promotion-grade (G2's
@@ -17235,6 +17254,13 @@ def _run_tool_chain(
                         line_start=line_start,
                         line_end=line_start + 50 if line_start else 0,
                         out_dir=config.out_dir,
+                        # TU/include caches scoped to THIS run (test
+                        # stand-in configs without the fields fall
+                        # back to the module defaults).
+                        tu_cache=getattr(config, "tu_cache", None),
+                        include_dirs_memo=getattr(
+                            config, "include_dirs_memo", None,
+                        ),
                     ),
                 )
                 if comp_result.outcome == "confirmed":
