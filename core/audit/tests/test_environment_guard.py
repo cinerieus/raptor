@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import errno
 import json
+import threading as _threading
+import time as _time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1006,3 +1008,219 @@ class TestStopRails:
         assert not batches  # the batch never dispatched
         assert stats.budget_stopped
         assert stats.completed == 0  # every glance task stays a gap
+
+
+# ── Conclusion releases waiting tickers ──────────────────────────────
+
+
+def _concluding_sleep(g: EnvironmentGuard, clock: _Clock,
+                      after: int = 2) -> Any:
+    """sleep_fn that concludes the guard externally after *after*
+    sleeps — modelling another thread's bounded wait expiring while
+    this one is still inside its own loop."""
+    count = {"n": 0}
+
+    def _sleep(s: float) -> None:
+        clock.sleep(s)
+        count["n"] += 1
+        if count["n"] >= after:
+            g._conclude("external conclusion from another thread")
+
+    return _sleep
+
+
+class TestConclusionReleasesWaiters:
+    def test_pause_loop_exits_on_external_conclusion(self):
+        clock = _Clock()
+        fs = _FakeFs(_stat(WATCHDOG_PAUSE_FREE_BYTES - 1))
+        g = _guard(fs, clock)
+        g._sleep = _concluding_sleep(g, clock)
+        g.tick()
+        assert g.concluded
+        assert "external conclusion" in g.conclude_reason
+        # Released at the conclusion, not after this waiter's own
+        # full remaining bound.
+        assert clock.t < WATCHDOG_MAX_PAUSE_S / 2
+
+    def test_breaker_probe_loop_exits_on_external_conclusion(self):
+        clock = _Clock()
+        # Below the resume floor: the disk probe keeps failing, so
+        # only the external conclusion can end the loop early.
+        fs = _FakeFs(_stat(WATCHDOG_PAUSE_FREE_BYTES - 1))
+        g = _guard(fs, clock)
+        g._sleep = _concluding_sleep(g, clock)
+        for i in range(BREAKER_TRIP_COUNT):
+            g.note_dispatch_failure(f"a.py:f{i}", _wrapped(errno.ENOSPC))
+        g.tick()
+        assert g.concluded
+        assert "external conclusion" in g.conclude_reason
+        assert clock.t < BREAKER_MAX_PROBE_WAIT_S / 2
+
+
+# ── Fan-out pause parity (real guard, real threads) ──────────────────
+
+
+class TestFanOutPauseParity:
+    """Fan-out passes tick from several worker threads. During an
+    active pause EVERY ticker must gate (the rate limiter must not
+    hand siblings a measurement-free pass into the pressured
+    environment), and one thread's conclusion must release the other
+    waiters promptly."""
+
+    def _dirs(self, tmp_path: Path) -> tuple[Path, Path]:
+        t = tmp_path / "t"
+        o = tmp_path / "o"
+        t.mkdir(exist_ok=True)
+        o.mkdir(exist_ok=True)
+        return t, o
+
+    def _real_guard(self, tmp_path: Path, fs: _FakeFs, **kw: Any,
+                    ) -> EnvironmentGuard:
+        t, o = self._dirs(tmp_path)
+        return EnvironmentGuard(
+            tmp_dir=t, out_dir=o, statvfs_fn=fs, **kw,
+        )
+
+    def _tick_in_thread(self, g: EnvironmentGuard) -> tuple[Any, Any]:
+        done = _threading.Event()
+
+        def _run() -> None:
+            g.tick()
+            done.set()
+
+        th = _threading.Thread(target=_run, daemon=True)
+        th.start()
+        return th, done
+
+    def test_sibling_gates_during_pause_and_releases_on_recovery(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.environment as env_mod
+        monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
+        monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
+        fs = _FakeFs(_stat(1 * 1024 * 1024))
+        g = self._real_guard(tmp_path, fs)
+
+        th_a, a_done = self._tick_in_thread(g)
+        _time.sleep(0.3)
+        assert not a_done.is_set()  # A is inside the pause loop
+
+        # Sibling B ticks within the check interval: it must gate on
+        # the active pause, not skip measurement and dispatch.
+        th_b, b_done = self._tick_in_thread(g)
+        _time.sleep(0.3)
+        assert not b_done.is_set(), (
+            "sibling ticked through the rate limiter during a pause"
+        )
+
+        fs.stat = _stat(4 * GIB)  # pressure clears above resume floor
+        th_a.join(timeout=10)
+        th_b.join(timeout=10)
+        assert a_done.is_set() and b_done.is_set()
+        assert not g.concluded
+
+    def test_conclusion_releases_paused_worker_promptly(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.environment as env_mod
+        monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
+        monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
+        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+
+        released_after: list[float] = []
+
+        def _run() -> None:
+            t0 = _time.monotonic()
+            g.tick()
+            released_after.append(_time.monotonic() - t0)
+
+        th = _threading.Thread(target=_run, daemon=True)
+        th.start()
+        _time.sleep(0.3)
+        assert not released_after  # paused
+        g._conclude("external conclusion from another thread")
+        th.join(timeout=5)
+        assert released_after and released_after[0] < 1.5
+
+    def test_conclusion_releases_probing_worker_promptly(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.environment as env_mod
+        monkeypatch.setattr(env_mod, "BREAKER_MAX_PROBE_WAIT_S", 30.0)
+        monkeypatch.setattr(
+            env_mod, "BREAKER_PROBE_BACKOFF_INITIAL_S", 0.05,
+        )
+        monkeypatch.setattr(env_mod, "BREAKER_PROBE_BACKOFF_MAX_S", 0.05)
+        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+        for i in range(BREAKER_TRIP_COUNT):
+            g.note_dispatch_failure(f"f{i}.c:fn{i}", _wrapped(errno.ENOSPC))
+
+        released_after: list[float] = []
+
+        def _run() -> None:
+            t0 = _time.monotonic()
+            g.tick()
+            released_after.append(_time.monotonic() - t0)
+
+        th = _threading.Thread(target=_run, daemon=True)
+        th.start()
+        _time.sleep(0.3)
+        assert not released_after  # inside the probe/backoff loop
+        g._conclude("external conclusion")
+        th.join(timeout=5)
+        assert released_after and released_after[0] < 1.5
+
+    def test_sigterm_abort_releases_paused_tick_promptly(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.environment as env_mod
+        monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
+        monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
+        flag = _threading.Event()
+        g = self._real_guard(
+            tmp_path, _FakeFs(_stat(1 * 1024 * 1024)),
+            abort_check=flag.is_set,
+        )
+
+        released_after: list[float] = []
+
+        def _run() -> None:
+            t0 = _time.monotonic()
+            g.tick()
+            released_after.append(_time.monotonic() - t0)
+
+        th = _threading.Thread(target=_run, daemon=True)
+        th.start()
+        _time.sleep(0.3)
+        flag.set()
+        th.join(timeout=5)
+        assert released_after and released_after[0] < 1.5
+        # Deliberate parity: the abort releases the wait WITHOUT a
+        # conclusion — the caller's adjacent SIGTERM rails own it.
+        assert not g.concluded
+
+    def test_staggered_pausers_release_at_first_conclusion(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.environment as env_mod
+        monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 1.0)
+        monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
+        monkeypatch.setattr(env_mod, "WATCHDOG_CHECK_INTERVAL_S", 0.2)
+        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+
+        def _worker(delay: float) -> None:
+            _time.sleep(delay)
+            g.tick()
+
+        t0 = _time.monotonic()
+        th_a = _threading.Thread(target=_worker, args=(0.0,), daemon=True)
+        th_b = _threading.Thread(target=_worker, args=(0.5,), daemon=True)
+        th_a.start()
+        th_b.start()
+        th_a.join(timeout=10)
+        th_b.join(timeout=10)
+        total = _time.monotonic() - t0
+        assert g.concluded
+        # B (joined mid-pause) is released by A's conclusion at ~1s,
+        # not after its OWN full bound on top of it.
+        assert total < 1.9, f"pass released only after {total:.2f}s"

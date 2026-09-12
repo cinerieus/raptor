@@ -18930,6 +18930,12 @@ def _run_critique(
 _MIN_SLOC_FOR_DEEPEN = 20
 
 
+#: ``_collect_reviews_until_budget`` worker-entry sentinel: the item's
+#: dispatch gate refused it before anything was sent, so its slot is
+#: dropped exactly like a harvest-time-cancelled future.
+_GATE_SKIPPED: Any = object()
+
+
 def _collect_reviews_until_budget(
     prepared: list,
     do_review: Callable,
@@ -18937,6 +18943,7 @@ def _collect_reviews_until_budget(
     max_workers: int,
     *,
     phase_label: str,
+    dispatch_gate: Callable[[], bool] | None = None,
 ) -> list:
     """Dispatch *prepared* re-review items, harvesting EVERY completed
     call even when the budget cap fires mid-flight.
@@ -18955,16 +18962,40 @@ def _collect_reviews_until_budget(
       before the harvest and ``break`` threw away completed-at/after-
       cap results ($10.25 of finished deepen re-reviews discarded,
       journal-less, in the final comparison audit).
+
+    *dispatch_gate* (``environment.make_dispatch_gate(config,
+    stop_check=should_stop)``) replaces the pre-dispatch check when
+    given: it runs the environment guard's tick and then the same
+    ``should_stop`` rails. On the serial path it takes over the
+    per-item gate; on the parallel path it runs at WORKER ENTRY —
+    futures are all submitted up front, so the moment a worker picks
+    an item up is this driver's real dispatch point, and a guard
+    pause/conclusion must be observed there or idle workers would
+    keep starting new items straight through it. Gate-refused items
+    are dropped exactly like cancelled futures (never dispatched,
+    nothing spent). ``None`` (guard-less run) keeps the pre-existing
+    paths byte-equivalent.
     """
+    pre_dispatch_stop = (
+        dispatch_gate if dispatch_gate is not None else should_stop
+    )
     if max_workers <= 1:
         collected = []
         for item in prepared:
-            if should_stop():
+            if pre_dispatch_stop():
                 break
             collected.append(do_review(item))
         return collected
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if dispatch_gate is None:
+        run_item = do_review
+    else:
+        def run_item(item: Any) -> Any:
+            if dispatch_gate():
+                return _GATE_SKIPPED
+            return do_review(item)
 
     collected = []
     stopped = False
@@ -18972,7 +19003,7 @@ def _collect_reviews_until_budget(
         future_to_item = {}
         try:
             for item in prepared:
-                future_to_item[pool.submit(do_review, item)] = item
+                future_to_item[pool.submit(run_item, item)] = item
         except RuntimeError:
             # Interpreter shutdown between the budget check and
             # dispatch: the run is tearing down while a background
@@ -18989,9 +19020,12 @@ def _collect_reviews_until_budget(
         for fut in as_completed(future_to_item):
             # Harvest first: a future yielded here has finished (or
             # was cancelled while pending). Cancelled == never
-            # dispatched — the only class that may be dropped.
+            # dispatched, gate-skipped == refused at worker entry —
+            # the only classes that may be dropped.
             if not fut.cancelled():
-                collected.append(fut.result())
+                item_result = fut.result()
+                if item_result is not _GATE_SKIPPED:
+                    collected.append(item_result)
             if stopped:
                 continue
             if should_stop():

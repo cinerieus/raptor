@@ -30,8 +30,9 @@ trivial-batch, and edge passes do not tick — they observe the guard
 solely through ``_check_budget``, so they STOP dispatching once a
 conclusion is reached but are never paused mid-pass; in particular
 the study consumer keeps dispatching during a main-pass pause,
-bounded by that pause's own conclusion. Wiring ticks into those
-passes is deliberately out of scope here.
+bounded by that pause's own conclusion. :func:`make_dispatch_gate`
+and :func:`make_executor_on_tick` are the adapters those passes use
+to adopt the tick at their own dispatch points.
 
 Every bounded pause/probe wait is additionally clamped to the run
 deadline (when one is set) minus a drain margin, so a pause entered
@@ -338,6 +339,70 @@ def note_dispatch_failure(
         guard.note_dispatch_failure(key, exc)
 
 
+def make_dispatch_gate(
+    config: OrchestratorConfig,
+    stop_check: Callable[[], bool] | None = None,
+) -> Callable[[], bool] | None:
+    """Pre-dispatch environment gate for a pass outside the main
+    executor loop, or ``None`` when the run carries no guard.
+
+    The returned callable drives the guard's ``tick()`` — the same
+    pause/probe/conclude machinery the main pass's pre-dispatch tick
+    drives — and then re-checks the stop rails, mirroring the main
+    pass's post-tick re-check: a tick that paused for minutes (or
+    concluded the run) must not be followed by a dispatch into a
+    faulted environment. ``True`` means "do not dispatch". With
+    *stop_check* the re-check is the caller's own budget/SIGTERM rail
+    (``_check_budget``, which also books ``terminated_by``); without
+    one it is the guard's conclusion flag, for dispatch sites whose
+    own stop rails run separately right after the gate.
+
+    ``None`` (rather than a no-op callable) when no guard exists keeps
+    guard-less paths byte-equivalent: callers fall back to their
+    pre-existing stop checks unchanged, and configs built by direct
+    library callers — which never construct a guard — gain no new
+    callable on their dispatch hot path.
+
+    The gate may be called concurrently from fan-out workers: during
+    an active pause EVERY concurrent ticker gates (the watchdog's
+    rate limiter applies only while healthy), each waits out the
+    pressure on its own thread, and the guard holds no lock across a
+    pause — so a paused low-priority caller (the study consumer) can
+    never block the main pass, and any thread's conclusion releases
+    the other waiters promptly.
+    """
+    guard = getattr(config, "environment_guard_state", None)
+    if guard is None:
+        return None
+
+    def _gate() -> bool:
+        guard.tick()
+        if stop_check is not None:
+            return stop_check()
+        return guard.concluded
+
+    return _gate
+
+
+def make_executor_on_tick(
+    config: OrchestratorConfig,
+) -> Callable[[dict[str, Any]], None] | None:
+    """``on_tick`` adapter for the ``run_executor_sync`` call sites
+    outside the main pass (synthesis second pass, bypass review). The
+    executor re-checks its ``budget_check`` after every tick, so the
+    adapter only drives the guard; ``None`` when the run carries no
+    guard — the executor then skips its tick block entirely, the
+    pre-existing path."""
+    gate = make_dispatch_gate(config)
+    if gate is None:
+        return None
+
+    def _tick(_gap: dict[str, Any]) -> None:
+        gate()
+
+    return _tick
+
+
 class EnvironmentPreflightError(RuntimeError):
     """Run start refused: a required filesystem is below the refuse floor."""
 
@@ -512,6 +577,12 @@ class EnvironmentGuard:
         self._lock = threading.Lock()
         self._concluded_reason: str | None = None
         self._last_watchdog_check = float("-inf")
+        # True while any ticker is inside the watchdog's pause loop.
+        # Consulted BEFORE the rate limiter: fan-out passes tick from
+        # several worker threads, and without this a sibling arriving
+        # inside the check interval would skip measurement and
+        # dispatch into the pressured environment.
+        self._paused = False
         # Circuit-breaker state. The window holds (function key,
         # systemic class-or-None) for the last BREAKER_WINDOW terminal
         # dispatch failures; heterogeneous entries dilute it by
@@ -630,6 +701,12 @@ class EnvironmentGuard:
         start = self._clock()
         delay = BREAKER_PROBE_BACKOFF_INITIAL_S
         while True:
+            if self.concluded:
+                # Another ticker concluded (its probe bound expired,
+                # or the watchdog gave up): holding this worker for
+                # its own remaining bound would stall the pass pool
+                # behind an already-decided conclusion.
+                return
             if self._probe(cls, hint):
                 with self._lock:
                     self._tripped_class = None
@@ -641,6 +718,10 @@ class EnvironmentGuard:
                 )
                 return
             if self._abort_check():
+                # Deliberate parity: the wait ends without a
+                # conclusion and the caller's gate reports False —
+                # the adjacent stop rails (``_check_budget`` sees the
+                # SIGTERM) own that stop, exactly as on the main pass.
                 return
             if self._clock() - start >= max_wait:
                 self._conclude(
@@ -799,13 +880,35 @@ class EnvironmentGuard:
     def _watchdog_gate(self) -> None:
         if self._statvfs is None:
             return
-        now = self._clock()
-        if now - self._last_watchdog_check < WATCHDOG_CHECK_INTERVAL_S:
-            return
-        self._last_watchdog_check = now
-        pressure = self._pressure(resume=False)
-        if pressure is None:
-            return
+        # The rate limiter applies only while HEALTHY: during an
+        # active pause every ticker must gate, or a sibling worker
+        # arriving inside the check interval would skip measurement
+        # entirely and dispatch straight into the pressured
+        # environment (~one leaked item per worker at pause onset).
+        # Both the paused flag and the timestamp live under the lock
+        # — the previous unlocked check-then-set let two threads race
+        # the same window.
+        with self._lock:
+            joining_pause = self._paused
+            if not joining_pause:
+                now = self._clock()
+                if now - self._last_watchdog_check < WATCHDOG_CHECK_INTERVAL_S:
+                    return
+                self._last_watchdog_check = now
+        if joining_pause:
+            # Another ticker initiated the pause. Skip the pause-floor
+            # measurement and join the wait loop directly: joiners
+            # must wait for the RESUME floor like the initiator — a
+            # filesystem sitting between the two floors would
+            # otherwise let joiners dispatch while the initiator still
+            # waits (hysteresis inverted at the seam).
+            pressure = "joined an active pause"
+        else:
+            pressure = self._pressure(resume=False)
+            if pressure is None:
+                return
+            with self._lock:
+                self._paused = True
         max_pause = self._wait_budget(WATCHDOG_MAX_PAUSE_S)
         if max_pause is None:
             self._conclude(
@@ -813,15 +916,29 @@ class EnvironmentGuard:
                 f"pause (run deadline reached) ({pressure})",
             )
             return
-        logger.warning(
-            "resource watchdog: %s — pausing dispatch (in-flight "
-            "reviews finish; resumes at 2x the pause floor, concludes "
-            "after %.0fs)",
-            pressure, max_pause,
-        )
+        if not joining_pause:
+            logger.warning(
+                "resource watchdog: %s — pausing dispatch (in-flight "
+                "reviews finish; resumes at 2x the pause floor, "
+                "concludes after %.0fs)",
+                pressure, max_pause,
+            )
         start = self._clock()
         while True:
+            if self.concluded:
+                # Another waiter's bounded wait expired (or the
+                # breaker concluded): holding this worker for its own
+                # remaining bound would stall the pass pool behind an
+                # already-decided conclusion.
+                return
             if self._abort_check():
+                # Deliberate parity: the wait ends without a
+                # conclusion and the caller's gate reports False —
+                # the adjacent stop rails (``_check_budget`` sees the
+                # SIGTERM) own that stop, exactly as on the main
+                # pass. ``_paused`` may stay set; a later tick's wait
+                # loop clears it on its first recovered measurement
+                # (one poll interval of extra caution, never a leak).
                 return
             if self._clock() - start >= max_pause:
                 self._conclude(
@@ -835,10 +952,16 @@ class EnvironmentGuard:
             self._sleep(WATCHDOG_POLL_S)
             still = self._pressure(resume=True)
             if still is None:
-                logger.warning(
-                    "resource watchdog: resources recovered — "
-                    "resuming dispatch",
-                )
-                self._last_watchdog_check = self._clock()
+                with self._lock:
+                    recovery_observed_first = self._paused
+                    self._paused = False
+                    self._last_watchdog_check = self._clock()
+                if recovery_observed_first:
+                    # Exactly one recovery line even when several
+                    # waiters observe the cleared floors together.
+                    logger.warning(
+                        "resource watchdog: resources recovered — "
+                        "resuming dispatch",
+                    )
                 return
             pressure = still
