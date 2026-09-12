@@ -21,7 +21,12 @@ from core.sandbox import (
 from core.sandbox import (
     run as sandbox_run,
 )
-from core.sandbox.tests.capability import requires_landlock, requires_mount, requires_userns
+from core.sandbox.tests.capability import (
+    requires_landlock,
+    requires_mount,
+    requires_network_block_backend,
+    requires_userns,
+)
 
 
 class TestAvailabilityCheck(unittest.TestCase):
@@ -2385,6 +2390,7 @@ class TestSandboxKwargsGuard(unittest.TestCase):
             f"missing={sorted(sig_params - _SANDBOX_KWARGS)} "
             f"stale={sorted(_SANDBOX_KWARGS - sig_params)}")
 
+    @requires_network_block_backend
     def test_sandbox_level_kwarg_rejected_on_inner_run(self):
         """One of the 7 formerly-missing names must now hit the guard
         (early, clearly-messaged TypeError) instead of dropping or
@@ -2395,6 +2401,7 @@ class TestSandboxKwargsGuard(unittest.TestCase):
                 run(["true"], writable_paths=["/tmp/x"])
             self.assertIn("sandbox kwargs", str(ctx.exception))
 
+    @requires_network_block_backend
     def test_non_sandbox_kwargs_still_pass_the_guard(self):
         """Opposite direction: ordinary subprocess kwargs must not be
         caught by the widened guard."""
@@ -2407,6 +2414,7 @@ class TestSandboxKwargsGuard(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+@requires_network_block_backend
 class TestRunCheckKwarg:
     """run() honours check= with subprocess.run semantics. Pre-fix the
     kwarg was silently popped: callers' CalledProcessError handlers

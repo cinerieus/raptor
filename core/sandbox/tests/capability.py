@@ -20,6 +20,8 @@ probes — the same verdicts the production degradation lattice keys on,
 so a test skips exactly where production refuses.
 """
 
+import sys
+
 import pytest
 
 
@@ -57,4 +59,30 @@ requires_mount = pytest.mark.skipif(
     not _mount_ns_available(),
     reason="requires mount namespace: exercises isolation that needs "
            "newuidmap/newgidmap (uidmap package) on non-root hosts",
+)
+
+
+def _network_block_enforceable() -> bool:
+    # sandbox()'s default profile requests block_network=True, which is
+    # fail-closed: with no namespace backend (userns) AND no Landlock
+    # ABI v4+ for the degraded TCP-connect deny, sandbox() refuses the
+    # run (SandboxSetupError) rather than let the requested network
+    # policy evaporate. Tests that run a default-profile sandbox for an
+    # unrelated subject hit that designed refusal on such hosts.
+    if sys.platform == "darwin":
+        # The refusal is Linux-only (context.py gates it on the
+        # platform); darwin's backend is seatbelt and these tests keep
+        # running there.
+        return True
+    if _userns_available():
+        return True
+    from core.sandbox.landlock import _get_landlock_abi, check_landlock_available
+    return check_landlock_available() and _get_landlock_abi() >= 4
+
+
+requires_network_block_backend = pytest.mark.skipif(
+    not _network_block_enforceable(),
+    reason="requires a network-block backend (user namespaces or "
+           "Landlock ABI v4+): the default profile's block_network=True "
+           "is refused (by design) when neither deny lane can engage",
 )
