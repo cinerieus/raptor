@@ -2,6 +2,8 @@
 
 Layered on top of Landlock to close escape vectors Landlock doesn't cover:
 AF_UNIX / AF_PACKET / AF_NETLINK socket() (docker.sock escape, raw packets),
+exotic families (AF_VSOCK reaches the per-VM transport through an empty
+netns; AF_ALG and friends are capability-free kernel attack surface),
 ptrace (cross-process attacks on same-UID host processes when ptrace_scope=0),
 keyctl/bpf/user_faultfd/perf_event_open (weird-corner syscalls historically
 used in container escapes).
@@ -288,6 +290,36 @@ _AF_NETLINK = 16
 _AF_PACKET = 17
 _SOCK_RAW = 3
 _SOCK_DGRAM = 2
+
+# Exotic socket families denied by family, every profile. The netns
+# does NOT scope all of these the way it scopes AF_INET: AF_VSOCK's
+# transport is per-VM (a "network-blocked" child with an empty netns
+# still reaches a live vsock transport and any host-side vsock
+# services — enclave agents, guest daemons), and AF_ALG / AF_KEY /
+# AF_BLUETOOTH / AF_RDS / AF_TIPC are historically CVE-rich in-kernel
+# surfaces reachable with no capability from socket(2). AF_XDP needs
+# CAP_NET_RAW to bind but creation alone reaches its setsockopt
+# surface. Nothing in RAPTOR's sandboxed tool population (compilers,
+# scanners, interpreters, fuzzers, build systems) legitimately speaks
+# any of these, so the deny costs nothing on supported workloads —
+# same judgment as the SCTP/DCCP/MPTCP block below. AF_KEY was
+# previously denied only via its mandatory SOCK_RAW type; the
+# by-family rule makes the deny independent of the type-rule's mask
+# arithmetic. AF_* values are arch-uniform on Linux
+# (include/linux/socket.h), so one value set covers every supported
+# arch.
+_AF_KEY = 15
+_AF_RDS = 21
+_AF_TIPC = 30
+_AF_BLUETOOTH = 31
+_AF_ALG = 38
+_AF_VSOCK = 40
+_AF_XDP = 44
+
+_EXOTIC_FAMILY_BLOCKS = (
+    _AF_KEY, _AF_RDS, _AF_TIPC, _AF_BLUETOOTH, _AF_ALG, _AF_VSOCK,
+    _AF_XDP,
+)
 
 # Kernel-bypass stream transports (denied unconditionally, hard_deny).
 # Landlock's network rules cover IPPROTO_TCP only and the UDP block
@@ -722,10 +754,15 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
     # "frida" profile: allow AF_UNIX (frida-helper uses Unix sockets for
     # its internal IPC with the target process) but keep NETLINK/PACKET
     # and SOCK_RAW blocked.
+    # The exotic families (_EXOTIC_FAMILY_BLOCKS — vsock/alg/key/
+    # bluetooth/rds/tipc/xdp) are denied in EVERY profile: no profile
+    # trades them for capability the way frida trades AF_UNIX.
     if profile == "frida" or allow_unix_sockets:
-        socket_family_blocks = [_AF_NETLINK, _AF_PACKET]
+        socket_family_blocks = [_AF_NETLINK, _AF_PACKET,
+                                *_EXOTIC_FAMILY_BLOCKS]
     else:
-        socket_family_blocks = [_AF_UNIX, _AF_NETLINK, _AF_PACKET]
+        socket_family_blocks = [_AF_UNIX, _AF_NETLINK, _AF_PACKET,
+                                *_EXOTIC_FAMILY_BLOCKS]
     socket_type_block = _SOCK_RAW
 
     _os_write = os.write
