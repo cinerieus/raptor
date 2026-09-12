@@ -133,6 +133,11 @@ jobs:
           # This is repo policy passed explicitly; the tool itself
           # applies no default exclusion, and scanning still reports
           # findings in these trees.
+          # The sandbox feature-matrix images are runner-model pins
+          # (each Dockerfile's base tag IS a matrix lane's OS axis) —
+          # a bump once moved both to the same newer tag and collapsed
+          # the u24/u26 image axis into one substrate. Same rationale
+          # as fixture pins: the old versions are deliberate.
           rm -rf /tmp/sca-harden-out
           bin/raptor-sca fix . --harden \
             --out /tmp/sca-harden-out \
@@ -142,7 +147,8 @@ jobs:
             --exclude '**/tests/**' \
             --exclude '**/test/**' \
             --exclude '**/fixtures/**' \
-            --exclude '**/testdata/**'
+            --exclude '**/testdata/**' \
+            --exclude 'core/sandbox/scripts/feature-matrix/images/**'
           if [[ -s /tmp/sca-harden-out/upgrade.patch ]]; then
             echo "patch_present=true" >> "$GITHUB_OUTPUT"
           else
@@ -168,7 +174,9 @@ jobs:
           # committed file in the PR and the "Detect changes" step always
           # sees a spurious change.
           # Same fixture-protection policy as Phase 1 (see comment
-          # there): fixture pins are test assertions, never bumped.
+          # there): fixture pins are test assertions, never bumped —
+          # and the feature-matrix images are runner-model pins (the
+          # base tag is a matrix lane's OS axis).
           bin/raptor-sca bump . \
             --apply \
             --pr-comment \
@@ -177,6 +185,7 @@ jobs:
             --exclude '**/test/**' \
             --exclude '**/fixtures/**' \
             --exclude '**/testdata/**' \
+            --exclude 'core/sandbox/scripts/feature-matrix/images/**' \
             > "$RUNNER_TEMP/pr-body.md"
 
       - name: Exclude workflow-file changes (GITHUB_TOKEN can't push them)
