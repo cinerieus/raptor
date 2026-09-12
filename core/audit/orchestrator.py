@@ -592,6 +592,17 @@ class OrchestratorConfig:
     # writes a suppressions.jsonl record; pinned gaps are exempt.
     vendored_triage: bool = True
     sweep_validate_findings: bool = True
+    # Wall-time bound for the zero-dispatch re-sweep: the post-loop
+    # receipt-supply pass that dispatches the CWE-mapped mechanical
+    # chain for every suspicious outcome whose review dispatched no
+    # tools. Purely mechanical ($0 LLM). Too small and a large
+    # suspicious pile keeps its zero-receipt journal rows — the exact
+    # starvation the pass exists to close; too large and a target
+    # with slow spatch/codeql chains holds the run's tail hostage to
+    # an enrichment pass (the promotion pass re-derives memoizable
+    # steps for free, but coccinelle-with-vocab, flow legs and joern
+    # re-run — overshoot pays those twice). 0 disables the pass.
+    zero_dispatch_resweep_seconds: float = 300.0
     deepen_suspicious: bool = True
     # Slice of the LLM cost cap held back from the discovery loop so
     # the deepen phase can actually execute the re-reviews it
@@ -8150,6 +8161,22 @@ def _run_audit_body(
         pre_sweep = {
             (o.file, o.function): o.status for o in result.outcomes
         }
+        # Receipt supply first: give every zero-dispatch suspicious
+        # outcome its mechanical chain (and warm the sweep memo), so
+        # the promotion pass below consumes real receipts through its
+        # existing gates instead of leaving the pile unexamined.
+        logger.debug("entering _resweep_zero_dispatch_suspicious")
+        try:
+            _resweep_zero_dispatch_suspicious(
+                result, config,
+                sarif_cache=sarif_cache,
+                checklist=checklist,
+                joern_server=joern_server,
+            )
+        except Exception:
+            logger.debug("zero-dispatch re-sweep failed", exc_info=True)
+        logger.debug("exited _resweep_zero_dispatch_suspicious")
+
         logger.debug("entering _promote_suspicious")
         _promote_suspicious(
             result, config, sarif_cache, checklist,
@@ -21257,16 +21284,7 @@ def _promote_suspicious_one(
     inline: on-demand synthesis is LLM-backed and capped per run, so
     the cap must be consumed in item order, not completion order.
     """
-    if outcome.body.startswith(
-        (
-            "[gate violation:",
-            "[sink-unreachability:",
-            "[guarded-sink:",
-            "[smt-infeasible:",
-            "[entry-unreachability:",
-            "[self-contradiction:",
-        )
-    ):
+    if outcome.body.startswith(_GATE_DEMOTION_BODY_PREFIXES):
         logger.debug(
             "sweep skipped %s:%s — mechanical gate demotion is authoritative",
             outcome.file,
@@ -21573,6 +21591,198 @@ def _promote_suspicious_one(
             outcome.file,
             outcome.function,
             tool,
+        )
+
+
+# Bodies stamped by an authoritative mechanical gate demotion: the
+# promotion pass refuses to sweep them (the gate's verdict stands),
+# so dispatching chains at them buys receipts nothing consumes.
+_GATE_DEMOTION_BODY_PREFIXES = (
+    "[gate violation:",
+    "[sink-unreachability:",
+    "[guarded-sink:",
+    "[smt-infeasible:",
+    "[entry-unreachability:",
+    "[self-contradiction:",
+)
+
+
+def _resweep_zero_dispatch_suspicious(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+    *,
+    sarif_cache: SarifCache | None = None,
+    checklist: dict[str, Any] | None = None,
+    joern_server=None,
+) -> None:
+    """Receipt supply for the zero-dispatch suspicious pile.
+
+    A suspicious verdict whose review dispatched no mechanical tool is
+    an unpaid claim: the journal row says "no tool looked", and the
+    doctrine that tool output is the verdict has nothing to consume.
+    This pass dispatches each such outcome's CWE-mapped mechanical
+    chain (semgrep/coccinelle/codeql/smt/joern — $0 LLM), stamps
+    ``tools_dispatched``/``tools_errored``/``tools_skipped`` on the
+    outcome, and appends one audit-log record per outcome in the
+    sweep-record shape.
+
+    NO verdict changes happen here. The promotion pass that runs next
+    re-derives the same chain steps and flips status only through its
+    own gates; refutations keep flowing through the refutation
+    lattice. The re-derivation is memo-cheap for the memoizable step
+    types (semgrep/codeql/smt/compiler, and coccinelle only when no
+    domain vocabulary is in play) and an accepted double-run for the
+    rest (coccinelle-with-vocab, flow/cross-file legs, joern) — the
+    wall bound prices that honestly. Tier counters are NOT fed from
+    this pass: the promotion pass's re-derivation counts them, so
+    feeding both would double-book every channel receipt in
+    tier-diagnostics; this pass's per-outcome audit-log records carry
+    its results instead. Outcomes the promotion pass will never sweep
+    (authoritative gate demotions, counter-fenced hypotheses) are
+    excluded up front — their chains would burn wall budget on
+    receipts nothing consumes. Joern participation inherits the
+    channel-health gate and budget clamps inside ``_run_tool_chain``.
+    Wall-time bounded by ``config.zero_dispatch_resweep_seconds``;
+    SIGTERM and a concluded environment guard stop it between items.
+    """
+    budget_s = float(
+        getattr(config, "zero_dispatch_resweep_seconds", 0.0) or 0.0,
+    )
+    if budget_s <= 0:
+        return
+    candidates = [
+        (i, o) for i, o in enumerate(result.outcomes)
+        if o.status == "suspicious" and not (o.tools_dispatched or set())
+    ]
+    if not candidates:
+        return
+    logger.info(
+        "zero-dispatch re-sweep: %d suspicious outcome(s) carry no "
+        "tool receipts (wall bound %.0fs)",
+        len(candidates), budget_s,
+    )
+    pass_start = time.monotonic()
+    swept = 0
+    for _i, outcome in candidates:
+        if time.monotonic() - pass_start >= budget_s:
+            logger.info(
+                "zero-dispatch re-sweep stopped at its %.0fs wall "
+                "bound — %d/%d outcome(s) swept",
+                budget_s, swept, len(candidates),
+            )
+            break
+        if is_sigterm_requested():
+            break
+        _guard = getattr(config, "environment_guard_state", None)
+        if _guard is not None and _guard.concluded:
+            break
+        review = outcome.review_result or {}
+        hypothesis = review.get("hypothesis") or outcome.hypothesis or ""
+        record: dict[str, Any] = {
+            "action": "zero_dispatch_resweep",
+            "key": f"{outcome.file}:{outcome.function}:{outcome.line or 0}",
+            "status": outcome.status,
+            "model": "",
+            "cost_usd": 0.0,
+            "duration_s": 0.0,
+            "hypothesis": hypothesis,
+        }
+        try:
+            if not hypothesis:
+                record["skip_reason"] = "no-hypothesis"
+                continue
+            if outcome.body.startswith(_GATE_DEMOTION_BODY_PREFIXES):
+                record["skip_reason"] = "mechanical-gate-demotion"
+                continue
+            if _has_refuting_counter(outcome):
+                # The promotion pass diverts counter-fenced outcomes
+                # to synthesis and never consumes chain receipts for
+                # them — receipt supply here would be pure burn.
+                record["skip_reason"] = "counter-fenced"
+                continue
+            cwe = _effective_cwe(outcome, result.tier_counters)
+            chain = _hypothesis_to_tool_chain(
+                hypothesis, outcome.file, cwe=cwe,
+            )
+            if not chain:
+                record["skip_reason"] = "no-mechanical-chain"
+                continue
+            gap = _find_gap_in_checklist(
+                checklist or {}, outcome.file, outcome.function,
+            )
+            line_end = gap.get("line_end") if gap else None
+            source = _read_raw_source(
+                config.target_path, outcome.file, outcome.line, line_end,
+            )
+            step_start = time.monotonic()
+            errored: set = set()
+            skipped: set = set()
+            premise_h = _primary_hypothesis_entry(outcome, hypothesis)
+            confirmed = _run_tool_chain(
+                chain,
+                config=config,
+                file_path=outcome.file,
+                function_name=outcome.function,
+                source=source,
+                hypothesis=hypothesis,
+                line_start=outcome.line,
+                sarif_cache=sarif_cache,
+                # None: the promotion pass's re-derivation feeds the
+                # tier counters — see the docstring's dedupe note.
+                tier_counters=None,
+                joern_server=joern_server,
+                cwe=cwe,
+                errored_types=errored,
+                skipped_types=skipped,
+                # Promotion-site parity: exit only on a receipt the
+                # promotion pass would accept on its own.
+                early_exit_check=lambda c: (
+                    _promotion_grade_receipt(c)
+                    and not _synth_receipt_promotion_block_reason(
+                        c, outcome, cwe, config,
+                    )
+                    and not _premise_blocks_confirm(premise_h, [c])
+                ),
+            )
+            dispatched = {
+                step.get("type") for step in chain if step.get("type")
+            } - skipped
+            outcome.tools_dispatched = (
+                (outcome.tools_dispatched or set()) | dispatched
+            )
+            if errored:
+                outcome.tools_errored = (
+                    (outcome.tools_errored or set()) | errored
+                )
+            if skipped:
+                outcome.tools_skipped = (
+                    (outcome.tools_skipped or set()) | skipped
+                )
+            swept += 1
+            record["duration_s"] = round(time.monotonic() - step_start, 3)
+            record["tools_dispatched"] = sorted(
+                str(t) for t in dispatched
+            )
+            if errored:
+                record["tools_errored"] = sorted(str(t) for t in errored)
+            if skipped:
+                record["tools_skipped"] = sorted(str(t) for t in skipped)
+            if confirmed:
+                record["confirmed"] = sorted(confirmed)
+        except Exception:  # noqa: BLE001 — receipt supply, never fatal
+            record["skip_reason"] = "error"
+            logger.debug(
+                "zero-dispatch re-sweep failed for %s:%s",
+                outcome.file, outcome.function, exc_info=True,
+            )
+        finally:
+            if config.out_dir:
+                append_audit_log(config.out_dir, record)
+    if swept:
+        logger.info(
+            "zero-dispatch re-sweep: %d/%d outcome(s) received "
+            "mechanical receipts",
+            swept, len(candidates),
         )
 
 
