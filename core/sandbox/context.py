@@ -2976,6 +2976,47 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     lane,
                 )
         _inherit_netns = kwargs.pop("inherit_netns", False)
+        # inherit_netns drops CLONE_NEWNET / `--net` from every Linux
+        # lane, so a block_network run keeps the CALLER's network
+        # namespace — the sanctioned use (netns-coordinator paired
+        # isolation: the caller already sits in a shared ISOLATED
+        # netns the child must stay in to reach its peer), but for a
+        # caller in the HOST netns it silently neutralised the
+        # requested block: host interfaces and the host TCP table
+        # were reachable from a "network-blocked" run with no warning
+        # and no posture record. Network isolation is part of what a
+        # tier delivers for a block_network-bearing call, so the drop
+        # is now explicit: the untrusted contract refuses it (its
+        # network block may not be inherited away — run_untrusted*
+        # already reject the kwarg outright), every other caller gets
+        # a once-per-process warning naming the posture, and the
+        # per-run stamp below records it unconditionally.
+        _netns_inherited_drop = bool(
+            _inherit_netns and block_network
+            and sys.platform == "linux" and not effectively_disabled)
+        if _netns_inherited_drop:
+            if _floor >= _tiers.ContainmentTier.MOUNTLESS_NS:
+                raise _errors.SandboxFloorError(
+                    "sandbox run(): inherit_netns=True drops the "
+                    "network namespace from a block_network run — "
+                    "the untrusted contract's network block cannot "
+                    "be inherited away.",
+                    "run the untrusted call without inherit_netns=, "
+                    "or route coordinator-paired work through a "
+                    "trusted context.",
+                    achievable=_tiers.ContainmentTier.NS_NOMOUNT,
+                    floor=_floor,
+                )
+            if state.warn_once("_inherit_netns_block_warned"):
+                logger.warning(
+                    "sandbox: inherit_netns=True keeps the caller's "
+                    "network namespace on a block_network run — the "
+                    "child shares whatever network the CALLER has "
+                    "(sanctioned for netns-coordinator paired runs, "
+                    "whose callers sit in a shared isolated netns; a "
+                    "host-netns caller just lost the requested "
+                    "block). Stamped per run as netns_inherited.",
+                )
         _start_new_session = kwargs.pop("start_new_session", True)
         # Deterministic child cwd. With no cwd= the two execution paths
         # diverged: the mount-ns child lands in "/" (post-pivot_root
@@ -5764,6 +5805,12 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             _delivered_tier)
         _tier_info["containment_floor"] = _tiers.tier_label(_floor)
         _tier_info["floor_source"] = _floor_source
+        if _netns_inherited_drop:
+            # The requested network block was inherited away (see the
+            # inherit_netns gate at the kwarg pop) — forensic readers
+            # must see that this "network-blocked" run shared the
+            # caller's netns.
+            _tier_info["netns_inherited"] = True
         # Fresh-procfs posture for pid-ns runs. When the host refuses
         # the grandchild's procfs remount (static kernel policy —
         # probed once, warned once per process by _spawn), stamp the

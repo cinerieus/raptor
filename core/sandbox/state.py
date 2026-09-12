@@ -161,6 +161,11 @@ _mountless_backend_warned = False
 # containment floor for this process. Once per process; the per-call
 # consented-degrade warning fires every time the lowered floor bites.
 _floor_lowered_banner_warned = False
+# inherit_netns=True dropped the network namespace from a
+# block_network run (sanctioned for netns-coordinator paired runs;
+# a host-netns caller lost the requested block). Once per process;
+# the per-run netns_inherited posture stamp records every instance.
+_inherit_netns_block_warned = False
 _bare_run_posture_warned = False
 _net_and_tcp_allowlist_warned = False
 # Degraded-mode Landlock TCP-connect deny (block_network without a

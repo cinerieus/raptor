@@ -504,3 +504,54 @@ def test_floor_lowered_banner_fires_once_per_process(
                if "containment floor lowered" in rec.getMessage()]
     assert len(banners) == 1, caplog.text
     assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in banners[0].getMessage()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="linux netns lanes")
+def test_inherit_netns_drop_is_stamped_warned_and_floor_gated(
+        tmp_path, monkeypatch, caplog):
+    """inherit_netns=True keeps the caller's netns, dropping the
+    requested network block from every Linux lane. That drop is now
+    explicit: stamped per run (netns_inherited), warned once per
+    process, and REFUSED for the untrusted contract (whose network
+    block cannot be inherited away) — pre-fix a 'network-blocked'
+    trusted run silently kept host interfaces and the host TCP table
+    with nothing in sandbox_info."""
+    import logging as _logging
+    import subprocess as _subprocess
+
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox import state
+
+    def ok_spawn(cmd, **kwargs):
+        return _subprocess.CompletedProcess(cmd, returncode=0,
+                                            stdout="", stderr="")
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", ok_spawn)
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    state.reset_warn_once("_inherit_netns_block_warned")
+    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
+        try:
+            r = _ctx.run(["true"], block_network=True,
+                         inherit_netns=True, target=str(tmp_path),
+                         output=str(tmp_path), timeout=60)
+        except BaseException as e:  # noqa: BLE001 — host capability gate
+            pytest.skip(f"spawn lane unavailable: {e}")
+    assert r.sandbox_info["netns_inherited"] is True
+    assert any("inherit_netns" in rec.getMessage()
+               for rec in caplog.records), caplog.text
+
+    # A run without the network block inherits nothing away — no stamp.
+    plain = _ctx.run(["true"], block_network=False,
+                     inherit_netns=True, target=str(tmp_path),
+                     output=str(tmp_path), timeout=60)
+    assert "netns_inherited" not in plain.sandbox_info
+
+    # The untrusted contract refuses the drop outright (run_untrusted*
+    # already reject the kwarg at their allowlist; this pins the
+    # direct-caller path).
+    with pytest.raises(SandboxFloorError) as excinfo:
+        _ctx.run(["true"], block_network=True, inherit_netns=True,
+                 target=str(tmp_path), output=str(tmp_path),
+                 timeout=60, require_fresh_procfs=True)
+    assert "inherited away" in str(excinfo.value)

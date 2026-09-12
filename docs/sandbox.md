@@ -55,7 +55,11 @@ process.
 
 1. **User namespace** -- unprivileged root-mapping foundation.
 2. **Network namespace** -- sandboxed process sees only an isolated
-   loopback interface; no route out.
+   loopback interface; no route out. The coordinator-internal
+   `inherit_netns=` escape (paired-isolation runs that must stay in a
+   shared isolated netns) is never silent: dropping a requested
+   network block is stamped per run (`netns_inherited`), warned once
+   per process, and refused for untrusted-contract calls.
 3. **PID namespace** -- combined with a fresh in-namespace `/proc`
    mount, hides host PIDs and blocks cross-process
    `/proc/<pid>/environ` credential reads. The fresh mount is
