@@ -4481,6 +4481,24 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 for _tp in (tool_paths or []):
                     if _tp and _tp not in _mac_readable:
                         _mac_readable.append(_tp)
+                # The pid1-shim read grant exists for the Linux
+                # UNSHARE fallback lane only (Landlock must allow exec
+                # of the shim there) — the seatbelt lane never runs
+                # it. The mount-ns lane already filters the entry as
+                # "a pure framework/install-location tell"; here the
+                # leak is WORSE than a mount view: every readable path
+                # is embedded verbatim in the SBPL profile text, which
+                # rides `sandbox-exec -p` in the never-exec'd watcher
+                # shim's argv for the whole run. The hardened
+                # profiles' sysctl-read allowlist-deny closes the
+                # in-sandbox KERN_PROCARGS2 read of that argv; outside
+                # same-UID observers (plain `ps`) can still see it —
+                # unfixable while sandbox-exec takes `-p` — so the
+                # RAPTOR checkout path must simply never be in it.
+                _mac_readable = [
+                    _p for _p in _mac_readable
+                    if not _p.endswith("/libexec/raptor-pid1-shim")
+                ]
                 # Containment-floor contract, side 2: seatbelt is the
                 # platform's top tier — the check never refuses here,
                 # but every executor routes through the checked
