@@ -322,14 +322,11 @@ def test_restrict_reads_emits_deny_read_with_exceptions(tmp_path):
     """restrict_reads=True mirrors the Linux read-allowlist behaviour
     (Landlock's path_beneath denies reads outside the listed dirs).
     Profile must emit:
-      1. `(allow file-read-metadata)` so path traversal works
-         everywhere (stat/readdir on any inode is permissive — just
-         metadata, not content).
+      1. `(allow file-read-metadata)` so path traversal works on the
+         system prefixes (dyld stats every component at image load;
+         the home tree is then narrowed — see the home-metadata tests below).
       2. `(deny file-read-data (require-not ...))` with the
-         system-dirs allowlist + output + readable_paths.
-    The split prevents readdir-of-/ leaking the top-level directory
-    listing (info leak) while keeping dyld + standard tools
-    functional."""
+         system-dirs allowlist + output + readable_paths."""
     output = str(tmp_path / "out")
     os.makedirs(output, exist_ok=True)
     p = seatbelt.build_profile(
@@ -356,6 +353,193 @@ def test_restrict_reads_off_omits_read_deny():
     clause — reads are unrestricted by the (allow default) baseline."""
     p = seatbelt.build_profile()
     assert "file-read*" not in p
+
+
+# --- Home-tree metadata narrowing -------------------------------------
+#
+# Read-restricted shapes deny file-read-metadata under /Users and
+# re-allow exactly the /Users-resident subset of the data-read
+# allowlist. Everything here is generation-level; enforcement is
+# adjudicated by a live macOS probe run (home-tree existence-oracle
+# and stat-detail probes expected to flip to denied on the
+# read-restricted shapes; home readdir — measured already-denied
+# live on current macOS — stays denied).
+
+_HOME_DENY = '(deny file-read-metadata (subpath "/Users"))'
+
+
+def _data_read_grants(profile: str) -> tuple[list, list]:
+    """Extract (subpaths, literals) from the file-read-data deny's
+    require-any exception clause."""
+    import re
+    m = re.search(
+        r"\(deny file-read-data \(require-not \(require-any (.*)"
+        r"\)\)\)", profile,
+    )
+    assert m, f"no file-read-data deny found in:\n{profile}"
+    inside = m.group(1)
+    return (re.findall(r'\(subpath "([^"]*)"\)', inside),
+            re.findall(r'\(literal "([^"]*)"\)', inside))
+
+
+def _home_metadata_allow_subpaths(profile: str) -> list:
+    """Extract the subpaths of the filtered file-read-metadata allow
+    (the home-tree re-allow line; the universal `(allow file-read-metadata)`
+    line is bare and audit_verbose's `(with report)` form carries no
+    subpath filter — neither matches)."""
+    import re
+    lines = [line for line in profile.splitlines()
+             if line.startswith("(allow file-read-metadata (subpath ")]
+    assert len(lines) <= 1, lines
+    if not lines:
+        return []
+    return re.findall(r'\(subpath "([^"]*)"\)', lines[0])
+
+
+def test_home_meta_deny_present_in_restrict_reads_shapes():
+    """Every read-restricted enforcement profile carries the /Users
+    metadata deny — including when no grant lives under /Users (a
+    home-tree-free run leaks nothing and reads nothing there)."""
+    p = seatbelt.build_profile(output="/private/scratch/out",
+                               restrict_reads=True)
+    assert _HOME_DENY in p
+    # No grant under /Users → no filtered metadata re-allow at all.
+    assert _home_metadata_allow_subpaths(p) == []
+
+
+def test_home_meta_deny_skipped_when_grant_covers_home_root():
+    """A data-read grant covering the home root itself ("/" or
+    "/Users", via any grant kwarg) must SKIP the narrowing: emitting
+    the deny anyway would make metadata NARROWER than data-read
+    across the granted tree (the /Users filter on the re-allow list
+    would miss an ancestor-shaped grant), silently breaking
+    stat-before-open inside it. The superset invariant holds by
+    falling back to the universal metadata allow."""
+    for kwargs in (
+        {"readable_paths": ["/"]},
+        {"readable_paths": ["/Users"]},
+        {"target": "/Users"},
+        {"writable_paths": ["/Users/"]},
+    ):
+        p = seatbelt.build_profile(output="/private/scratch/out",
+                                   restrict_reads=True, **kwargs)
+        assert "(deny file-read-metadata" not in p, (kwargs, p)
+        assert "(allow file-read-metadata)" in p, kwargs
+    # Near-miss guard: a sibling path sharing the prefix ("/Users2")
+    # does NOT cover the home root — the deny must stay.
+    p = seatbelt.build_profile(output="/private/scratch/out",
+                               readable_paths=["/Users2"],
+                               restrict_reads=True)
+    assert _HOME_DENY in p
+
+
+def test_home_meta_allows_mirror_home_grants_exact_path_set():
+    """The filtered metadata allow mirrors the data-read allowlist's
+    /Users-resident grants EXACTLY: output, writable_paths,
+    readable_paths, target-when-under-home. Non-home grants must not
+    ride along (they are already metadata-open via the universal
+    allow — re-listing them obscures the diff)."""
+    p = seatbelt.build_profile(
+        output="/Users/op/raptor-out/run1",
+        writable_paths=["/Users/op/raptor-out/shared"],
+        readable_paths=["/Users/op/corpora", "/opt/myapp"],
+        target="/Users/op/target-repo",
+        restrict_reads=True,
+    )
+    assert _HOME_DENY in p
+    assert sorted(_home_metadata_allow_subpaths(p)) == sorted([
+        "/Users/op/raptor-out/run1",
+        "/Users/op/raptor-out/shared",
+        "/Users/op/corpora",
+        "/Users/op/target-repo",
+    ])
+
+
+def test_home_meta_clause_shape_and_order():
+    """Clause SHAPE is load-bearing (measured live on macOS
+    26.x): `(target others)`-filtered denies and `require-not`
+    exception forms measured broken/inert live; deny-then-allow with
+    OR-ing filters on one allow measured correct. Pin the shape:
+      universal metadata allow → /Users deny → filtered re-allow,
+    with no require-not anywhere on the metadata clauses."""
+    p = seatbelt.build_profile(output="/Users/op/out",
+                               restrict_reads=True)
+    lines = [line.strip() for line in p.splitlines() if line.strip()]
+    universal = lines.index("(allow file-read-metadata)")
+    deny = lines.index(_HOME_DENY)
+    allow = next(i for i, line in enumerate(lines)
+                 if line.startswith("(allow file-read-metadata ("))
+    assert universal < deny < allow, (universal, deny, allow)
+    for line in lines:
+        if "file-read-metadata" in line:
+            assert "require-not" not in line, line
+            assert "(target " not in line, line
+
+
+def test_home_meta_is_superset_of_home_data_reads():
+    """THE invariant: every path the profile grants file-read-data on
+    under /Users must have file-read-metadata coverage, or
+    stat-before-open patterns break on it. Derived mechanically from
+    the emitted profile (grants parsed from the data deny's exception,
+    coverage checked against the metadata re-allow), so any future
+    grant source added to read_exceptions is covered by construction
+    or fails here."""
+    p = seatbelt.build_profile(
+        output="/Users/op/raptor-out/run1",
+        writable_paths=["/Users/op/raptor-out/shared", "/private/w"],
+        readable_paths=["/Users/op/corpora", "/opt/myapp"],
+        target="/Users/op/target-repo",
+        restrict_reads=True,
+    )
+    subpaths, literals = _data_read_grants(p)
+    meta = _home_metadata_allow_subpaths(p)
+    for grant in subpaths:
+        if grant == "/Users" or grant.startswith("/Users/"):
+            assert any(grant == m or grant.startswith(m + "/")
+                       for m in meta), (grant, meta)
+    # The literal grants ("/" + /dev nodes) must never live under the
+    # home tree — a /Users literal in the data allowlist would need a
+    # matching metadata literal the generator doesn't emit.
+    for lit in literals:
+        assert not lit.startswith("/Users"), lit
+
+
+def test_home_meta_fake_home_and_tmp_scratch_ride_the_output_grant():
+    """The fake-home layout ({output}/.home — HOME + XDG dirs, see
+    _macos_spawn) and the spawn-layer TMPDIR scratch ({output}/.tmp) live
+    under the output dir, so the output subpath grant covers their
+    metadata by SBPL subpath semantics. Pin that the output grant is
+    present whenever output sits under /Users — losing it silently
+    breaks stat() inside the child's own HOME/TMPDIR."""
+    out = "/Users/op/raptor-out/run1"
+    p = seatbelt.build_profile(output=out, restrict_reads=True,
+                               fake_home=True,
+                               exclude_tmp_baseline=True)
+    assert out in _home_metadata_allow_subpaths(p)
+
+
+def test_home_meta_absent_outside_restrict_reads_shapes():
+    """The narrowing belongs to the read-restricted family ONLY.
+    Permissive shapes stay byte-identical: no metadata clause of any
+    kind without restrict_reads, and audit mode keeps its
+    observe-don't-block allow-with-report form."""
+    # Write isolation without read restriction — no metadata clauses.
+    p = seatbelt.build_profile(output="/Users/op/out")
+    assert "file-read-metadata" not in p
+    # Fully permissive.
+    assert "file-read-metadata" not in seatbelt.build_profile()
+    # Audit mode: observe, never deny.
+    p = seatbelt.build_profile(output="/Users/op/out",
+                               restrict_reads=True, audit_mode=True)
+    assert "(deny file-read-metadata" not in p
+    assert "(allow file-read* (with report))" in p
+
+
+def test_home_meta_tree_root_constant():
+    """The deny is scoped to the exported constant — seatbelt_audit /
+    kit tooling may key on it; drift would silently unscope the
+    narrowing."""
+    assert seatbelt.MACOS_HOME_TREE_ROOT == "/Users"
 
 
 def test_quote_sbpl_escapes_quotes_and_backslashes():
@@ -605,6 +789,17 @@ def test_strict_profile_equals_full_profile():
     full = seatbelt.build_profile(profile_name="full", **kwargs)
     strict = seatbelt.build_profile(profile_name="strict", **kwargs)
     assert full == strict
+    # The untrusted shapes (restrict_reads=True, home-tree grants —
+    # the family that carries the home-tree metadata narrowing) must stay
+    # byte-identical between strict and default too.
+    kwargs = dict(target="/Users/op/target-repo",
+                  output="/Users/op/raptor-out/run1",
+                  block_network=True, restrict_reads=True,
+                  fake_home=True, exclude_tmp_baseline=True,
+                  seccomp_profile="full")
+    full = seatbelt.build_profile(profile_name="full", **kwargs)
+    strict = seatbelt.build_profile(profile_name="strict", **kwargs)
+    assert full == strict
 
 
 def test_strict_mach_services_is_the_base_list():
@@ -776,6 +971,7 @@ def test_untrusted_default_shape_carries_full_hardening():
         "(deny network*)",
         "(deny file-write*",
         "(deny file-read-data",
+        '(deny file-read-metadata (subpath "/Users"))',
     ):
         assert clause in p, clause
 

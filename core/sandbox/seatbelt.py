@@ -29,10 +29,19 @@ Design decisions, derived from Phase 0 spike (see
    that resolves to /private/var/folders/...
 
 3. **`(deny X (require-not (subpath Y)))` is the deny-with-exception
-   idiom.** Plain ordering (`(deny X)(allow X subpath)`) doesn't work
-   — explicit deny outranks subsequent allow regardless of order.
-   The `require-not` clause is the canonical SBPL way to express
-   "deny X except where Y matches".
+   idiom for file-write / file-read-data.** Plain ordering
+   (`(deny X)(allow X subpath)`) doesn't work for a BARE family
+   deny — the spike measured the explicit `(deny file-write*)`
+   outranking a subsequent filtered allow regardless of order. The
+   `require-not` clause is the canonical SBPL way to express
+   "deny X except where Y matches" for those families. Clause-shape
+   evaluation is FAMILY- and FILTER-dependent on current macOS,
+   measured live per family: sysctl-read / process-info* / signal
+   need the opposite shape (deny-then-allow; their require-not /
+   `(target others)` filtered forms are broken or inert — see the
+   hardening section), and the home-tree metadata narrowing emits a
+   path-FILTERED deny followed by more-specific filtered allows
+   (see the restrict_reads branch; live-probe adjudicated).
 
 4. **Audit mode = `(allow X (with report))`.** When `--audit` is
    engaged, the file-write deny is replaced (not augmented) with an
@@ -167,6 +176,17 @@ MACOS_SYSCTL_READ_NAME_ALLOWLIST = (
     # — those are the real fingerprint/credential items.
     "kern.hostname",
 )
+
+# Home-tree root the restrict_reads metadata narrowing scopes to.
+# macOS keeps every user home under /Users (realpath-stable: the
+# APFS firmlink spelling /System/Volumes/Data/Users canonicalises to
+# /Users for path matching, and os.path.realpath("/Users") is
+# "/Users" on current releases). System prefixes stay metadata-open
+# — dyld path-walks stat every component at image load and a global
+# metadata deny SIGABRTs everything — so the deny is scoped to the
+# one tree where filename-borne secrets, existence oracles and stat
+# detail actually live (~/.ssh, browser profiles, keychain paths).
+MACOS_HOME_TREE_ROOT = "/Users"
 
 # POSIX shm names the hardened profiles may still OPEN READ-ONLY:
 # libSystem's preference fast-path reads cfprefs shared memory
@@ -514,11 +534,15 @@ def build_profile(*,
         # Apple's own open-source SBPL profile pattern (used in
         # WebKit, mDNSResponder, etc.):
         #
-        #   * file-read-metadata is allowed UNIVERSALLY — stat,
-        #     readdir on any path, getattrlist, etc. Path
-        #     traversal needs metadata reads on every component
-        #     and dyld needs them at image load. Metadata is rarely
-        #     a secret.
+        #   * file-read-metadata is allowed everywhere OUTSIDE the
+        #     home tree — stat, readdir, getattrlist. Path traversal
+        #     needs metadata reads on every component and dyld needs
+        #     them at image load, so the system prefixes must stay
+        #     metadata-open. UNDER /Users, metadata is denied except
+        #     where the data-read allowlist grants access (see the
+        #     home-tree narrowing below) — filenames, sizes and
+        #     existence under a home tree ARE secrets (~/.ssh key
+        #     names, browser profiles, per-user tool state).
         #
         #   * file-read-data (file content reads) is denied EXCEPT
         #     in the narrow allowlist. This is the secret-protecting
@@ -529,15 +553,86 @@ def build_profile(*,
         # required a hack — `(literal "/")` allow so dyld didn't
         # SIGABRT.
         #
-        # Known residual (empirically confirmed 2026-08-15): with
-        # file-read-metadata allowed universally, `ls /` SUCCEEDS —
-        # the kernel serves readdir under the metadata class, so the
-        # top-level directory listing (/Users, /Volumes, ...) is
-        # visible under restrict_reads. Directory NAMES leak;
-        # file CONTENT outside the allowlist stays denied. Accepted:
-        # denying metadata breaks dyld path-walks outright.
+        # Known residual: outside /Users, metadata stays universal —
+        # existence and stat oracles remain on the system prefixes
+        # (e.g. /private/etc; /opt/homebrew and /usr/local are
+        # wholesale DATA-readable anyway). Accepted: denying metadata
+        # on the dyld-walked prefixes breaks image load outright
+        # (empirically confirmed 2026-08-15).
         if not audit_mode:
             parts.append("(allow file-read-metadata)")
+            # --- Home-tree metadata narrowing ----------------------
+            # Deny metadata under /Users, then re-allow exactly the
+            # /Users-resident subset of the data-read allowlist:
+            # the output dir (which also hosts the fake-home layout
+            # {output}/.home and the spawn-layer TMPDIR scratch
+            # {output}/.tmp as subpaths), writable_paths,
+            # readable_paths, and the target when it lives under the
+            # home tree. Deriving the allow set from read_exceptions
+            # (already realpath'd and deduped) keeps the invariant
+            # mechanical: metadata coverage is a SUPERSET of
+            # data-read coverage everywhere — equal under /Users,
+            # wider outside — so stat-before-open patterns keep
+            # working on every path a data read is possible on.
+            # SYSTEM_READ_LITERALS carry no home-tree entries by
+            # construction ("/" + /dev files), pinned by test.
+            #
+            # Clause SHAPE is load-bearing: `(target others)`-
+            # filtered denies and the sysctl `require-not` exception
+            # form both measured broken/inert live on macOS 26.x,
+            # while deny-then-allow — a deny followed by filtered
+            # allows, multiple filters on one allow OR-ing together —
+            # measured correct for the families probed and is the
+            # shape Apple's own profiles use. NOTE the family nuance vs
+            # module docstring point 3: the spike's "explicit deny
+            # outranks later allow" measurement was a BARE file-*
+            # family deny; this narrowing emits a path-FILTERED deny
+            # with strictly more-specific filtered allows, per the
+            # revalidated clause-shape doctrine. Enforcement
+            # acceptance is a live macOS probe run (expected:
+            # home-tree existence-oracle and stat-detail probes flip
+            # to denied on the read-restricted shapes; stat INSIDE
+            # the granted subtrees keeps working — if the re-allow
+            # measures inert there, the toolchain battery fails loud
+            # and the narrowing must be reverted, never worked
+            # around). Second open question for that run: whether
+            # path traversal / cwd canonicalisation needs metadata
+            # on the ANCESTOR components of a grant (/Users,
+            # /Users/<u>) — if the battery breaks there, the
+            # contingency is ancestor-inode `(literal ...)` metadata
+            # allows, a strictly smaller leak than the universal
+            # grant this replaces.
+            #
+            # Skip the narrowing when any data-read grant covers the
+            # home root itself (a grant of "/" or "/Users"): the
+            # operator granted home-tree data reads, so a deny would
+            # make metadata NARROWER than data-read (breaking
+            # stat-before-open inside the grant) and a full re-allow
+            # would merely cancel it noisily.
+            _home_root_covered = any(
+                p == MACOS_HOME_TREE_ROOT
+                or MACOS_HOME_TREE_ROOT.startswith(
+                    p.rstrip("/") + "/")
+                for p in read_exceptions
+            )
+            if not _home_root_covered:
+                parts.append(
+                    f"(deny file-read-metadata "
+                    f"(subpath {_quote_sbpl(MACOS_HOME_TREE_ROOT)}))"
+                )
+                _home_prefix = MACOS_HOME_TREE_ROOT + "/"
+                _home_meta_allows = [
+                    p for p in read_exceptions
+                    if p.startswith(_home_prefix)
+                ]
+                if _home_meta_allows:
+                    _meta_subpaths = " ".join(
+                        f"(subpath {_quote_sbpl(p)})"
+                        for p in _home_meta_allows
+                    )
+                    parts.append(
+                        f"(allow file-read-metadata {_meta_subpaths})"
+                    )
             data_allow_clauses = " ".join(
                 [f"(subpath {_quote_sbpl(p)})" for p in read_exceptions]
                 + [f"(literal {_quote_sbpl(p)})"
@@ -564,12 +659,12 @@ def build_profile(*,
     #     hardware serial / platform UUID (fingerprint-only; a
     #     property-name allowlist is possible later if census
     #     evidence supports one).
-    #   * file-read-metadata stays universally allowed under
-    #     restrict_reads — full host-tree readdir/stat enumeration
-    #     (denying it breaks dyld path-walks outright; a /Users-
-    #     scoped metadata narrowing is a future candidate behind
-    #     cwd-canonicalisation validation). See the restrict_reads
-    #     branch commentary.
+    #   * file-read-metadata stays allowed OUTSIDE /Users under
+    #     restrict_reads — readdir/stat/existence oracles remain on
+    #     the system prefixes (denying metadata there breaks dyld
+    #     path-walks outright). The home tree is narrowed to the
+    #     data-read grants. See the restrict_reads branch
+    #     commentary.
     #   * port-allowlist wildcard `*:PORT` (any host on that port)
     #     and standalone-allowlist UDP/bind openness — exact parity
     #     with the Linux Landlock port pin, documented both sides.
@@ -625,8 +720,9 @@ def build_profile(*,
             # uses the deny-then-allow-self pattern — a bare family
             # deny followed by `(target self)` allows, relying on
             # the later-allow-wins semantics this operation family
-            # shares with network* (NOT with file-*, where explicit
-            # deny outranks any later allow — see module docstring).
+            # shares with network* (unlike a BARE file-* deny, where
+            # the spike measured the explicit deny outranking any
+            # later allow — see module docstring point 3).
             # Emit that attested shape; self-introspection keeps
             # working through the allow. (Breadth note: Apple scopes
             # its self allows per subclass; we allow the whole family
