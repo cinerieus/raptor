@@ -729,9 +729,22 @@ class OrchestratorConfig:
     # timeouts (Joern) clamp to the remaining budget so one stuck
     # query can't hold a worker past the run's end.
     run_deadline_monotonic: float | None = None
+    # Systemic-fault circuit breaker on the dispatch path
+    # (core.audit.environment). On (default): when most of the recent
+    # terminal dispatch failures across distinct functions share one
+    # systemic class (disk/fd/memory errno, auth refusal,
+    # connection/DNS), dispatch pauses, a direct probe runs, and the
+    # run resumes or concludes resumably. Off: every environmental
+    # failure is handled as an independent per-function error — a
+    # persistent fault then fails every remaining dispatch
+    # identically for the rest of the run. Disable only when the
+    # environment is deliberately abnormal (fault-injection
+    # harnesses, quota-testing rigs).
+    environment_breaker: bool = True
     # The run's EnvironmentGuard (core.audit.environment): resource
-    # watchdog on the executor tick, graceful conclude via the stop
-    # rails. Derived at run start (never set by callers).
+    # watchdog + circuit breaker on the executor tick, graceful
+    # conclude via the stop rails. Derived at run start (never set by
+    # callers).
     environment_guard_state: EnvironmentGuard | None = None
     # On-demand Mode-2 checker synthesis for chain-less hypotheses:
     # when a suspicious outcome's (possibly inferred) CWE yields no
@@ -1518,13 +1531,14 @@ def run_orchestrator(
 
     # ── Environment guard ──────────────────────────────────────────
     # Keeps watching the preflighted filesystems from the executor
-    # tick. Constructed AFTER the deadline stamp: every pause wait is
-    # clamped to the run deadline minus the drain margin, so a pause
-    # entered near the wall cap still concludes, drains, and reports
-    # inside the budget.
+    # tick. Constructed AFTER the deadline stamp: every pause/probe
+    # wait is clamped to the run deadline minus the drain margin, so
+    # a pause entered near the wall cap still concludes, drains, and
+    # reports inside the budget.
     config.environment_guard_state = EnvironmentGuard(
         tmp_dir=_env_dirs[0],
         out_dir=Path(config.out_dir) if config.out_dir else None,
+        breaker_enabled=config.environment_breaker,
         abort_check=is_shutdown_requested,
         deadline_monotonic=config.run_deadline_monotonic,
     )
@@ -2663,6 +2677,12 @@ def review_one_function(
                     gap, ctx, exc, review_fn, config,
                 )
             else:
+                # Terminal for this function — let the breaker
+                # correlate it with other functions' failures.
+                from .environment import note_dispatch_failure
+                note_dispatch_failure(
+                    config, f"{gap['file']}:{gap['name']}", exc,
+                )
                 outcome = _error_outcome(gap, exc)
 
     outcome.line = gap.get("line_start", 0)
@@ -14308,6 +14328,12 @@ def _review_items(
                 gap["file"],
                 gap["name"],
                 exc,
+            )
+            # Terminal for this function — let the breaker correlate
+            # it with other functions' failures.
+            from .environment import note_dispatch_failure
+            note_dispatch_failure(
+                config, f"{gap['file']}:{gap['name']}", exc,
             )
             outcome = _error_outcome(gap, exc)
 

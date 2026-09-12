@@ -135,6 +135,12 @@ class AuditPipelineOpts:
     # that a classifier skip can never exercise. Production default
     # unchanged (on).
     triage: bool = True
+    # Systemic-fault circuit breaker on the dispatch path
+    # (--no-environment-breaker to disable; see
+    # OrchestratorConfig.environment_breaker). Off is for
+    # deliberately abnormal environments (fault-injection harnesses,
+    # quota-testing rigs) where correlated failures are the point.
+    environment_breaker: bool = True
     # Vendored/generated-code triage tier (--no-vendored-triage to
     # disable): corroborated generator provenance → skip tier;
     # uncorroborated banners / vendored paths / generated-shape
@@ -375,6 +381,7 @@ def _build_orchestrator_config(
         prefilter_skip=opts.prefilter_skip,
         triage=opts.triage,
         vendored_triage=opts.vendored_triage,
+        environment_breaker=opts.environment_breaker,
         profile=opts.profile,
         iris=opts.iris,
         sage_recall=opts.sage_recall,

@@ -1,9 +1,11 @@
-"""Tests for core.audit.environment: preflight floors and the
-resource watchdog (pause/resume hysteresis, bounded-wait conclude,
-run-deadline clamp)."""
+"""Tests for core.audit.environment: preflight floors, the resource
+watchdog (pause/resume hysteresis, bounded-wait conclude), and the
+systemic-fault circuit breaker."""
 
 from __future__ import annotations
 
+import errno
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,6 +13,14 @@ from typing import Any
 import pytest
 
 from core.audit.environment import (
+    BREAKER_MAX_PROBE_WAIT_S,
+    BREAKER_TRIP_COUNT,
+    BREAKER_WINDOW,
+    CLASS_AUTH,
+    CLASS_DISK,
+    CLASS_FDS,
+    CLASS_MEMORY,
+    CLASS_NETWORK,
     PREFLIGHT_REFUSE_FREE_BYTES,
     PREFLIGHT_REFUSE_FREE_INODES,
     PREFLIGHT_WARN_FREE_BYTES,
@@ -20,6 +30,8 @@ from core.audit.environment import (
     WATCHDOG_RESUME_FREE_BYTES,
     EnvironmentGuard,
     EnvironmentPreflightError,
+    classify_systemic,
+    note_dispatch_failure,
     preflight_environment,
 )
 
@@ -226,6 +238,355 @@ class TestWatchdog:
         assert not g.concluded
 
 
+# ── Systemic classification ──────────────────────────────────────────
+
+
+def _oserror(eno: int, filename: str | None = None) -> OSError:
+    return OSError(eno, "synthetic", filename)
+
+
+def _wrapped(eno: int) -> RuntimeError:
+    exc = RuntimeError("dispatch failed")
+    exc.__cause__ = _oserror(eno)
+    return exc
+
+
+def _auth_error() -> RuntimeError:
+    exc = RuntimeError("request rejected")
+    exc.status_code = 401
+    return exc
+
+
+class TestClassifySystemic:
+    def test_disk_errnos_direct_and_chained(self):
+        assert classify_systemic(_oserror(errno.ENOSPC)) == CLASS_DISK
+        assert classify_systemic(_oserror(errno.EDQUOT)) == CLASS_DISK
+        assert classify_systemic(_oserror(errno.EROFS)) == CLASS_DISK
+        assert classify_systemic(_wrapped(errno.ENOSPC)) == CLASS_DISK
+
+    def test_fd_memory_network(self):
+        assert classify_systemic(_oserror(errno.EMFILE)) == CLASS_FDS
+        assert classify_systemic(_oserror(errno.ENFILE)) == CLASS_FDS
+        assert classify_systemic(_oserror(errno.ENOMEM)) == CLASS_MEMORY
+        assert classify_systemic(_oserror(errno.ECONNREFUSED)) == CLASS_NETWORK
+
+    def test_dns_failures_are_network(self):
+        import socket
+
+        assert classify_systemic(socket.gaierror(-2, "no name")) == CLASS_NETWORK
+
+    def test_network_counts_on_cause_chain(self):
+        # The wrapped shape a real transport connect failure arrives
+        # in: RuntimeError raised `from` the ECONNREFUSED OSError.
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = _oserror(errno.ECONNREFUSED)
+        assert classify_systemic(exc) == CLASS_NETWORK
+
+    def test_network_in_implicit_context_is_not_network(self):
+        # A TimeoutError raised while an ECONNREFUSED was being
+        # handled (implicit __context__) is a timeout: classifying it
+        # network would strip the timeout's reduced-context retry.
+        exc = TimeoutError("review call timed out")
+        exc.__context__ = _oserror(errno.ECONNREFUSED)
+        assert classify_systemic(exc) is None
+
+    def test_disk_still_counts_via_context(self):
+        # Disk errnos keep the full-chain walk: an error raised while
+        # HANDLING an ENOSPC is still an ENOSPC environment.
+        exc = RuntimeError("journal append failed")
+        exc.__context__ = _oserror(errno.ENOSPC)
+        assert classify_systemic(exc) == CLASS_DISK
+
+    def test_auth_refusal_via_client_taxonomy(self):
+        assert classify_systemic(_auth_error()) == CLASS_AUTH
+
+    def test_budget_never_systemic(self):
+        from core.llm.client import LLMBudgetExceededError
+
+        assert classify_systemic(
+            LLMBudgetExceededError("LLM budget exceeded"),
+        ) is None
+        assert classify_systemic(
+            RuntimeError("LLM budget exceeded: cap reached"),
+        ) is None
+
+    def test_refusal_and_schema_never_systemic(self):
+        assert classify_systemic(RuntimeError("model refused")) is None
+        try:
+            json.loads("{nope")
+        except json.JSONDecodeError as exc:
+            assert classify_systemic(exc) is None
+
+    def test_ordinary_oserror_not_systemic(self):
+        assert classify_systemic(_oserror(errno.ENOENT)) is None
+
+
+# ── Circuit breaker ───────────────────────────────────────────────────
+
+
+class TestCircuitBreaker:
+    def _fail(self, g: EnvironmentGuard, exc: BaseException,
+              n: int = BREAKER_TRIP_COUNT, prefix: str = "f") -> None:
+        for i in range(n):
+            g.note_dispatch_failure(f"a.py:{prefix}{i}", exc)
+
+    def test_trips_on_homogeneous_window_and_probe_recovers(self, tmp_path):
+        clock = _Clock()
+        fs = _FakeFs(_stat(4 * GIB))
+        g = EnvironmentGuard(
+            tmp_dir=tmp_path, clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=fs,
+        )
+        self._fail(g, _wrapped(errno.ENOSPC))
+        assert g._tripped_class == CLASS_DISK
+        g.tick()  # probe: statvfs healthy + canary write in tmp_path
+        assert not g.concluded
+        assert g._tripped_class is None
+        assert not g._window  # recovery resets the window
+
+    def test_does_not_trip_on_repeats_of_one_function(self):
+        g = EnvironmentGuard(tmp_dir=Path("/x"), statvfs_fn=None)
+        for _ in range(BREAKER_WINDOW):
+            g.note_dispatch_failure("a.py:same", _wrapped(errno.ENOSPC))
+        assert g._tripped_class is None
+
+    def test_does_not_trip_on_mixed_classes(self):
+        g = EnvironmentGuard(tmp_dir=Path("/x"), statvfs_fn=None)
+        g.note_dispatch_failure("a.py:f1", _wrapped(errno.ENOSPC))
+        g.note_dispatch_failure("a.py:f2", _wrapped(errno.EMFILE))
+        g.note_dispatch_failure("a.py:f3", _wrapped(errno.ENOSPC))
+        g.note_dispatch_failure("a.py:f4", _wrapped(errno.EMFILE))
+        g.note_dispatch_failure("a.py:f5", _wrapped(errno.ENOSPC))
+        g.note_dispatch_failure("a.py:f6", _wrapped(errno.EMFILE))
+        assert g._tripped_class is None
+
+    def test_does_not_trip_on_budget_or_refusal_failures(self):
+        from core.llm.client import LLMBudgetExceededError
+
+        g = EnvironmentGuard(tmp_dir=Path("/x"), statvfs_fn=None)
+        self._fail(g, LLMBudgetExceededError("LLM budget exceeded"),
+                   n=BREAKER_WINDOW)
+        assert g._tripped_class is None
+        self._fail(g, RuntimeError("model refused"), n=BREAKER_WINDOW,
+                   prefix="r")
+        assert g._tripped_class is None
+
+    def test_heterogeneous_dilution_prevents_trip(self):
+        # A non-systemic failure inside the window keeps the systemic
+        # count below the trip threshold.
+        g = EnvironmentGuard(tmp_dir=Path("/x"), statvfs_fn=None)
+        self._fail(g, _wrapped(errno.ENOSPC), n=BREAKER_TRIP_COUNT - 1)
+        g.note_dispatch_failure("a.py:other", RuntimeError("parse error"))
+        g.note_dispatch_failure("a.py:more", RuntimeError("parse error"))
+        assert g._tripped_class is None
+
+    def test_probe_failure_concludes_after_bounded_wait(self, tmp_path):
+        clock = _Clock()
+        fs = _FakeFs(_stat(WATCHDOG_PAUSE_FREE_BYTES - 1))
+        g = EnvironmentGuard(
+            tmp_dir=tmp_path, clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=fs,
+        )
+        self._fail(g, _wrapped(errno.ENOSPC))
+        g.tick()
+        assert g.concluded
+        assert CLASS_DISK in g.conclude_reason
+        assert clock.t >= BREAKER_MAX_PROBE_WAIT_S
+
+    def test_auth_trip_is_non_recoverable(self):
+        clock = _Clock()
+        g = EnvironmentGuard(
+            tmp_dir=Path("/x"), clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=None,
+        )
+        self._fail(g, _auth_error())
+        assert g._tripped_class == CLASS_AUTH
+        g.tick()
+        assert g.concluded
+        assert CLASS_AUTH in g.conclude_reason
+        assert clock.t == 0.0  # no probe loop: concluded immediately
+
+    def test_fd_probe_recovers(self):
+        clock = _Clock()
+        g = EnvironmentGuard(
+            tmp_dir=Path("/x"), clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=None,
+        )
+        self._fail(g, _wrapped(errno.EMFILE))
+        assert g._tripped_class == CLASS_FDS
+        g.tick()  # os.open(devnull) succeeds here
+        assert not g.concluded
+        assert g._tripped_class is None
+
+    def test_disabled_breaker_never_trips(self):
+        g = EnvironmentGuard(
+            tmp_dir=Path("/x"), statvfs_fn=None, breaker_enabled=False,
+        )
+        self._fail(g, _wrapped(errno.ENOSPC), n=BREAKER_WINDOW)
+        assert g._tripped_class is None
+        assert not g._window
+
+    def test_disk_probe_prefers_implicated_dir(self, tmp_path):
+        # The exception names a file: its parent joins the probe set.
+        clock = _Clock()
+        fs = _FakeFs(_stat(4 * GIB))
+        g = EnvironmentGuard(
+            tmp_dir=tmp_path, clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=fs,
+        )
+        implicated = tmp_path / "staging"
+        implicated.mkdir()
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = _oserror(
+            errno.ENOSPC, str(implicated / "cc-file.txt"),
+        )
+        self._fail(g, exc)
+        assert g._trip_hint_dir == implicated
+        g.tick()
+        assert g._tripped_class is None
+
+    def test_hint_unwritable_but_guard_dirs_healthy_recovers(self, tmp_path):
+        # A contained hint dir that stays unwritable while tmp and out
+        # are healthy is read-only-by-design (or swept away) — it must
+        # not hold the pause to its full bound and conclude the run.
+        clock = _Clock()
+        fs = _FakeFs(_stat(4 * GIB))
+        g = EnvironmentGuard(
+            tmp_dir=tmp_path, clock=clock,
+            sleep_fn=clock.sleep, statvfs_fn=fs,
+        )
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = _oserror(errno.ENOSPC, str(staging / "f.txt"))
+        self._fail(g, exc)
+        assert g._trip_hint_dir == staging
+        staging.rmdir()  # now unwritable/gone; tmp_path stays healthy
+        g.tick()
+        assert not g.concluded
+        assert g._tripped_class is None
+
+    def test_note_helper_noops_without_guard(self):
+        config = SimpleNamespace()
+        note_dispatch_failure(config, "a.py:f", _wrapped(errno.ENOSPC))
+
+    def test_note_helper_feeds_config_guard(self):
+        g = EnvironmentGuard(tmp_dir=Path("/x"), statvfs_fn=None)
+        config = SimpleNamespace(environment_guard_state=g)
+        for i in range(BREAKER_TRIP_COUNT):
+            note_dispatch_failure(
+                config, f"a.py:f{i}", _wrapped(errno.ENOSPC),
+            )
+        assert g._tripped_class == CLASS_DISK
+
+
+# ── Canary-probe containment ─────────────────────────────────────────
+
+
+class TestFaultDirHintContainment:
+    """The disk probe WRITES a canary in the hinted directory — the
+    hint must never escape the guard's own dirs (a probe write inside
+    the scanned target, through a planted symlink, or into the
+    harness CWD is a write into attacker-influenceable space)."""
+
+    def _trip(self, g: "EnvironmentGuard", exc: BaseException) -> None:
+        for i in range(BREAKER_TRIP_COUNT):
+            g.note_dispatch_failure(f"a.py:f{i}", exc)
+
+    def _probed_dirs(self, monkeypatch) -> list:
+        import tempfile as _tempfile
+
+        recorded: list = []
+        real = _tempfile.mkstemp
+
+        def rec(*args: Any, **kwargs: Any):
+            if kwargs.get("dir") is not None:
+                recorded.append(Path(str(kwargs["dir"])).resolve())
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(_tempfile, "mkstemp", rec)
+        return recorded
+
+    def test_chained_context_target_path_is_ignored(self, tmp_path):
+        # An unrelated FileNotFoundError from the scanned target joins
+        # the chain via implicit __context__ during ENOSPC handling —
+        # its filename must not become the probe dir.
+        guard_tmp = tmp_path / "guard"
+        guard_tmp.mkdir()
+        target = tmp_path / "target"
+        target.mkdir()
+        g = EnvironmentGuard(
+            tmp_dir=guard_tmp, statvfs_fn=_FakeFs(_stat(4 * GIB)),
+        )
+        fnf = FileNotFoundError(
+            errno.ENOENT, "missing", str(target / "cfg.json"),
+        )
+        enospc = _oserror(errno.ENOSPC)  # the disk error names no file
+        enospc.__context__ = fnf
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = enospc
+        self._trip(g, exc)
+        assert g._tripped_class == CLASS_DISK
+        assert g._trip_hint_dir is None
+
+    def test_symlinked_dir_inside_target_is_rejected(
+        self, tmp_path, monkeypatch,
+    ):
+        # The disk error names a file under an attacker-planted
+        # symlink inside the target pointing at an arbitrary outside
+        # dir — no canary may be written through it.
+        guard_tmp = tmp_path / "guard"
+        guard_tmp.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "evil").symlink_to(outside)
+        clock = _Clock()
+        g = EnvironmentGuard(
+            tmp_dir=guard_tmp, clock=clock, sleep_fn=clock.sleep,
+            statvfs_fn=_FakeFs(_stat(4 * GIB)),
+        )
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = _oserror(
+            errno.ENOSPC, str(target / "evil" / "cc-file.txt"),
+        )
+        self._trip(g, exc)
+        assert g._trip_hint_dir is None
+        probed = self._probed_dirs(monkeypatch)
+        g.tick()  # healthy: probe recovers via the guard dirs only
+        assert not g.concluded
+        assert probed
+        allowed = guard_tmp.resolve()
+        for d in probed:
+            assert d == allowed or allowed in d.parents
+        assert outside.resolve() not in probed
+
+    def test_relative_filename_never_probes_cwd(
+        self, tmp_path, monkeypatch,
+    ):
+        # A relative filename resolves against the harness CWD — the
+        # hint must be dropped, not turned into Path('.').
+        guard_tmp = tmp_path / "guard"
+        guard_tmp.mkdir()
+        cwd = tmp_path / "cwd"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        clock = _Clock()
+        g = EnvironmentGuard(
+            tmp_dir=guard_tmp, clock=clock, sleep_fn=clock.sleep,
+            statvfs_fn=_FakeFs(_stat(4 * GIB)),
+        )
+        exc = RuntimeError("dispatch failed")
+        exc.__cause__ = _oserror(errno.ENOSPC, "cc-file.txt")
+        self._trip(g, exc)
+        assert g._trip_hint_dir is None
+        probed = self._probed_dirs(monkeypatch)
+        g.tick()
+        assert not g.concluded
+        assert cwd.resolve() not in probed
+
+
 # ── Run-deadline clamp ───────────────────────────────────────────────
 
 
@@ -265,6 +626,18 @@ class TestDeadlineClamp:
         g.tick()
         assert g.concluded
         assert clock.t == 50.0  # no sleep at all
+
+    def test_breaker_probe_clamped_to_deadline(self, tmp_path):
+        clock = _Clock()
+        deadline = 100.0 + self._MARGIN
+        fs = _FakeFs(_stat(WATCHDOG_PAUSE_FREE_BYTES - 1))
+        g = self._deadline_guard(fs, clock, deadline)
+        for i in range(BREAKER_TRIP_COUNT):
+            g.note_dispatch_failure(f"a.py:f{i}", _wrapped(errno.ENOSPC))
+        g.tick()
+        assert g.concluded
+        assert clock.t < deadline
+        assert clock.t < BREAKER_MAX_PROBE_WAIT_S
 
     def test_cumulative_pauses_cannot_exceed_deadline(self):
         # Oscillating filesystem: each pause recovers, pressure comes

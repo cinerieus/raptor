@@ -1664,6 +1664,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         on_demand_synthesis=not args.no_on_demand_synthesis,
         vendored_triage=not args.no_vendored_triage,
         probe_determine_value=args.probe_determine_value,
+        environment_breaker=not args.no_environment_breaker,
         deepen_reserve_fraction=args.deepen_reserve,
         prior_journal_dirs=(
             [Path(p) for p in args.prior_journal]
@@ -2244,6 +2245,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         on_demand_synthesis=bool(run_cfg.get("on_demand_synthesis", True)),
         vendored_triage=bool(run_cfg.get("vendored_triage", True)),
         probe_determine_value=bool(run_cfg.get("probe_determine_value")),
+        environment_breaker=bool(run_cfg.get("environment_breaker", True)),
         deepen_reserve_fraction=run_cfg.get("deepen_reserve_fraction"),
         same_run_reuse=True,
         prior_cost_breakdown=prior_breakdown,
@@ -2360,6 +2362,7 @@ def _run_config_from_args(
         "on_demand_synthesis": not args.no_on_demand_synthesis,
         "vendored_triage": not args.no_vendored_triage,
         "probe_determine_value": args.probe_determine_value,
+        "environment_breaker": not args.no_environment_breaker,
         "deepen_reserve_fraction": args.deepen_reserve,
         "prior_journal_dirs": args.prior_journal,
         "prior_claims_per_function": args.prior_claims,
@@ -2696,6 +2699,15 @@ def main() -> int:
                             "files get normal review depth instead of "
                             "the skip/glance tier (use when auditing a "
                             "vendored library ON PURPOSE)")
+    p_run.add_argument("--no-environment-breaker", action="store_true",
+                       help="Disable the systemic-fault circuit breaker "
+                            "(correlated dispatch-failure pause/probe/"
+                            "conclude) for this run. Preflight and the "
+                            "resource watchdog stay on; use "
+                            "RAPTOR_ENV_FLOOR_MIB to lower or disable "
+                            "their byte floors on deliberately tight "
+                            "filesystems (fault-injection harnesses, "
+                            "container tmpfs)")
     p_run.add_argument("--probe-determine-value", action="store_true",
                        help="Resolve claim-less constant study questions "
                             "('what is the value of X?') by compile-probe "

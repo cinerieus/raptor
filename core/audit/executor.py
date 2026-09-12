@@ -78,10 +78,14 @@ def _commit_error_outcome(
     so without a committed outcome the failure left no trace in the
     journal, tallies, or error stats).
     """
+    from .environment import note_dispatch_failure
     from .orchestrator import ReviewOutcome, _commit_outcome, _tally_outcome
 
     file = task.gap.get("file", "")
     function = task.gap.get("name", "")
+    # Terminal for this function — let the breaker correlate it with
+    # other functions' failures.
+    note_dispatch_failure(config, f"{file}:{function}", exc)
     outcome = ReviewOutcome(
         file=file,
         function=function,

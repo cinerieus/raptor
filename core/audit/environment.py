@@ -14,7 +14,16 @@ Two mechanisms share this module:
   rails the wall/cost budgets use (``_check_budget`` consults
   :attr:`EnvironmentGuard.concluded`), so in-flight reviews are
   harvested, the report is written, and the run stays resumable.
-Scope: the guard's pause machinery is driven ONLY by the main
+* **Systemic-fault circuit breaker** (same guard) — correlates
+  terminal dispatch failures across DISTINCT functions by systemic
+  class (disk/fd/memory errnos anywhere in the exception chain,
+  auth-layer refusal, connection/DNS on the ``__cause__`` chain).
+  When enough of the recent failures share one class the breaker
+  trips: dispatch stops, a direct probe for that class runs with
+  bounded backoff, and the run either resumes (probe recovered —
+  window reset) or concludes through the same stop rails as above.
+
+Scope: the guard's pause/probe machinery is driven ONLY by the main
 executor pass's pre-dispatch tick (both executor paths, including the
 serial glance-batch flush). The study consumer, deepen, error-retry,
 trivial-batch, and edge passes do not tick — they observe the guard
@@ -24,7 +33,7 @@ the study consumer keeps dispatching during a main-pass pause,
 bounded by that pause's own conclusion. Wiring ticks into those
 passes is deliberately out of scope here.
 
-Every bounded pause is additionally clamped to the run
+Every bounded pause/probe wait is additionally clamped to the run
 deadline (when one is set) minus a drain margin, so a pause entered
 near the wall cap concludes with enough room to harvest, report, and
 transition the lifecycle instead of blocking into the supervisor's
@@ -35,16 +44,21 @@ Platforms without ``os.statvfs`` degrade silently to no-ops.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
+import socket
 import tempfile
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from core.audit.orchestrator import OrchestratorConfig
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +142,171 @@ WATCHDOG_POLL_S = 5.0
 # clear the pressure without intervention. After this the run
 # concludes gracefully with a resume hint.
 WATCHDOG_MAX_PAUSE_S = 600.0
+
+
+# ── Circuit-breaker window ────────────────────────────────────────────
+# Trade-off, both directions: a looser correlation (smaller trip count
+# or larger window) trips on coincidental clusters — a burst of
+# unrelated per-function errors would pause a healthy run; a stricter
+# one keeps paying for doomed dispatches while a genuinely broken
+# environment fails function after function. 5-of-6 across DISTINCT
+# functions is conservative: one function retried to death can never
+# trip it, and two interleaved unrelated failures keep it open.
+BREAKER_WINDOW = 6
+BREAKER_TRIP_COUNT = 5
+# Probe backoff. Starting smaller re-probes a transient fault (a
+# co-tenant's spike freed the disk) quickly; capping the growth keeps
+# a slow-clearing fault from being probed so rarely the bounded wait
+# expires between probes. The overall bound mirrors the watchdog's:
+# past it, nothing is going to clear without operator action, so the
+# run concludes resumably instead of holding the pause forever.
+BREAKER_PROBE_BACKOFF_INITIAL_S = 5.0
+BREAKER_PROBE_BACKOFF_MAX_S = 60.0
+BREAKER_MAX_PROBE_WAIT_S = 600.0
+# Memory-probe allocation size. Larger proves more headroom before
+# resuming (a resumed run immediately builds multi-MiB prompts);
+# smaller keeps the probe itself from destabilising a barely-
+# recovered host.
+_MEMORY_PROBE_BYTES = 16 * 1024 * 1024
+
+# Systemic failure classes.
+CLASS_DISK = "disk"
+CLASS_FDS = "fds"
+CLASS_MEMORY = "memory"
+CLASS_AUTH = "auth"
+CLASS_NETWORK = "network"
+
+# Classes with no cheap in-process recovery probe: proving an auth
+# credential or a provider endpoint healthy again requires a real
+# client call (spends budget, embeds provider specifics), so a trip
+# on these is treated as non-recoverable — the run concludes
+# resumably and the operator fixes the credential/network first.
+_NON_RECOVERABLE_CLASSES = frozenset({CLASS_AUTH, CLASS_NETWORK})
+
+_DISK_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT, errno.EROFS})
+_FD_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE})
+_MEMORY_ERRNOS = frozenset({errno.ENOMEM})
+_NETWORK_ERRNOS = frozenset({
+    errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH,
+})
+
+
+def _cause_only_chain(exc: BaseException):
+    """Yield *exc* and its explicit ``__cause__`` chain only (bounded,
+    cycle-safe). Unlike ``client._exception_chain`` this never follows
+    implicit ``__context__``: a network errno that merely happened to
+    be in flight while another failure was being handled is ambient,
+    not causal."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen and len(seen) < 8:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__
+
+
+def classify_systemic(exc: BaseException) -> str | None:
+    """The systemic failure class of *exc*, or ``None`` for ordinary
+    per-function failures.
+
+    Reuses the LLM client's error taxonomy rather than growing a
+    parallel one: the causal-chain walk is ``client._exception_chain``
+    (the same walk its content-filter/auth classifiers use) and the
+    credential class is ``client.is_auth_refusal`` (structural
+    signals first; response-shape failures can never impersonate
+    auth). Budget exhaustion, model refusals and schema-validation
+    failures classify as ``None`` — they have their own handling and
+    must never trip the breaker.
+
+    Disk/fd/memory errnos count anywhere in the chain (an error
+    raised while HANDLING an ENOSPC is still an ENOSPC environment).
+    The network class counts only on the explicit ``__cause__`` chain:
+    a ``TimeoutError`` raised while an ECONNREFUSED sat in implicit
+    ``__context__`` is a timeout, not a network fault — classifying it
+    network would strip the timeout's own recovery handling.
+    """
+    from core.llm.client import (
+        _exception_chain,
+        is_auth_refusal,
+        is_budget_exceeded_error,
+    )
+
+    if is_budget_exceeded_error(exc):
+        return None
+    for e in _exception_chain(exc):
+        if isinstance(e, OSError):
+            eno = e.errno
+            if eno in _DISK_ERRNOS:
+                return CLASS_DISK
+            if eno in _FD_ERRNOS:
+                return CLASS_FDS
+            if eno in _MEMORY_ERRNOS:
+                return CLASS_MEMORY
+    for e in _cause_only_chain(exc):
+        if isinstance(e, socket.gaierror):
+            # DNS resolution failures carry EAI_* codes, not errnos.
+            return CLASS_NETWORK
+        if isinstance(e, OSError) and e.errno in _NETWORK_ERRNOS:
+            return CLASS_NETWORK
+    if isinstance(exc, Exception) and is_auth_refusal(exc):
+        return CLASS_AUTH
+    return None
+
+
+def _fault_dir_hint(
+    exc: BaseException, allowed_dirs: list[Path],
+) -> Path | None:
+    """The directory implicated by a disk-class failure, or ``None``.
+
+    The filename is taken ONLY from the disk-errno OSError itself —
+    never from arbitrary chain members, where an unrelated
+    target-tree path (e.g. a FileNotFoundError joining via implicit
+    ``__context__`` during ENOSPC handling) would redirect the probe.
+    The hint is realpath-resolved and accepted only when it lies
+    under one of *allowed_dirs* (the guard's own directories): the
+    filename can be attacker-influenced (a path inside the scanned
+    target, a symlink planted there, a relative name resolving into
+    the harness CWD), and the probe WRITES a canary in the hinted
+    directory — a probe write must never land outside guard-owned
+    space. A rejected hint on the same filesystem as a guard dir
+    loses nothing (the guard-dir probe covers that filesystem); a
+    rejected hint on a foreign filesystem is exactly the untrusted
+    case.
+    """
+    from core.llm.client import _exception_chain
+
+    for e in _exception_chain(exc):
+        if not isinstance(e, OSError) or e.errno not in _DISK_ERRNOS:
+            continue
+        filename = getattr(e, "filename", None)
+        if not filename:
+            return None
+        try:
+            parent = Path(os.path.realpath(str(filename))).parent
+        except (OSError, ValueError):
+            return None
+        if not parent.is_dir():
+            return None
+        for d in allowed_dirs:
+            try:
+                base = Path(os.path.realpath(str(d)))
+            except (OSError, ValueError):
+                continue
+            if parent == base or base in parent.parents:
+                return parent
+        return None
+    return None
+
+
+def note_dispatch_failure(
+    config: OrchestratorConfig, key: str, exc: BaseException,
+) -> None:
+    """Feed a terminal dispatch failure to the run's guard (no-op when
+    the run carries none). The single hook every error-outcome writer
+    calls so the breaker sees the same failures the journal does."""
+    guard = getattr(config, "environment_guard_state", None)
+    if guard is not None:
+        guard.note_dispatch_failure(key, exc)
 
 
 class EnvironmentPreflightError(RuntimeError):
@@ -258,6 +437,7 @@ class EnvironmentGuard:
         *,
         tmp_dir: Path | None = None,
         out_dir: Path | None = None,
+        breaker_enabled: bool = True,
         clock: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
         statvfs_fn: Callable[[str], Any] | None = None,
@@ -303,6 +483,17 @@ class EnvironmentGuard:
         self._lock = threading.Lock()
         self._concluded_reason: str | None = None
         self._last_watchdog_check = float("-inf")
+        # Circuit-breaker state. The window holds (function key,
+        # systemic class-or-None) for the last BREAKER_WINDOW terminal
+        # dispatch failures; heterogeneous entries dilute it by
+        # construction, so mixed failure causes never trip.
+        self._breaker_enabled = breaker_enabled
+        self._window: deque[tuple[str, str | None]] = deque(
+            maxlen=BREAKER_WINDOW,
+        )
+        self._tripped_class: str | None = None
+        self._trip_hint_dir: Path | None = None
+
     # ── Conclusion state ─────────────────────────────────────────────
 
     @property
@@ -330,12 +521,51 @@ class EnvironmentGuard:
     # ── Executor tick ────────────────────────────────────────────────
 
     def tick(self) -> None:
-        """Pre-dispatch gate: pause on resource pressure, conclude
-        when the pause exceeds its bounded wait. Cheap when healthy —
-        at most one statvfs sweep per ``WATCHDOG_CHECK_INTERVAL_S``."""
+        """Pre-dispatch gate: probe a tripped breaker, pause on
+        resource pressure, conclude when either exceeds its bounded
+        wait. Cheap when healthy — no probe, at most one statvfs
+        sweep per ``WATCHDOG_CHECK_INTERVAL_S``."""
+        if self.concluded:
+            return
+        self._breaker_gate()
         if self.concluded:
             return
         self._watchdog_gate()
+
+    # ── Systemic-fault circuit breaker ───────────────────────────────
+
+    def note_dispatch_failure(self, key: str, exc: BaseException) -> None:
+        """Record a terminal dispatch failure for *key* (a
+        ``file:function`` identity). Called from review worker
+        threads; trips the breaker when ``BREAKER_TRIP_COUNT`` of the
+        last ``BREAKER_WINDOW`` failures across DISTINCT functions
+        share one systemic class. The trip itself only sets state —
+        the pause/probe runs on the next dispatch tick."""
+        if not self._breaker_enabled:
+            return
+        cls = classify_systemic(exc)
+        with self._lock:
+            if self._concluded_reason is not None:
+                return
+            self._window.append((key, cls))
+            if cls is None or self._tripped_class is not None:
+                return
+            matching_keys = {
+                k for k, c in self._window if c == cls
+            }
+            if len(matching_keys) < BREAKER_TRIP_COUNT:
+                return
+            self._tripped_class = cls
+            self._trip_hint_dir = (
+                _fault_dir_hint(exc, self._dirs)
+                if cls == CLASS_DISK else None
+            )
+        logger.warning(
+            "circuit breaker: %d of the last %d dispatch failures "
+            "across distinct functions share systemic class %r — "
+            "pausing dispatch to probe the environment",
+            len(matching_keys), BREAKER_WINDOW, cls,
+        )
 
     def _wait_budget(self, bounded: float) -> float | None:
         """*bounded* clamped to the room left before the run deadline
@@ -348,6 +578,98 @@ class EnvironmentGuard:
         if room <= 0:
             return None
         return min(bounded, room)
+
+    def _breaker_gate(self) -> None:
+        with self._lock:
+            cls = self._tripped_class
+            hint = self._trip_hint_dir
+        if cls is None:
+            return
+        if cls in _NON_RECOVERABLE_CLASSES:
+            self._conclude(
+                f"systemic {cls} failures on the dispatch path (no "
+                f"cheap recovery probe exists for this class)",
+            )
+            return
+        max_wait = self._wait_budget(BREAKER_MAX_PROBE_WAIT_S)
+        if max_wait is None:
+            self._conclude(
+                f"systemic {cls} failures with no wall-budget room "
+                f"left to probe (run deadline reached)",
+            )
+            return
+        start = self._clock()
+        delay = BREAKER_PROBE_BACKOFF_INITIAL_S
+        while True:
+            if self._probe(cls, hint):
+                with self._lock:
+                    self._tripped_class = None
+                    self._trip_hint_dir = None
+                    self._window.clear()
+                logger.warning(
+                    "circuit breaker: %s probe succeeded — resuming "
+                    "dispatch (failure window reset)", cls,
+                )
+                return
+            if self._abort_check():
+                return
+            if self._clock() - start >= max_wait:
+                self._conclude(
+                    f"systemic {cls} failures persisted through "
+                    f"{self._clock() - start:.0f}s of probing"
+                    + ("" if max_wait >= BREAKER_MAX_PROBE_WAIT_S
+                       else " (clamped to the run deadline)"),
+                )
+                return
+            self._sleep(delay)
+            delay = min(delay * 2, BREAKER_PROBE_BACKOFF_MAX_S)
+
+    def _probe(self, cls: str, hint: Path | None) -> bool:
+        """Direct, cheap health probe for a recoverable class. Never
+        an LLM call; never raises."""
+        try:
+            if cls == CLASS_DISK:
+                return self._disk_probe(hint)
+            if cls == CLASS_FDS:
+                fd = os.open(os.devnull, os.O_RDONLY)
+                os.close(fd)
+                return True
+            if cls == CLASS_MEMORY:
+                buf = bytearray(_MEMORY_PROBE_BYTES)
+                del buf
+                return True
+        except (OSError, MemoryError):
+            return False
+        return False
+
+    def _disk_probe(self, hint: Path | None) -> bool:
+        """Disk recovery = the guard's OWN dirs (tmp, run out) are
+        healthy. The (containment-checked) hint dir is probed too but
+        is advisory only: a hint that stays unwritable while tmp and
+        out are healthy is a read-only-by-design location (an
+        RO-mounted checkout hitting EROFS, a swept-away staging
+        subdir) — gating recovery on it would hold the pause to its
+        full bound and conclude a run whose environment is fine."""
+        for d in self._dirs:
+            try:
+                if not self._disk_ok(d):
+                    return False
+            except OSError:
+                return False
+        if hint is not None and hint not in self._dirs:
+            try:
+                hint_ok = self._disk_ok(hint)
+            except OSError:
+                hint_ok = False
+            if not hint_ok:
+                logger.warning(
+                    "circuit breaker: implicated dir %s is still "
+                    "unwritable but %s are healthy — treating the "
+                    "environment as recovered (read-only-by-design "
+                    "location)", hint,
+                    ", ".join(str(d) for d in self._dirs),
+                )
+        return True
 
     def _resume_floors(self, d: Path) -> tuple[int, int]:
         """(byte, inode) resume floors effective for *d*'s filesystem.
@@ -377,6 +699,30 @@ class EnvironmentGuard:
                 if total_inodes is not None:
                     inode_floor = min(inode_floor, total_inodes // 2)
         return byte_floor, inode_floor
+
+    def _disk_ok(self, d: Path) -> bool:
+        """Resume-floor headroom AND a canary write in *d*: statvfs
+        alone misses quota exhaustion (EDQUOT) and a filesystem
+        remounted read-only (EROFS) — only an actual write proves the
+        failing operation works again. Raises OSError when the canary
+        cannot be written (caller decides whether that dir gates
+        recovery)."""
+        if self._statvfs is not None:
+            measured = _free_space(self._statvfs, d)
+            if measured is not None:
+                free_bytes, free_inodes, _tb, _ti = measured
+                byte_floor, inode_floor = self._resume_floors(d)
+                if free_bytes < byte_floor:
+                    return False
+                if free_inodes is not None and free_inodes < inode_floor:
+                    return False
+        fd, path = tempfile.mkstemp(prefix=".env-probe-", dir=str(d))
+        try:
+            os.write(fd, b"\0" * 4096)
+        finally:
+            os.close(fd)
+            os.unlink(path)
+        return True
 
     # ── Resource watchdog ────────────────────────────────────────────
 
