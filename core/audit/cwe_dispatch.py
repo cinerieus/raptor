@@ -12,7 +12,11 @@ Consumed by:
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
     # Memory / bounds
@@ -871,6 +875,44 @@ def cocci_rules_for_cwe(cwe: str) -> list[str]:
     if isinstance(val, (list, tuple)):
         return [v for v in val if v]
     return [val]
+
+
+#: Where the table's bare .cocci filenames live on disk.
+_COCCI_RULES_DIR = (
+    Path(__file__).resolve().parents[2] / "engine" / "coccinelle" / "rules"
+)
+
+# Rule names already warned about (missing on disk) — one loud line
+# per name per process, not one per dispatch.
+_MISSING_COCCI_WARNED: set[str] = set()
+
+
+def resolve_cocci_rules_for_cwe(cwe: str) -> list[str]:
+    """Absolute on-disk rule paths for a CWE's Coccinelle rules.
+
+    The dispatch table stores bare filenames; the runner resolves a
+    bare name against the process CWD, where it never exists, so
+    every table-seeded dispatch errored before spatch even spawned.
+    Resolve against the engine rules directory here and DROP names
+    whose file is missing (loud once per name) — a dead entry in the
+    chain both errors on every dispatch and, via the chain's
+    seen-types dedup, shadows the working keyword-mapped leg.
+    """
+    resolved: list[str] = []
+    for name in cocci_rules_for_cwe(cwe):
+        path = Path(name)
+        if not path.is_absolute():
+            path = _COCCI_RULES_DIR / name
+        if path.is_file():
+            resolved.append(str(path))
+        elif name not in _MISSING_COCCI_WARNED:
+            _MISSING_COCCI_WARNED.add(name)
+            logger.warning(
+                "cwe dispatch: coccinelle rule %s (for %s) not found "
+                "under %s — dropped from the tool chain",
+                name, cwe, _COCCI_RULES_DIR,
+            )
+    return resolved
 
 
 def codeql_query_for_cwe(cwe: str) -> str | None:

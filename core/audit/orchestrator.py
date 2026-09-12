@@ -16407,9 +16407,9 @@ def _cwe_fallback_chain(
     chain: list[dict[str, Any]] = []
     try:
         from .cwe_dispatch import (
-            cocci_rules_for_cwe,
             codeql_query_for_cwe,
             joern_applicable,
+            resolve_cocci_rules_for_cwe,
             sinks_for_cwe,
             smt_verb_for_cwe,
         )
@@ -16500,7 +16500,15 @@ def _cwe_fallback_chain(
     if smt_verb:
         chain.append({"type": "smt", "config": {"verb": smt_verb}})
 
-    chain.extend({"type": "coccinelle", "config": {"rule": cocci_rule}} for cocci_rule in cocci_rules_for_cwe(cwe))
+    # resolve_cocci_rules_for_cwe returns absolute on-disk paths and
+    # drops missing rules: a bare table filename resolves against the
+    # process CWD at spatch time (deterministic dispatch error), and a
+    # dead entry here shadows the keyword-mapped coccinelle leg via
+    # the chain's seen-types dedup.
+    chain.extend(
+        {"type": "coccinelle", "config": {"rule": cocci_rule}}
+        for cocci_rule in resolve_cocci_rules_for_cwe(cwe)
+    )
 
     codeql_query = codeql_query_for_cwe(cwe)
     if codeql_query and _codeql_query_file(codeql_query):
