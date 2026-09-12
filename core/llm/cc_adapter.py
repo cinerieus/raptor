@@ -6,12 +6,15 @@ The subprocess counterpart to the SDK providers in ``core.llm.providers``.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import stat
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -673,6 +676,160 @@ def build_cc_command(
     return cmd
 
 
+# ── Content-addressed system-prompt file cache ────────────────────────
+# A dispatch's system prompt is byte-stable per mode/call class by
+# design (that byte stability is what makes the CLI's prefix caching
+# effective), so staging a fresh per-call tempfile wrote thousands of
+# identical files to TMPDIR over a long run — and a full tempdir then
+# fails every subsequent dispatch identically. Instead: one private
+# 0700 directory per process (``mkdtemp``), holding one file per
+# distinct prompt CONTENT, named by content hash, written once and
+# reused by every later call with the same content, removed at
+# process exit. Bounded without eviction machinery — the set of
+# distinct prompt contents a process produces is the set of its
+# dispatch modes, a handful per run.
+#
+# Concurrency contract:
+# * threads — creation is serialised by ``_sysprompt_lock``.
+# * independent processes sharing TMPDIR — each process writes only
+#   inside its own unpredictably-named 0700 mkdtemp directory, so
+#   processes can never share, pre-create (squat), or unlink each
+#   other's files. A flat predictable name in a shared TMPDIR would
+#   let any local user pre-create a directory at the final path,
+#   failing every subsequent ``os.replace`` with EISDIR for the whole
+#   run. The content hash keeps the per-process reuse exact.
+# * forked children — every path is creator-pid-guarded: a child
+#   inheriting the parent's cache state neither honors an inherited
+#   cache HIT (the file belongs to the parent, whose exit could
+#   unlink it under the child mid-dispatch) nor writes into the
+#   parent's directory — it gets a fresh directory and fresh files on
+#   first use — and the atexit cleanup no-ops in the child (a child
+#   exiting normally must not unlink files the parent's in-flight
+#   dispatches still read).
+# * readers — the file appears at its final name only via
+#   ``os.replace`` of a fully written 0600 temp in the same
+#   directory (never opened for writing in place, never truncated),
+#   so no reader can observe partial content.
+# * external sweepers — a cache hit refreshes the file's mtime, so an
+#   age-based TMPDIR sweeper (tmpwatch) sees a file in active use,
+#   not an hours-old leftover; a swept file is recreated on next use.
+_sysprompt_cache: dict[str, Path] = {}
+_sysprompt_lock = threading.Lock()
+_sysprompt_dir: Path | None = None
+_sysprompt_owner_pid: int | None = None
+
+
+def _sysprompt_cache_dir() -> Path:
+    """The calling process's private 0700 cache directory, created on
+    first use (and re-created after a fork or an external sweep).
+    Caller holds ``_sysprompt_lock``."""
+    global _sysprompt_dir, _sysprompt_owner_pid
+    pid = os.getpid()
+    if (
+        _sysprompt_dir is None
+        or _sysprompt_owner_pid != pid
+        or not _sysprompt_dir.is_dir()
+    ):
+        _sysprompt_cache.clear()
+        d = Path(tempfile.mkdtemp(prefix="cc-sysprompt-"))
+        # 0700 is guaranteed by the mkdtemp contract; assert anyway —
+        # same fail-loud posture as the 0600 file assert below.
+        mode = stat.S_IMODE(d.stat().st_mode)
+        if mode != 0o700:
+            msg = f"mkdtemp returned mode {mode:04o}, expected 0700"
+            raise AssertionError(msg)
+        _sysprompt_dir = d
+        _sysprompt_owner_pid = pid
+    return _sysprompt_dir
+
+
+def _cleanup_sysprompt_cache() -> None:
+    """Remove this process's cached system-prompt files and their
+    directory (atexit). Creator-pid-guarded: in a forked child the
+    inherited state belongs to the parent — removing it would yank
+    files out from under the parent's live dispatches."""
+    global _sysprompt_dir, _sysprompt_owner_pid
+    with _sysprompt_lock:
+        if (
+            _sysprompt_owner_pid is not None
+            and _sysprompt_owner_pid != os.getpid()
+        ):
+            return
+        paths = list(_sysprompt_cache.values())
+        _sysprompt_cache.clear()
+        cache_dir = _sysprompt_dir
+        _sysprompt_dir = None
+        _sysprompt_owner_pid = None
+    for path in paths:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    if cache_dir is not None:
+        with contextlib.suppress(OSError):
+            os.rmdir(cache_dir)
+
+
+atexit.register(_cleanup_sysprompt_cache)
+
+
+def _sysprompt_file(content: str) -> Path:
+    """Return the process-lifetime 0600 file holding *content*.
+
+    Creates the file on first use for this content (atomic
+    write-temp-then-rename inside the process-private directory);
+    later calls with the same content reuse the same path. Recreates
+    the file if an external scratch sweeper (tmpwatch, session-scratch
+    cleanup) removed it mid-run.
+    """
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:24]
+    with _sysprompt_lock:
+        cached = _sysprompt_cache.get(digest)
+        # The hit is honored only for the creating process: a forked
+        # child inheriting a warm cache must not lean on the parent's
+        # file (the parent's exit unlinks it, possibly mid-dispatch) —
+        # it falls through to the miss path, where _sysprompt_cache_dir
+        # resets the inherited state and gives it a fresh directory.
+        if (
+            cached is not None
+            and _sysprompt_owner_pid == os.getpid()
+            and cached.exists()
+        ):
+            # Refresh mtime: an age-based TMPDIR sweeper must see a
+            # file in active use, not an hours-old candidate. Best
+            # effort — a lost race with the sweeper is recreated on
+            # the next call.
+            with contextlib.suppress(OSError):
+                os.utime(cached)
+            return cached
+        cache_dir = _sysprompt_cache_dir()
+        final = cache_dir / f"{digest}.txt"
+        fd, raw_path = tempfile.mkstemp(
+            prefix=".part-", suffix=".txt", dir=str(cache_dir),
+        )
+        try:
+            try:
+                # 0600 is guaranteed by the mkstemp contract; assert
+                # anyway — the prompt can embed operator context and
+                # target excerpts, so a permissive-umask regression in
+                # a future tempfile implementation must fail loud, not
+                # leak. os.replace preserves the temp file's mode.
+                mode = stat.S_IMODE(os.fstat(fd).st_mode)
+                if mode != 0o600:
+                    msg = f"mkstemp returned mode {mode:04o}, expected 0600"
+                    raise AssertionError(msg)
+            except BaseException:
+                os.close(fd)
+                raise
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(raw_path, final)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(raw_path)
+            raise
+        _sysprompt_cache[digest] = final
+        return final
+
+
 @contextlib.contextmanager
 def system_prompt_file_for(config: CCDispatchConfig) -> Iterator[Path | None]:
     """Stage ``config.system_prompt`` in a private tempfile for the
@@ -681,46 +838,28 @@ def system_prompt_file_for(config: CCDispatchConfig) -> Iterator[Path | None]:
     Yields ``None`` when the config carries no system prompt (empty or
     unset — mirrors build_cc_command's emit condition, so the pair
     composes as ``build_cc_command(cfg, system_prompt_file=path)``
-    unconditionally). Otherwise yields the path of a 0600 tempfile
-    (``cc-sysprompt-*.txt`` in TMPDIR) holding the prompt utf-8; the
-    file is unlinked when the block exits, so keep the child's spawn
-    AND wait inside the ``with`` block.
+    unconditionally). Otherwise yields the path of a 0600 file
+    (``<hash>.txt`` inside this process's private 0700
+    ``cc-sysprompt-*`` directory in TMPDIR) holding the prompt utf-8.
+    The file is content-addressed and process-cached (see
+    ``_sysprompt_file``): it is NOT unlinked when the block exits —
+    later dispatches with the same prompt reuse it, and atexit removes
+    the whole cache when the process ends.
 
     Sandboxed callers (Landlock restrict_reads / mount-ns spawns) must
     add the yielded path to the run's ``readable_paths`` — TMPDIR is
     not readable inside the sandbox by default.
 
-    Residual: a SIGKILL between spawn and cleanup leaves the 0600 file
-    behind in TMPDIR. It is same-user-readable only (never in argv, so
-    never in /proc/<pid>/cmdline), and pytest runs are contained by the
-    session scratch redirect.
+    Residual: a SIGKILL before the atexit cleanup leaves the private
+    0700 directory behind in TMPDIR — at most one 0600 file per
+    distinct prompt content, owner-readable only (never in argv, so
+    never in /proc/<pid>/cmdline), and pytest runs are contained by
+    the session scratch redirect.
     """
     if config.system_prompt is None or not config.system_prompt.strip():
         yield None
         return
-    fd, raw_path = tempfile.mkstemp(prefix="cc-sysprompt-", suffix=".txt")
-    path = Path(raw_path)
-    try:
-        try:
-            # 0600 is guaranteed by the mkstemp contract; assert
-            # anyway — the prompt can embed operator context and
-            # target excerpts, so a permissive-umask regression in a
-            # future tempfile implementation must fail loud, not leak.
-            mode = stat.S_IMODE(os.fstat(fd).st_mode)
-            if mode != 0o600:
-                msg = f"mkstemp returned mode {mode:04o}, expected 0600"
-                raise AssertionError(msg)
-        except BaseException:
-            os.close(fd)
-            raise
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(config.system_prompt)
-        yield path
-    finally:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+    yield _sysprompt_file(config.system_prompt)
 
 
 def strip_json_fences(text: str) -> str:

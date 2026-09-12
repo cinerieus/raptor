@@ -283,8 +283,10 @@ def test_generate_with_system_prompt_uses_system_flag(monkeypatch) -> None:
     # argv hygiene: the prompt text never appears in argv.
     assert "--system-prompt" not in cmd
     assert "you are helpful" not in " ".join(cmd)
-    # ...and the tempfile does not outlive the call.
-    assert not Path(cmd[cmd.index("--system-prompt-file") + 1]).exists()
+    # ...and the tempfile is the content-addressed per-process cache
+    # entry: it survives the call for reuse by the next dispatch with
+    # the same prompt (atexit removes the cache at process exit).
+    assert Path(cmd[cmd.index("--system-prompt-file") + 1]).exists()
 
 
 def test_generate_extracts_cost_and_tokens(monkeypatch) -> None:

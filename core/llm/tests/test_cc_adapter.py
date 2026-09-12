@@ -1,10 +1,13 @@
 """Tests for core.llm.cc_adapter — CC subprocess transport utilities."""
 
+import contextlib
 import json
 import os
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -137,36 +140,204 @@ class TestSystemPromptArgvHygiene:
 
 
 class TestSystemPromptFileFor:
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        # The cache is process-global; isolate each test and remove
+        # any files this test created.
+        from core.llm import cc_adapter
+        cc_adapter._cleanup_sysprompt_cache()
+        yield
+        cc_adapter._cleanup_sysprompt_cache()
+
     def test_yields_none_when_no_prompt(self):
         for sp in (None, "", "   \n"):
             config = CCDispatchConfig(claude_bin="claude", system_prompt=sp)
             with system_prompt_file_for(config) as spf:
                 assert spf is None
 
-    def test_writes_0600_exact_content_and_unlinks(self):
+    def test_writes_0600_exact_content(self):
         prompt = "line one\nnon-ascii: café → sink\n"
         config = CCDispatchConfig(claude_bin="claude", system_prompt=prompt)
         with system_prompt_file_for(config) as spf:
             assert isinstance(spf, Path)
-            assert spf.name.startswith("cc-sysprompt-")
+            assert spf.parent.name.startswith("cc-sysprompt-")
             assert spf.name.endswith(".txt")
             assert stat.S_IMODE(spf.stat().st_mode) == 0o600
             assert spf.read_text(encoding="utf-8") == prompt
-        assert not spf.exists()
 
-    def test_unlinked_on_exception(self):
+    def test_same_content_reuses_one_file(self):
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as first:
+            pass
+        # The file survives the block: it is a per-process cache
+        # entry, reused by the next dispatch with the same prompt.
+        assert first.exists()
+        with system_prompt_file_for(config) as second:
+            assert second == first
+        other = CCDispatchConfig(claude_bin="claude", system_prompt="sp2")
+        with system_prompt_file_for(other) as third:
+            assert third != first
+            assert third.exists()
+        assert first.exists()
+
+    def test_survives_exception_for_reuse(self):
         config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
         with pytest.raises(RuntimeError, match="boom"):
             with system_prompt_file_for(config) as spf:
                 raise RuntimeError("boom")
-        assert not spf.exists()
+        # A failed dispatch does not evict the cache entry — the
+        # prompt content is still valid for the next call.
+        assert spf.exists()
 
-    def test_tolerates_early_unlink(self):
+    def test_recreated_after_external_removal(self):
         # A cleanup race (session-scratch sweeper, operator tmpwatch)
-        # must not turn CM exit into an exception.
+        # must neither raise nor hand the next child a dangling path.
         config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
         with system_prompt_file_for(config) as spf:
             os.unlink(spf)
+        with system_prompt_file_for(config) as again:
+            assert again.exists()
+            assert again.read_text(encoding="utf-8") == "sp"
+
+    def test_concurrent_writers_one_file(self):
+        import threading
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="race")
+        paths: list[Path] = []
+        errors: list[BaseException] = []
+
+        def _use() -> None:
+            try:
+                with system_prompt_file_for(config) as spf:
+                    paths.append(spf)
+                    assert spf.read_text(encoding="utf-8") == "race"
+            except BaseException as exc:  # noqa: BLE001 — collected for the assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_use) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors
+        assert len(set(paths)) == 1
+        assert paths[0].exists()
+
+    def test_cleanup_removes_cached_files(self):
+        from core.llm import cc_adapter
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        assert spf.exists()
+        cc_adapter._cleanup_sysprompt_cache()
+        assert not spf.exists()
+        assert not cc_adapter._sysprompt_cache
+
+    def test_files_live_in_private_0700_dir(self):
+        # One unpredictably-named 0700 mkdtemp dir per process: a
+        # sibling user sharing TMPDIR can neither pre-create (squat)
+        # the final path — which would fail every dispatch's
+        # os.replace with EISDIR — nor read or unlink the files.
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            parent = spf.parent
+            assert parent != Path(tempfile.gettempdir())
+            assert parent.name.startswith("cc-sysprompt-")
+            assert stat.S_IMODE(parent.stat().st_mode) == 0o700
+
+    def test_forked_child_exit_never_unlinks_parent_files(self):
+        # A forked child inherits the cache state; its (atexit)
+        # cleanup must no-op — the files belong to the parent, whose
+        # in-flight dispatches still read them.
+        from core.llm import cc_adapter
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        assert spf.exists()
+        real_owner = cc_adapter._sysprompt_owner_pid
+        try:
+            cc_adapter._sysprompt_owner_pid = real_owner + 1  # "child"
+            cc_adapter._cleanup_sysprompt_cache()
+            assert spf.exists()
+            assert cc_adapter._sysprompt_cache  # state untouched
+        finally:
+            cc_adapter._sysprompt_owner_pid = real_owner
+
+    def test_forked_child_gets_fresh_dir_never_parents(self):
+        # A child CREATING a file must get its own directory — writing
+        # into the parent's would couple their lifetimes.
+        from core.llm import cc_adapter
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as parent_file:
+            pass
+        parent_dir = parent_file.parent
+        real_owner = cc_adapter._sysprompt_owner_pid
+        try:
+            cc_adapter._sysprompt_owner_pid = real_owner + 1  # "child"
+            other = CCDispatchConfig(claude_bin="claude", system_prompt="sp2")
+            with system_prompt_file_for(other) as child_file:
+                assert child_file.parent != parent_dir
+            # The parent's file was not disturbed.
+            assert parent_file.exists()
+        finally:
+            # Adopt the child's dir for the fixture's cleanup, then
+            # remove the parent's leftover explicitly.
+            cc_adapter._sysprompt_owner_pid = os.getpid()
+            with contextlib.suppress(OSError):
+                os.unlink(parent_file)
+                os.rmdir(parent_dir)
+
+    def test_forked_child_cache_hit_is_refused(self):
+        # Even a WARM inherited cache entry (same prompt content) must
+        # not be handed to a forked child: the file belongs to the
+        # parent, whose exit unlinks it — possibly mid-dispatch in a
+        # fork-without-exec child.
+        from core.llm import cc_adapter
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as parent_file:
+            pass
+        parent_dir = parent_file.parent
+        real_owner = cc_adapter._sysprompt_owner_pid
+        try:
+            cc_adapter._sysprompt_owner_pid = real_owner + 1  # "child"
+            with system_prompt_file_for(config) as child_file:
+                assert child_file != parent_file
+                assert child_file.parent != parent_dir
+                assert child_file.read_text(encoding="utf-8") == "sp"
+            assert parent_file.exists()  # parent's file untouched
+        finally:
+            cc_adapter._sysprompt_owner_pid = os.getpid()
+            with contextlib.suppress(OSError):
+                os.unlink(parent_file)
+                os.rmdir(parent_dir)
+
+    def test_cache_hit_refreshes_mtime(self):
+        # Age-based TMPDIR sweepers (tmpwatch) must see a file in
+        # active use — an hours-old mtime on a hot cache entry got the
+        # file deleted mid-run.
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        old = time.time() - 7200
+        os.utime(spf, (old, old))
+        with system_prompt_file_for(config) as again:
+            assert again == spf
+            assert again.stat().st_mtime > old + 3600
+
+    def test_cleanup_removes_the_private_dir(self):
+        from core.llm import cc_adapter
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        cache_dir = spf.parent
+        cc_adapter._cleanup_sysprompt_cache()
+        assert not spf.exists()
+        assert not cache_dir.exists()
 
 
 class TestStripJsonFences:
