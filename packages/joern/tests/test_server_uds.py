@@ -86,6 +86,24 @@ def stub_uds():
             srv.server_close()
 
 
+@pytest.fixture
+def short_socket_dir():
+    """A tempdir whose paths fit AF_UNIX's sun_path limit.
+
+    pytest's ``tmp_path`` nests deeply under TMPDIR
+    (pytest-of-<user>/pytest-N/<long-test-name>N/...), and on hosts
+    with a session-scoped TMPDIR the socket path exceeds the ~107-byte
+    limit — ``bind()`` errors before the behaviour under test runs.
+    ``tempfile.TemporaryDirectory`` (the stub fixture's own idiom)
+    stays shallow; when even that is too long the test skips instead
+    of erroring on the harness's environment.
+    """
+    with tempfile.TemporaryDirectory(prefix="raptor-uds-") as d:
+        if len(os.path.join(d, "stall.sock")) > 100:
+            pytest.skip("TMPDIR too long for an AF_UNIX socket path")
+        yield d
+
+
 def _uds_server(path: str) -> JoernServer:
     srv = JoernServer()
     srv._port = 9999
@@ -139,17 +157,21 @@ class TestUdsClientShim:
         assert srv.health_check() is True
         assert seen[-1]["path"] == "/query-sync"
 
-    def test_missing_socket_classified_as_connection_failure(self, tmp_path):
-        srv = _uds_server(str(tmp_path / "gone.sock"))
+    def test_missing_socket_classified_as_connection_failure(
+        self, short_socket_dir,
+    ):
+        srv = _uds_server(os.path.join(short_socket_dir, "gone.sock"))
         assert srv._post_sync("1+1", timeout=5) is None
         assert srv._last_post_error.startswith("connection failed:")
 
-    def test_unresponsive_socket_classified_as_timeout(self, tmp_path):
+    def test_unresponsive_socket_classified_as_timeout(
+        self, short_socket_dir,
+    ):
         """query() keys its stuck-REPL restart on "timed out" — the
         socket tier must classify a stalled read the same way."""
         import socket as socket_mod
 
-        path = str(tmp_path / "stall.sock")
+        path = os.path.join(short_socket_dir, "stall.sock")
         listener = socket_mod.socket(socket_mod.AF_UNIX,
                                      socket_mod.SOCK_STREAM)
         listener.bind(path)
