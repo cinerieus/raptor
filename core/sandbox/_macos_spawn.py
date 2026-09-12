@@ -439,6 +439,20 @@ def run_sandboxed(cmd: list[str], *,
                   fake_home: bool = False,
                   exclude_tmp_baseline: bool = False,
                   strict_env: bool = False,
+                  # keep_trust_markers: mirror of the Linux pid1-shim
+                  # argv flag (context injects --keep-trust-markers on
+                  # that lane). The keep decision travels OUT-OF-BAND
+                  # as watcher-shim argv, mintable only by this spawn
+                  # layer — an env key would be smuggleable through any
+                  # caller-supplied env dict. Passed by the context
+                  # dispatch off keep_trust_markers_for_dispatch (the
+                  # run_untrusted_networked(keep_trust_markers=True)
+                  # skill-dispatch lane); without it the seatbelt shim
+                  # applied the FULL strip tuple and RAPTOR's own
+                  # dispatched children lost the trust markers and
+                  # session credential they need to drive libexec
+                  # helpers.
+                  keep_trust_markers: bool = False,
                   # persona: host-fingerprint sanitisation is Linux-only
                   # (bind-mount + UTS-ns + sched_setaffinity primitives).
                   # macOS lacks unprivileged equivalents; most host-
@@ -840,7 +854,13 @@ def run_sandboxed(cmd: list[str], *,
     _inner = ["/bin/sh", "-c", 'printf K >&3; exec 3>&-; exec "$@"',
               "raptor-seatbelt-rdy"] + list(cmd)
     _sandboxed = [SANDBOX_EXEC, "-p", profile, "--"] + _inner
-    sandbox_cmd = [_py, "-I", SEATBELT_SHIM] + _sandboxed
+    # --keep-trust-markers precedes the sandbox-exec argv; the shim
+    # parses it before anything else (see its main()).
+    sandbox_cmd = (
+        [_py, "-I", SEATBELT_SHIM]
+        + (["--keep-trust-markers"] if keep_trust_markers else [])
+        + _sandboxed
+    )
 
     # 5. Audit mode: start log streamer BEFORE the workload to capture
     #    kernel sandbox events. Stop after workload exits.

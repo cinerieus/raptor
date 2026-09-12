@@ -4505,6 +4505,17 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     exclude_tmp_baseline=exclude_tmp_baseline,
                     map_root=map_root,
                     start_new_session=_start_new_session,
+                    # Keep-trust decision, out-of-band (watcher-shim
+                    # argv) exactly like the Linux pid1-shim lane's
+                    # --keep-trust-markers injection: only this
+                    # dispatch may mint it, keyed on the sanctioned
+                    # kwarg. Pre-fix the seatbelt dispatch never sent
+                    # it, so run_untrusted_networked(
+                    # keep_trust_markers=True) — RAPTOR's own claude -p
+                    # skill-dispatch lane — delivered children on macOS
+                    # that could not pass the libexec trust gates or
+                    # resolve their session binding.
+                    keep_trust_markers=keep_trust_markers_for_dispatch,
                     # The public wrapper has already filtered the caller's
                     # environment above, before adding RAPTOR-owned HOME,
                     # proxy, and scratch overrides.  Reapplying strict_env in
