@@ -1489,10 +1489,6 @@
     "kind": "literal",
     "note": "proxy event-record field names (schema keys), not a name vocabulary"
   },
-  "core/sandbox/seatbelt.py::MACOS_STRICT_MACH_SERVICES": {
-    "count": 17,
-    "kind": "literal"
-  },
   "core/sandbox/seccomp.py::_AUDIT_EXTRA_TRACE_SYSCALLS": {
     "count": 27,
     "kind": "literal",

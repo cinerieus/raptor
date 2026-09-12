@@ -486,12 +486,19 @@ def test_seccomp_profile_none_omits_process_info_deny():
 
 
 def test_seccomp_profile_full_emits_process_info_deny():
-    """Linux's "full" seccomp blocks ptrace. Closest macOS analogue
-    is denying introspection of OTHER processes' pidinfo / pidfdinfo.
+    """Linux's "full" seccomp blocks ptrace; the macOS analogue denies
+    introspection of OTHER processes. The deny must cover the WHOLE
+    process-info* family: the earlier narrow pidinfo/pidfdinfo pair
+    left process-info-listpids open (proc_listallpids() enumerated
+    every host pid) and the narrow pidinfo deny itself proved
+    ineffective against proc_name() on current macOS (26.6.2).
     `(target others)` keeps self-introspection working."""
     p = seatbelt.build_profile(seccomp_profile="full")
-    assert "(deny process-info-pidinfo (target others))" in p
-    assert "(deny process-info-pidfdinfo (target others))" in p
+    assert "(deny process-info* (target others))" in p
+    # The narrow forms are subsumed — regressing back to them would
+    # silently reopen listpids enumeration.
+    assert "(deny process-info-pidinfo" not in p
+    assert "(deny process-info-pidfdinfo" not in p
 
 
 def test_seccomp_profile_full_emits_iokit_deny():
@@ -522,10 +529,10 @@ def test_debug_profile_omits_iokit_deny():
 
 
 def test_strict_profile_emits_macos_strict_extras():
-    """profile_name='strict' layers the probe-validated extras: scoped
-    signal deny, nvram deny, and the curated mach-lookup allowlist.
+    """profile_name='strict' carries the scoped signal deny, nvram
+    deny, and the mach-lookup allowlist (now baseline for full too).
     All three passed the 2026-08-15 toolchain battery (mach even as a
-    blanket deny — the allowlist is deliberate headroom)."""
+    blanket deny)."""
     p = seatbelt.build_profile(seccomp_profile="full",
                                profile_name="strict")
     assert "(deny signal (target others))" in p
@@ -535,13 +542,159 @@ def test_strict_profile_emits_macos_strict_extras():
         assert svc in p
 
 
-def test_full_profile_omits_strict_extras():
-    """full stays the compatible default — no strict extras."""
+def test_full_profile_carries_hardening_baseline():
+    """The historical strict extras (signal / nvram / mach-lookup)
+    are BASELINE for the full profile now: with mach-lookup open, a
+    sandboxed child could have LaunchServices execute a helper
+    unsandboxed (full escape, confirmed reachable on current macOS),
+    and signal/nvram denies were battery-validated free. full must
+    never regress to the permissive pre-hardening shape."""
     p = seatbelt.build_profile(seccomp_profile="full",
                                profile_name="full")
-    assert "mach-lookup" not in p
-    assert "nvram" not in p
-    assert "(deny signal" not in p
+    assert "(deny signal (target others))" in p
+    assert "(deny nvram*)" in p
+    assert "(deny mach-lookup (require-not (require-any" in p
+
+
+def test_strict_profile_equals_full_profile():
+    """strict is the fail-closed profile and must never be WEAKER
+    than full; with the hardening baseline in full, the two are
+    identical at the SBPL layer. Byte-equality also proves the
+    strict branch does not duplicate baseline clauses."""
+    kwargs = dict(target="/t", output="/o", block_network=True,
+                  seccomp_profile="full")
+    full = seatbelt.build_profile(profile_name="full", **kwargs)
+    strict = seatbelt.build_profile(profile_name="strict", **kwargs)
+    assert full == strict
+
+
+def test_strict_mach_services_is_the_base_list():
+    """The strict allowlist must be the same lookup-only base list —
+    an earlier wider 'headroom' list retained launchservicesd /
+    coreservicesd / SecurityServer / cfprefsd, i.e. the escape and
+    persistence channels survived the strictest profile."""
+    assert (seatbelt.MACOS_STRICT_MACH_SERVICES
+            == seatbelt.MACOS_BASE_MACH_SERVICES)
+
+
+def test_mach_allowlist_excludes_capability_daemons():
+    """Pin the dropped services: each is a capability channel out of
+    the sandbox (unsandboxed proxy execution, keychain, prefs
+    persistence, fs monitoring, cross-sandbox signalling) — none may
+    reappear in ANY emitted mach allowlist."""
+    p = seatbelt.build_profile(seccomp_profile="full")
+    for banned in (
+        "com.apple.coreservices.launchservicesd",
+        "com.apple.CoreServices.coreservicesd",
+        "com.apple.SecurityServer",
+        "com.apple.securityd.xpc",
+        "com.apple.trustd",
+        "com.apple.cfprefsd.daemon",
+        "com.apple.cfprefsd.agent",
+        "com.apple.FSEvents",
+        "com.apple.system.notification_center",
+    ):
+        assert banned not in p, banned
+        assert banned not in seatbelt.MACOS_BASE_MACH_SERVICES
+    # The lookup-only infrastructure services survive.
+    for kept in seatbelt.MACOS_BASE_MACH_SERVICES:
+        assert f'(global-name "{kept}")' in p
+
+
+def test_full_profile_ipc_shm_denies():
+    """POSIX shm is not mediated by file-write* — shm_open of another
+    same-UID process's segment succeeded under every write-isolated
+    shape on current macOS. This is the /dev/shm-equivalent surface
+    the Linux tier closes via mount-ns. Only the libSystem cfprefs
+    read fast-path stays open."""
+    p = seatbelt.build_profile(seccomp_profile="full")
+    assert ('(deny ipc-posix-shm-read* (require-not '
+            '(ipc-posix-name-prefix "apple.cfprefs.")))') in p
+    assert "(deny ipc-posix-shm-write*)" in p
+    assert "(deny ipc-sysv*)" in p
+
+
+def test_full_profile_daemon_proxy_denies():
+    """Belt-and-braces op-level denies over the mach allowlist drops:
+    distributed notifications (host-wide signalling / covert channel),
+    AppleEvents (automation of other apps), user-preference-write
+    (`defaults write` persistence outside the write scope via the
+    cfprefsd proxy)."""
+    p = seatbelt.build_profile(seccomp_profile="full")
+    assert "(deny distributed-notification-post)" in p
+    assert "(deny appleevent-send)" in p
+    assert "(deny user-preference-write)" in p
+
+
+def test_hardening_absent_from_permissive_profiles():
+    """The hardening set engages ONLY for seccomp_profile='full'
+    (which full/strict/target_run all map to). debug keeps debugger
+    primitives; none/network-only stay Linux-parity permissive."""
+    for kwargs in (
+        {},
+        {"seccomp_profile": "debug"},
+        {"seccomp_profile": "none"},
+        {"seccomp_profile": "", "block_network": True},
+    ):
+        p = seatbelt.build_profile(**kwargs)
+        for fragment in (
+            "process-info", "iokit-open", "(deny signal", "nvram",
+            "mach-lookup", "ipc-posix-shm", "ipc-sysv",
+            "distributed-notification-post", "appleevent-send",
+            "user-preference-write",
+        ):
+            assert fragment not in p, (kwargs, fragment)
+
+
+def test_hardening_audit_duals_report_every_denied_family():
+    """Audit mode observes instead of blocking: every family the
+    enforcement branch denies must appear as (allow X (with report)),
+    and no hardening deny may survive into the audit profile."""
+    p = seatbelt.build_profile(seccomp_profile="full", audit_mode=True,
+                               output="/tmp/x")
+    for family in (
+        "process-info*", "iokit-open", "signal", "nvram*",
+        "mach-lookup", "ipc-posix-shm*", "ipc-sysv*",
+        "distributed-notification-post", "appleevent-send",
+        "user-preference-write",
+    ):
+        assert f"(allow {family} (with report))" in p, family
+    for fragment in (
+        "(deny process-info", "(deny iokit-open", "(deny signal",
+        "(deny nvram", "(deny mach-lookup",
+        "(deny ipc-", "(deny distributed-notification-post",
+        "(deny appleevent-send", "(deny user-preference-write",
+    ):
+        assert fragment not in p, fragment
+
+
+def test_untrusted_default_shape_carries_full_hardening():
+    """The floor shape (run_untrusted's darwin kwargs) must carry the
+    complete hardening set alongside its read/write/network denies —
+    the untrusted contract ('credential exfil blocked') depends on
+    the mach/sysctl/shm/signal denies, not just the fs clauses."""
+    p = seatbelt.build_profile(
+        target="/t", output="/o", block_network=True,
+        restrict_reads=True, readable_paths=["/usr"],
+        writable_paths=[], fake_home=True, exclude_tmp_baseline=True,
+        seccomp_profile="full", profile_name="full",
+    )
+    for clause in (
+        "(deny process-info* (target others))",
+        "(deny iokit-open)",
+        "(deny signal (target others))",
+        "(deny nvram*)",
+        "(deny mach-lookup (require-not (require-any",
+        "(deny ipc-posix-shm-write*)",
+        "(deny ipc-sysv*)",
+        "(deny distributed-notification-post)",
+        "(deny appleevent-send)",
+        "(deny user-preference-write)",
+        "(deny network*)",
+        "(deny file-write*",
+        "(deny file-read-data",
+    ):
+        assert clause in p, clause
 
 
 def test_strict_extras_report_under_audit():
@@ -597,8 +750,8 @@ def test_seccomp_profile_full_distinct_from_debug():
     them, this test catches it."""
     full = seatbelt.build_profile(seccomp_profile="full")
     debug = seatbelt.build_profile(seccomp_profile="debug")
-    assert "(deny process-info-pidinfo" in full
-    assert "(deny process-info-pidinfo" not in debug
+    assert "(deny process-info* (target others))" in full
+    assert "(deny process-info*" not in debug
 
 
 # --- audit_verbose (Phase 2c) ------------------------------------------

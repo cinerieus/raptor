@@ -72,34 +72,61 @@ SANDBOX_KEXT_SENDER = (
     "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox"
 )
 
-# mach services the strict profile still permits. Curated from Apple's
-# open-source profile base; the 2026-08-15 probe battery (clang, make,
-# git, python, venv, tar) passed even under a BLANKET mach-lookup deny
-# — the only services those tools requested (analyticsd, logd,
-# diagnosticd, notification_center, opendirectoryd, dirhelper) are
-# telemetry/directory lookups they tolerate losing. The allowlist is
-# retained as headroom for richer tools (Security.framework consumers,
-# codesign-adjacent flows) rather than because the battery needed it;
-# grow it from `log stream` census evidence, never speculatively.
-MACOS_STRICT_MACH_SERVICES = (
+# mach services the hardened (full/strict) profiles still permit —
+# lookup-only infrastructure daemons. Curated from Apple's open-source
+# profile base; the 2026-08-15 probe battery (clang, make, git, python,
+# venv, tar) passed even under a BLANKET mach-lookup deny — the only
+# services those tools requested (analyticsd, logd, diagnosticd,
+# notification_center, opendirectoryd, dirhelper) are telemetry/
+# directory lookups they tolerate losing — so this allowlist is already
+# generous. Grow it from `log stream` census evidence, never
+# speculatively.
+#
+# Deliberately ABSENT (each is a live capability channel out of the
+# sandbox, confirmed reachable on current macOS, not a lookup
+# convenience — a sandboxed child that can reach the daemon gets the
+# daemon's capability):
+#   * com.apple.coreservices.launchservicesd /
+#     com.apple.CoreServices.coreservicesd — LaunchServices `open`
+#     asks launchd to execute a helper UNSANDBOXED: a full sandbox
+#     escape (the escapee has no profile, so the network/read/write
+#     denies are all void). Apple's own WebProcess profile denies
+#     launchservicesd explicitly.
+#   * com.apple.SecurityServer / com.apple.securityd.xpc /
+#     com.apple.trustd — keychain/securityd query channel; the
+#     toolchain battery passed without them.
+#   * com.apple.cfprefsd.daemon / com.apple.cfprefsd.agent —
+#     `defaults write` proxies persistent state through cfprefsd into
+#     ~/Library/Preferences, OUTSIDE the file-write scope.
+#   * com.apple.FSEvents — host-wide filesystem monitoring.
+#   * com.apple.system.notification_center — cross-sandbox signalling
+#     via distributed notifications.
+MACOS_BASE_MACH_SERVICES = (
     "com.apple.system.opendirectoryd.libinfo",
     "com.apple.system.opendirectoryd.membership",
-    "com.apple.system.notification_center",
+    "com.apple.system.DirectoryService.libinfo_v1",
     "com.apple.system.logger",
     "com.apple.logd",
     "com.apple.diagnosticd",
-    "com.apple.SecurityServer",
-    "com.apple.securityd.xpc",
-    "com.apple.trustd",
-    "com.apple.cfprefsd.daemon",
-    "com.apple.cfprefsd.agent",
-    "com.apple.FSEvents",
-    "com.apple.CoreServices.coreservicesd",
-    "com.apple.coreservices.launchservicesd",
     "com.apple.bsd.dirhelper",
-    "com.apple.system.DirectoryService.libinfo_v1",
     "com.apple.dyld.closured",
 )
+
+# The strict profile's mach allowlist is the SAME base list: strict is
+# the fail-closed profile and must never be weaker than full. (An
+# earlier revision kept a wider "headroom" list here that retained
+# launchservicesd/coreservicesd/SecurityServer/cfprefsd — i.e. the
+# escape and persistence channels above survived the strictest
+# profile.)
+MACOS_STRICT_MACH_SERVICES = MACOS_BASE_MACH_SERVICES
+
+# POSIX shm names the hardened profiles may still OPEN READ-ONLY:
+# libSystem's preference fast-path reads cfprefs shared memory
+# (WebKit precedent — Apple scopes WebProcess shm the same way).
+# Everything else — including another same-UID process's segments,
+# the /dev/shm-equivalent surface the Linux tier closes via
+# mount-ns — is denied.
+MACOS_POSIX_SHM_READ_PREFIX_ALLOWLIST = ("apple.cfprefs.",)
 
 
 def _realpath_or_none(path: str | None) -> str | None:
@@ -227,24 +254,34 @@ def build_profile(*,
         backends implement via the mount-ns shadow tmpfs.
       seccomp_profile: name of the requested Linux seccomp profile
         ("full"/"debug"/"network-only"/"none"/None). macOS has no
-        direct seccomp equivalent, but we approximate the closest
-        policy intent — "block introspection / capability escape
-        vectors that don't break common tools" — by adding a small
-        set of SBPL denies when the profile is anything other than
-        None or "none". The exact set is conservative (see Tier 1.4
-        rationale in module docstring): we deny process-info-pidinfo
-        (block looking up other processes' info) and
-        process-info-pidfdinfo (block looking up other processes'
-        FDs), since those are the closest analogues to Linux's
-        ptrace-deny under "full" seccomp. Other SBPL denies (mach-
-        lookup of specific services, iokit-open, etc.) are too
-        invasive to apply by default — a future "macos-strict"
-        profile could opt in.
-      profile_name: name of the requested sandbox profile. "strict"
-        (with seccomp_profile not None/"none") layers the macos-strict
-        extras: deny signal to other processes, deny nvram*, and a
-        mach-lookup allowlist (emitted as allow-with-report forms when
-        audit_mode=True). Other values add nothing.
+        direct seccomp equivalent, but "full" (which the full, strict
+        and target_run sandbox profiles all map to) engages the SBPL
+        hardening set — the macOS expression of the same policy
+        intent, "block introspection / IPC / capability-escape
+        vectors that don't break common tools":
+          * (deny process-info* (target others))
+          * (deny iokit-open)
+          * (deny signal (target others))
+          * (deny nvram*)
+          * mach-lookup allowlist-deny (MACOS_BASE_MACH_SERVICES)
+          * POSIX-shm read/write + SysV IPC denies
+          * (deny distributed-notification-post)
+          * (deny appleevent-send)
+          * (deny user-preference-write)
+        Every deny is either toolchain-battery-validated
+        (2026-08-15: clang, make, git, python, venv, tar) or an
+        allowlist-deny whose miss surfaces the missing name in the
+        kernel's violation log (see the allowlist constants'
+        commentary). "debug" stays permissive by intent (lldb /
+        sample / dtrace need the introspection surface); "none"/None
+        add nothing.
+      profile_name: name of the requested sandbox profile. The
+        hardening above made "strict" and "full" identical at the
+        SBPL layer (strict historically layered the signal / nvram /
+        mach-lookup denies the old full profile left out; they are
+        baseline now). "strict" still layers those extras for
+        non-"full" seccomp combinations, preserving its historical
+        floor. Other values add nothing.
     """
     parts: list = []
     parts.append("(version 1)")
@@ -468,9 +505,27 @@ def build_profile(*,
             parts.append("(allow file-read* (with report))")
 
     # --- "Seccomp-equivalent" hardening ---
-    # Conservative defaults — stricter sets land under a future
-    # explicit "macos-strict" profile rather than the implicit "any
-    # non-None seccomp_profile means harden". See docstring.
+    # Engaged for seccomp_profile="full" only (the full, strict and
+    # target_run sandbox profiles all map to it) — never for the
+    # implicit "any non-None seccomp_profile". See docstring.
+    #
+    # Accepted residuals, documented rather than denied:
+    #   * iokit-get-properties stays open — IORegistry reads leak
+    #     hardware serial / platform UUID (fingerprint-only; a
+    #     property-name allowlist is possible later if census
+    #     evidence supports one).
+    #   * file-read-metadata stays universally allowed under
+    #     restrict_reads — full host-tree readdir/stat enumeration
+    #     (denying it breaks dyld path-walks outright; a /Users-
+    #     scoped metadata narrowing is a future candidate behind
+    #     cwd-canonicalisation validation). See the restrict_reads
+    #     branch commentary.
+    #   * port-allowlist wildcard `*:PORT` (any host on that port)
+    #     and standalone-allowlist UDP/bind openness — exact parity
+    #     with the Linux Landlock port pin, documented both sides.
+    #   * setsid orphan-attribution window (teardown, swept — see
+    #     _macos_spawn) and per-UID host-wide RLIMIT_NPROC — not
+    #     SBPL-expressible.
     #
     # `debug` profile is deliberately EXCLUDED from the introspection
     # denies. Linux's `--sandbox debug` is "full minus ptrace block"
@@ -494,11 +549,31 @@ def build_profile(*,
         # itself (legitimate things like reading /proc/self equivalents
         # via libproc still work).
         if audit_mode:
+            # Observe-don't-block duals for every family the
+            # enforcement branch denies below.
             parts.append("(allow process-info* (with report))")
             parts.append("(allow iokit-open (with report))")
+            parts.append("(allow signal (with report))")
+            parts.append("(allow nvram* (with report))")
+            parts.append("(allow mach-lookup (with report))")
+            parts.append("(allow ipc-posix-shm* (with report))")
+            parts.append("(allow ipc-sysv* (with report))")
+            parts.append(
+                "(allow distributed-notification-post (with report))"
+            )
+            parts.append("(allow appleevent-send (with report))")
+            parts.append("(allow user-preference-write (with report))")
         else:
-            parts.append("(deny process-info-pidinfo (target others))")
-            parts.append("(deny process-info-pidfdinfo (target others))")
+            # Whole process-info* family, not just pidinfo/pidfdinfo:
+            # the narrow pair left process-info-listpids open
+            # (proc_listallpids() enumerates every host pid — Linux's
+            # PID-ns hides them), and on current macOS (26.6.2) the
+            # narrow pidinfo deny itself proved ineffective against
+            # proc_name() on another pid while the family-level deny
+            # is the documented-stable construct (Apple's WebProcess
+            # profile uses `(deny process-info*)` + targeted allows).
+            # `target others` keeps self-introspection working.
+            parts.append("(deny process-info* (target others))")
             # iokit-open: userland driver/device access — the macOS
             # analogue of Linux's blocked device-capability escapes.
             # Empirically free (2026-08-15 probe battery: clang, make,
@@ -506,14 +581,86 @@ def build_profile(*,
             # sibling candidate `(deny sysctl-write)` was REJECTED —
             # it breaks Apple's linker and ensurepip).
             parts.append("(deny iokit-open)")
+            # Signals to OTHER processes: without a PID-namespace,
+            # every same-UID host process (operator's editor, sibling
+            # runs) is signalable from inside the sandbox. Battery-
+            # validated free (2026-08-15, as part of the strict-extras
+            # probe run).
+            parts.append("(deny signal (target others))")
+            # NVRAM reads leak boot-args / firmware state; nothing in
+            # the toolchain battery touches nvram.
+            parts.append("(deny nvram*)")
+            # mach-lookup allowlist-deny: with mach-lookup open, a
+            # sandboxed child can reach LaunchServices and have a
+            # helper executed UNSANDBOXED (full escape — confirmed
+            # reachable on current macOS), read/write the operator's
+            # clipboard via the pasteboard service, query securityd,
+            # and persist prefs via cfprefsd. The allowlist keeps
+            # only lookup-only infrastructure daemons (see
+            # MACOS_BASE_MACH_SERVICES commentary); the battery
+            # passed even under a blanket deny.
+            _mach_names = " ".join(
+                f"(global-name {_quote_sbpl(s)})"
+                for s in MACOS_BASE_MACH_SERVICES
+            )
+            parts.append(
+                f"(deny mach-lookup (require-not (require-any "
+                f"{_mach_names})))"
+            )
+            # POSIX/SysV shared memory is NOT mediated by file-write*
+            # (shm_open of another same-UID process's segment succeeds
+            # under every write-isolated shape — confirmed on current
+            # macOS). This is the /dev/shm-equivalent surface the
+            # Linux tier closes via mount-ns + read-allowlist
+            # exclusion. Keep only the read-side cfprefs fast-path
+            # (see MACOS_POSIX_SHM_READ_PREFIX_ALLOWLIST).
+            _shm_clauses = [
+                f"(ipc-posix-name-prefix {_quote_sbpl(p)})"
+                for p in MACOS_POSIX_SHM_READ_PREFIX_ALLOWLIST
+            ]
+            # require-not is UNARY (sandbox-exec rejects multi-arg —
+            # see the require-any commentary on the write deny above):
+            # a single allowlisted prefix goes in directly, growth
+            # needs the require-any wrapper.
+            _shm_filter = (
+                _shm_clauses[0] if len(_shm_clauses) == 1
+                else "(require-any " + " ".join(_shm_clauses) + ")"
+            )
+            parts.append(
+                f"(deny ipc-posix-shm-read* (require-not "
+                f"{_shm_filter}))"
+            )
+            parts.append("(deny ipc-posix-shm-write*)")
+            parts.append("(deny ipc-sysv*)")
+            # Distributed notifications: host-wide signalling / covert
+            # channel that can trigger behaviour in listening apps.
+            # Belt-and-braces with the notifyd drop from the mach
+            # allowlist.
+            parts.append("(deny distributed-notification-post)")
+            # AppleEvents: automation of other apps (TCC prompts
+            # mitigate per-app; the op-level deny covers non-lookup
+            # delivery paths).
+            parts.append("(deny appleevent-send)")
+            # user-preference-write: belt-and-braces with the cfprefsd
+            # drop — `defaults write` persistence outside the write
+            # scope.
+            parts.append("(deny user-preference-write)")
 
     # --- macos-strict extras (profile_name == "strict") ---
-    # The operator chose fail-closed semantics; layer the probe-
-    # validated denies the full profile deliberately leaves out. All
-    # three passed the 2026-08-15 toolchain battery with zero
-    # breakage (signal/nvram individually, mach-lookup even as a
-    # blanket deny — the curated allowlist is deliberate headroom).
-    if profile_name == "strict" and seccomp_profile not in (None, "none"):
+    # Historically strict layered signal/nvram/mach-lookup denies on
+    # top of a more permissive full profile. Those denies are now part
+    # of the hardened baseline above, so at the SBPL layer strict
+    # equals full whenever the seccomp gate engaged — this branch only
+    # covers the (unreached-in-production) combination of
+    # profile_name="strict" with a seccomp_profile outside the
+    # introspection-hardening set, where it preserves the historical
+    # strict floor. Emitting it unconditionally would duplicate the
+    # baseline clauses (harmless to the parser, but it bloats the
+    # profile and breaks byte-level profile pinning).
+    if (profile_name == "strict"
+            and seccomp_profile not in (None, "none")
+            and seccomp_profile not in
+            _SECCOMP_PROFILES_HARDEN_INTROSPECTION):
         if audit_mode:
             parts.append("(allow signal (with report))")
             parts.append("(allow nvram* (with report))")
