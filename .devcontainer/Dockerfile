@@ -117,13 +117,8 @@ RUN mkdir -p /opt/codeql \
 # ============================================================================
 
 COPY requirements.txt requirements-dev.txt /tmp/
-# Also copy package-specific requirements so they can be installed explicitly if desired
-COPY packages/web/requirements.txt /tmp/packages-web-requirements.txt
 
 RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
-
-# Install web package dependencies (includes playwright)
-RUN pip install --no-cache-dir -r /tmp/packages-web-requirements.txt
 
 # Install Playwright browser + system deps via Playwright's own dep installer.
 # Replaces a hand-rolled apt list that drifted out of sync with upstream Chromium deps.

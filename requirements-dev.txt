@@ -26,6 +26,7 @@ gcovr==8.6
 # Tests retain their @skipUnless guards as defense-in-depth for devs
 # running pytest without bs4 installed.
 beautifulsoup4==4.15.0
+playwright==1.60.0
 
 # Capped at 4.15.4.0: 4.15.5+ ships manylinux_2_38 aarch64 wheels
 # (glibc 2.38+) but the devcontainer base is bookworm (glibc 2.36).
