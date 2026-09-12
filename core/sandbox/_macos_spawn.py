@@ -76,7 +76,9 @@ Implications of the ⚠ items for the threat model:
   3. RLIMIT_NPROC: the cap counts the calling user's TOTAL
      simultaneous processes, so the configured budget is applied as
      a ceiling RELATIVE to current usage (count + budget, clamped to
-     the hard limit) — a fork bomb is bounded to the budget's
+     the hard limit and to the kernel's silent kern.maxprocperuid
+     bound, which macOS imposes on setrlimit regardless of what is
+     requested) — a fork bomb is bounded to the budget's
      headroom, while pre-existing same-UID processes (browser
      sessions, sibling runs) no longer push every in-sandbox fork
      into EAGAIN. Growth beyond the ceiling still lands on the
@@ -110,6 +112,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -318,6 +321,35 @@ def _same_uid_process_count() -> int | None:
                 1 for line in proc.stdout.splitlines() if line.strip())
             if count > 0:
                 return count
+    return None
+
+
+def _darwin_nproc_kernel_clamp() -> int | None:
+    """kern.maxprocperuid on darwin, or None (other platforms /
+    unreadable sysctl). macOS setrlimit(RLIMIT_NPROC) silently stores
+    at most this value regardless of the requested number and of the
+    hard limit (observed live: a requested six-figure ceiling read
+    back as the sysctl value from inside the child), so any ceiling
+    above it is a number the kernel will never honour — clamp what we
+    request so reads, logs, and tests see the enforced truth."""
+    if sys.platform != "darwin":
+        return None
+    for sysctl in ("/usr/sbin/sysctl", "/sbin/sysctl", "sysctl"):
+        try:
+            proc = subprocess.run(
+                [sysctl, "-n", "kern.maxprocperuid"],
+                capture_output=True, text=True,
+                timeout=_PS_TIMEOUT_S, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0:
+            try:
+                value = int(proc.stdout.strip())
+            except ValueError:
+                continue
+            if value > 0:
+                return value
     return None
 
 
@@ -874,6 +906,19 @@ def run_sandboxed(cmd: list[str], *,
         else:
             import resource as _resource
             _nproc_ceiling = _uid_count + int(nproc_limit)
+            # macOS silently stores at most kern.maxprocperuid for
+            # RLIMIT_NPROC whatever we request (even under an infinite
+            # hard limit) — the enforcement is unchanged either way,
+            # but requesting a number the kernel will not honour makes
+            # every read-back (child getrlimit, diagnostics, the probe
+            # kit) disagree with the computed ceiling. Request the
+            # honoured value. When the count already exceeds the
+            # kernel clamp the relative headroom is unobtainable on
+            # this host — the clamp still wins (the kernel would
+            # impose it regardless).
+            _kernel_clamp = _darwin_nproc_kernel_clamp()
+            if _kernel_clamp is not None:
+                _nproc_ceiling = min(_nproc_ceiling, _kernel_clamp)
 
             def preexec() -> None:
                 base_preexec()
