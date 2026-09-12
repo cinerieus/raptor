@@ -4180,6 +4180,14 @@ class TestSessionObservations:
         config = OrchestratorConfig(
             target_path=target, out_dir=out,
             budget=10, batch_sloc_threshold=0,
+            # The assertions below encode strict review ORDER (f1's
+            # observation visible to f2's context) — auto worker
+            # derivation can go parallel and race the accumulation.
+            max_workers=1,
+            # Observation accumulation is the subject, not the taint
+            # channel: a joern-equipped host must not boot a real JVM
+            # whose pre-sweep timing varies with machine load.
+            joern_overrides={"enabled": False},
         )
         run_orchestrator(config, review_fn)
 
