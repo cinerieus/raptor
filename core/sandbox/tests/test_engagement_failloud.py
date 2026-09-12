@@ -227,7 +227,10 @@ class TestExecStatusPipe:
 
     def test_parse_setup_status(self):
         from core.sandbox._spawn import _parse_setup_status
-        assert _parse_setup_status(b"") is None          # EOF → execed
+        # Only the positive exec confirmation reads as "execed";
+        # bare EOF is an unreported child death ('!'), never genuine.
+        assert _parse_setup_status(b"G:") is None
+        assert _parse_setup_status(b"")[0] == "!"
         assert _parse_setup_status(b"M:mount denied") == ("M", "mount denied")
         assert _parse_setup_status(b"L:") == ("L", "")
         assert _parse_setup_status(b"U:Operation not permitted") == (
@@ -350,10 +353,10 @@ class TestExecStatusPipe:
 
     def test_drain_status_pipe_read_error_with_no_bytes_warns_unknown(
             self, caplog):
-        # Nothing read at all before the error: the status is unknown
-        # (still returned as None — the caller cannot invent a
-        # category) but the condition is named out loud instead of
-        # masquerading as a clean EOF.
+        # Nothing read at all before the error: the status is unknown,
+        # which now maps to the same '!' refusal as a missing exec
+        # confirmation — an unreadable pipe must not masquerade as a
+        # confirmed exec — and the condition is named out loud.
         import logging
         import os
         from unittest import mock
@@ -369,7 +372,7 @@ class TestExecStatusPipe:
                 caplog.at_level(logging.WARNING,
                                 logger="core.sandbox._spawn"):
             status = _drain_status_pipe(r, {r})
-        assert status is None
+        assert status is not None and status[0] == "!"
         assert any("status unknown" in rec.message
                    for rec in caplog.records)
 

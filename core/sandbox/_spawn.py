@@ -198,10 +198,21 @@ def _write_setup_status(fd: int, category: bytes, reason: str = "") -> None:
              that failed its ro bind; a mandatory hardening rlimit
              that could not apply) — fail loud, no degrade path.
              EVERY fail-closed child exit must write its byte first:
-             a bare os._exit reads as EOF-no-byte, i.e. "the target
-             execed", and the parent returns the aborted setup as a
-             genuine target result. The parent default-DENIES
-             categories it does not recognise.
+             a bare os._exit reads as EOF-no-byte, and the parent
+             would have returned the aborted setup as a genuine
+             target result. The parent default-DENIES categories it
+             does not recognise.
+        b'G' POSITIVE exec confirmation — written immediately before
+             execvpe, the last child-side instruction that can fail
+             silently having passed. Only ``G`` followed by EOF (or
+             by an exec-failure ``X`` payload) reads as "the target
+             ran": bare EOF used to mean "execed", so an INVOLUNTARY
+             pre-exec child death that no fail-closed site could
+             report — SIGKILL/OOM mid-setup — fabricated a genuine-
+             looking CompletedProcess carrying the setup child's
+             wait status. The parser maps missing confirmation to the
+             synthetic category '!' (typed refusal in the parent,
+             never a result).
     ``reason`` is a short diagnostic. The whole payload is one ``os.write``
     well under PIPE_BUF (4096) so it lands atomically. Runs in a dying
     child after fork — must not raise and must not touch the Python logger
@@ -211,19 +222,42 @@ def _write_setup_status(fd: int, category: bytes, reason: str = "") -> None:
     # child (see docstring) — any propagation here would run the
     # parent's stack in the child.
     with contextlib.suppress(BaseException):
+        if category == b"G":
+            # The confirmation is a bare prefix: any reason bytes
+            # would be misparsed as the next payload's category by
+            # the parent's 'G:'-strip (only exec-failure writers
+            # legitimately follow it).
+            reason = ""
         payload = category + b":" + reason.encode("utf-8", "replace")[:512]
         os.write(fd, payload)
 
 
 def _parse_setup_status(raw: bytes):
-    """Parse the exec-status payload (``<cat>:<reason>``) the child wrote.
+    """Parse the exec-status pipe contents the child wrote.
 
-    Returns ``None`` for empty input (EOF ⇒ the target execed; genuine
-    result), else ``(category, reason)`` where category is one of
-    M/L/S/U/X/P/F. Kept standalone for unit-testing the contract.
+    Returns ``None`` only for the POSITIVE exec confirmation (``G``
+    then EOF ⇒ the target execed; genuine result). A ``G`` followed
+    by more bytes is an exec-failure report written after the
+    confirmation (the ``X`` payloads) and parses as that payload.
+    Everything else is ``(category, reason)`` — including EMPTY input:
+    EOF without the confirmation byte means the child died during
+    setup without reaching any reporting site (SIGKILL/OOM mid-setup),
+    mapped to the synthetic category ``'!'`` so the parent refuses
+    typed instead of returning the setup child's wait status as a
+    fabricated target result. Kept standalone for unit-testing the
+    contract.
     """
+    if raw.startswith(b"G:"):
+        raw = raw[2:]
+        if not raw:
+            return None
     if not raw:
-        return None
+        return (
+            "!",
+            "child terminated during sandbox setup without reporting "
+            "(no exec confirmation on the status pipe — involuntary "
+            "death: external SIGKILL, OOM kill, or a hard cap)",
+        )
     return (
         chr(raw[0]),
         raw[2:].decode("utf-8", "replace") if len(raw) > 2 else "",
@@ -1422,14 +1456,19 @@ def run_sandboxed(
 
         # Exec-status pipe. The child writes a typed status — which setup
         # step failed (mount/Landlock/seccomp/unshare) or that exec itself
-        # failed — to status_w BEFORE exiting; on a SUCCESSFUL execvpe the
-        # write end auto-closes (PEP 446 default O_CLOEXEC) and the parent
-        # reads EOF. This is the unspoofable, unambiguous "did the target
-        # exec, and if not exactly why" signal that replaces the brittle
-        # exit-code + stderr-emptiness heuristics. The target cannot forge
-        # it: status_w is close-on-exec, so it's gone before the target
-        # runs. status_w is NOT marked inheritable-across-exec (unlike the
-        # tracer's t_ready_w) precisely so the EOF-on-success contract holds.
+        # failed — to status_w BEFORE exiting, and a POSITIVE 'G'
+        # confirmation immediately before execvpe; on a SUCCESSFUL exec
+        # the write end auto-closes (PEP 446 default O_CLOEXEC) and the
+        # parent reads 'G' + EOF. This is the unspoofable, unambiguous
+        # "did the target exec, and if not exactly why" signal that
+        # replaces the brittle exit-code + stderr-emptiness heuristics;
+        # the confirmation closes the last silent shape (involuntary
+        # child death mid-setup produced the same bare EOF a successful
+        # exec used to). The target cannot forge it: status_w is
+        # close-on-exec, so it's gone before the target runs. status_w
+        # is NOT marked inheritable-across-exec (unlike the tracer's
+        # t_ready_w) precisely so the confirmation-then-EOF contract
+        # holds.
         status_r, status_w = os.pipe()
         # SECURITY INVARIANT: status_w MUST stay close-on-exec (non-
         # inheritable). That is the ONE thing that makes the status
@@ -2634,6 +2673,16 @@ def run_sandboxed(
                             os.close(_fd)
                         except OSError:
                             pass
+                # POSITIVE exec confirmation, the last write before
+                # execvpe: status_w is CLOEXEC, so a successful exec
+                # leaves exactly 'G' + EOF on the pipe. Without it,
+                # bare EOF meant "execed" — an involuntary child death
+                # anywhere in setup (SIGKILL mid-rlimits, OOM kill)
+                # produced EOF too, and the parent returned the dead
+                # setup child's wait status as a genuine-looking
+                # target result. The parent now refuses typed on
+                # EOF-without-confirmation ('!').
+                _write_setup_status(status_w, b"G")
                 try:
                     # nosemgrep: python.lang.security.audit.dangerous-os-exec-tainted-env-args.dangerous-os-exec-tainted-env-args
                     os.execvpe(cmd[0], list(cmd), exec_env)
@@ -2936,10 +2985,22 @@ def run_sandboxed(
                 from .probes import ENGAGE_FAIL_INSTRUCTIONS
                 _detail = (f" ({_status[0]}: {_status[1]})"
                            if _status else "")
+                # '!' (died without reporting — EOF, no byte at all)
+                # is per-invocation (external SIGKILL / OOM landed on
+                # the child pre-'R'), not an engagement failure: the
+                # engagement instructions' "a retry cannot help"
+                # doctrine would misguide the operator there.
+                _instr = (
+                    "the child was terminated during namespace setup "
+                    "before it could report (external SIGKILL, OOM "
+                    "kill). Retry the run; if it recurs, check for "
+                    "OOM kills (dmesg) or an external process sweeper."
+                    if _status is not None and _status[0] == "!"
+                    else ENGAGE_FAIL_INSTRUCTIONS)
                 raise SandboxSetupError(
                     "sandbox namespace child did not signal ready — "
                     f"setup failed in the spawn child{_detail}",
-                    ENGAGE_FAIL_INSTRUCTIONS,
+                    _instr,
                     setup_category=_status[0] if _status else None,
                 )
         finally:
@@ -3532,7 +3593,7 @@ def run_sandboxed(
         # breaking all subsequent sandboxing. The child is reaped by now
         # (success: waitpid above; timeout: _kill_and_reap before the raise),
         # so any status byte is already buffered. On timeout the target had
-        # execed (hence the timeout) → no status → None.
+        # execed (hence the timeout) → the 'G' confirmation → None.
         setup_status = _drain_status_pipe(status_r, _parent_fds)
         # Death pipe write end: child has exited (or been killed), no
         # longer needed. Close it so the fd doesn't leak.
@@ -3582,10 +3643,13 @@ def run_sandboxed(
         returncode = -1
 
     # setup_status was drained from the exec-status pipe in the finally above
-    # (on every exit path). Bytes ⇒ the child reported a setup failure BEFORE
-    # exec (M/L/S/U/X); None ⇒ the target actually execed, so the
-    # returncode/output are a genuine result. Unspoofable: status_w is
-    # close-on-exec, gone before the target runs.
+    # (on every exit path). A failure category (M/L/S/U/X/P/F/C) ⇒ the child
+    # reported a setup failure; None ⇒ the 'G' exec confirmation arrived and
+    # the target actually execed, so the returncode/output are a genuine
+    # result; '!' ⇒ EOF with NO confirmation — the child died mid-setup
+    # without reaching any reporting site (SIGKILL/OOM), and the wait status
+    # below belongs to the setup child, not the target. Unspoofable:
+    # status_w is close-on-exec, gone before the target runs.
     stdout_out = stderr_out = None
     if capture_output:
         stdout_out = stdout_buf.decode("utf-8", errors="replace") if text else stdout_buf

@@ -17,6 +17,7 @@ behaviour. Two invariants pinned here:
    new demotion lane ship ungated).
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,33 @@ def test_c_status_byte_roundtrip():
     from core.sandbox._spawn import _parse_setup_status
     parsed = _parse_setup_status(b"C:cwd '/nope' unusable inside sandbox")
     assert parsed == ("C", "cwd '/nope' unusable inside sandbox")
+
+
+def test_exec_confirmation_reads_as_genuine_run():
+    # 'G' then EOF is the ONLY shape that parses as "the target ran".
+    from core.sandbox._spawn import _parse_setup_status
+    assert _parse_setup_status(b"G:") is None
+
+
+def test_eof_without_confirmation_is_typed_not_genuine():
+    """Bare EOF used to mean "the target execed" — but an involuntary
+    pre-exec child death (SIGKILL mid-rlimits, OOM kill) produces the
+    same bare EOF, so the parent returned the dead setup child's wait
+    status as a genuine-looking target result. Missing confirmation
+    now maps to the synthetic '!' category."""
+    from core.sandbox._spawn import _parse_setup_status
+    parsed = _parse_setup_status(b"")
+    assert parsed is not None
+    assert parsed[0] == "!"
+    assert "without reporting" in parsed[1]
+
+
+def test_exec_failure_after_confirmation_keeps_its_category():
+    # The child writes 'G' immediately before execvpe; an exec failure
+    # then appends its 'X' payload — same pipe, ordered writes.
+    from core.sandbox._spawn import _parse_setup_status
+    parsed = _parse_setup_status(b"G:X:exec: file not found")
+    assert parsed == ("X", "exec: file not found")
 
 
 def test_extra_ro_bind_error_preserves_errno():
@@ -91,8 +119,10 @@ def test_parent_default_denies_unknown_status_category(
     test are unreachable there.)"""
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
+    calls = []
 
     def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
         cp = subprocess.CompletedProcess(cmd, returncode=0,
                                          stdout="", stderr="")
         cp._setup_status = ("Z", "from a future status writer")
@@ -104,8 +134,18 @@ def test_parent_default_denies_unknown_status_category(
             _ctx.run(["true"], target=str(tmp_path),
                      output=str(tmp_path), timeout=60)
     except (pytest.skip.Exception, pytest.fail.Exception):
+        if not calls:
+            # Hosts where the spawn backend never dispatches (userns
+            # denied): the run completed on a subprocess lane and the
+            # faked status was never consumed — nothing to test.
+            pytest.skip("spawn backend not dispatched on this host")
         raise
     except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        if calls:
+            # The faked status WAS consumed and the parent then blew
+            # up some other way — a capable-host regression, not lane
+            # unavailability. Fail loud.
+            raise
         pytest.skip(f"mount-ns lane unavailable: {e}")
     assert "unrecognised setup-status category 'Z'" in str(excinfo.value)
     assert excinfo.value.setup_category == "Z"
@@ -138,13 +178,73 @@ def test_parent_raises_typed_error_on_c_status(tmp_path, monkeypatch):
             _ctx.run(["true"], target=str(tmp_path),
                      output=str(tmp_path), timeout=60)
     except (pytest.skip.Exception, pytest.fail.Exception):
+        if not calls:
+            # Hosts where the spawn backend never dispatches (userns
+            # denied): the run completed on a subprocess lane and the
+            # faked status was never consumed — nothing to test.
+            pytest.skip("spawn backend not dispatched on this host")
         raise
     except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        if calls:
+            # The faked status WAS consumed and the parent then blew
+            # up some other way — a capable-host regression, not lane
+            # unavailability. Fail loud.
+            raise
         pytest.skip(f"mount-ns lane unavailable: {e}")
     assert excinfo.value.setup_category == "C"
     assert "aborted fail-closed" in str(excinfo.value)
     assert "cwd '/gone'" in str(excinfo.value)
     assert len(calls) == 1, "the 'C' category must not ride any ladder"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="exercises the Linux spawn-lane status arms via the Linux "
+           "spawn seam; the darwin seatbelt lane has its own readiness "
+           "protocol ('E') — same platform gate as the sibling "
+           "fake-spawn tests above")
+def test_parent_raises_typed_error_on_missing_confirmation(
+        tmp_path, monkeypatch):
+    """The '!' category (EOF, no exec confirmation) is a typed refusal
+    naming the involuntary-death shape — never a ladder ride, never a
+    result. (Linux spawn lane: on darwin the monkeypatched seam is
+    never dispatched — the seatbelt branch runs.)"""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    calls = []
+
+    def fake_spawn(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=-9,
+                                         stdout="", stderr="")
+        cp._setup_status = (
+            "!", "child terminated during sandbox setup without "
+                 "reporting")
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    try:
+        with pytest.raises(SandboxSetupError) as excinfo:
+            _ctx.run(["true"], target=str(tmp_path),
+                     output=str(tmp_path), timeout=60)
+    except (pytest.skip.Exception, pytest.fail.Exception):
+        if not calls:
+            # Hosts where the spawn backend never dispatches (userns
+            # denied): the run completed on a subprocess lane and the
+            # faked status was never consumed — nothing to test.
+            pytest.skip("spawn backend not dispatched on this host")
+        raise
+    except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        if calls:
+            # The faked status WAS consumed and the parent then blew
+            # up some other way — a capable-host regression, not lane
+            # unavailability. Fail loud.
+            raise
+        pytest.skip(f"mount-ns lane unavailable: {e}")
+    assert excinfo.value.setup_category == "!"
+    assert "died during setup" in str(excinfo.value)
+    assert "rc=-9" in str(excinfo.value)
+    assert len(calls) == 1, "the '!' category must not ride any ladder"
 
 
 # --------------------------------------------------- integration tier
@@ -211,5 +311,47 @@ def test_rlimit_core_failure_raises_typed_error(tmp_path, monkeypatch):
             r.sandbox_info.get("backend") == "landlock-pidns"):
         pytest.fail(
             f"spawn-lane RLIMIT_CORE failure came back as a genuine "
+            f"result: rc={r.returncode}")
+    pytest.skip("spawn lane not taken on this host")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_involuntary_child_death_raises_typed_error(tmp_path, monkeypatch):
+    """Live: SIGKILL landing on the spawn child mid-setup (injected at
+    the rlimits step via a fork-inherited resource.setrlimit wrapper)
+    leaves NO status byte and NO exec confirmation — the parent must
+    raise the typed '!' refusal instead of returning the setup child's
+    rc=-9 as a genuine target result (which fed crash oracles a
+    fabricated target crash)."""
+    import resource
+    import signal as _signal
+
+    from core.sandbox import context as _ctx
+    parent_pid = os.getpid()
+
+    def killer(res, limits):
+        if os.getpid() != parent_pid:
+            os.kill(os.getpid(), _signal.SIGKILL)
+
+    monkeypatch.setattr(resource, "setrlimit", killer)
+    try:
+        r = _ctx.run(["/bin/true"], target=str(tmp_path),
+                     output=str(tmp_path), timeout=60)
+    except SandboxSetupError as e:
+        assert e.setup_category == "!", str(e)
+        assert "died during setup" in str(e)
+        return
+    except (pytest.skip.Exception, pytest.fail.Exception):
+        raise
+    except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        pytest.skip(f"spawn lane unavailable: {e}")
+    # Subprocess lanes apply rlimits in preexec_fn; a killed preexec
+    # child surfaces through subprocess's own machinery, out of this
+    # protocol's scope — only the spawn lane must raise.
+    if r.sandbox_info.get("mount_ns_active") or (
+            r.sandbox_info.get("backend") == "landlock-pidns"):
+        pytest.fail(
+            f"involuntary spawn-child death came back as a genuine "
             f"result: rc={r.returncode}")
     pytest.skip("spawn lane not taken on this host")

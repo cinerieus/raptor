@@ -72,16 +72,19 @@ class SandboxSetupError(BaseException):
     diagnostic.
 
     ``setup_category`` carries the exec-status-pipe category letter
-    (M/L/S/U/X/P/F/C — see ``core/sandbox/_spawn._write_setup_status``)
-    when the raise site holds one, else ``None``. The distinction a
-    consumer can act on: ``"X"`` means every isolation layer engaged
-    and the failure was the target's own exec inside the sandbox — a
-    per-invocation condition (binary transiently unexecutable, e.g.
-    ETXTBSY from a lingering writer; a path outside the bind set) that
-    a caller with retry semantics may legitimately re-attempt at FULL
-    isolation. Every other category (and ``None``) means isolation
-    itself could not engage, where a retry cannot help and the
-    fail-loud contract stands.
+    (M/L/S/U/X/P/F/C, or the synthetic '!' for a spawn child that died
+    mid-setup without reaching any reporting site — see
+    ``core/sandbox/_spawn._write_setup_status``) when the raise site
+    holds one, else ``None``. The distinction a consumer can act on:
+    ``"X"`` means every isolation layer engaged and the failure was
+    the target's own exec inside the sandbox — a per-invocation
+    condition (binary transiently unexecutable, e.g. ETXTBSY from a
+    lingering writer; a path outside the bind set) that a caller with
+    retry semantics may legitimately re-attempt at FULL isolation.
+    ``"!"`` is also per-invocation (external SIGKILL / OOM landed on
+    the setup child) but says nothing about isolation. Every other
+    category (and ``None``) means isolation itself could not engage,
+    where a retry cannot help and the fail-loud contract stands.
     """
 
     def __init__(self, reason: str, instructions: str = "",
