@@ -91,6 +91,9 @@ class AuditPipelineOpts:
     codeql_db_path: str | None = None
     # Repeatable --codeql-db (one database per language).
     codeql_db_paths: list[str] | None = None
+    # Background database build started by run-start provisioning;
+    # the orchestrator joins it (bounded) before the CodeQL pre-sweep.
+    codeql_db_future: Any | None = None
     threat_model: dict[str, Any] | None = None
     joern_overrides: dict[str, Any] | None = None
     joern_server: Any | None = None
@@ -365,6 +368,7 @@ def _build_orchestrator_config(
         inventory=opts.inventory,
         codeql_db_path=opts.codeql_db_path,
         codeql_db_paths=opts.codeql_db_paths,
+        codeql_db_future=opts.codeql_db_future,
         threat_model=opts.threat_model,
         annotations_dir=opts.annotations_dir,
         functions=opts.functions,

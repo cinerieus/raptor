@@ -565,6 +565,10 @@ class OrchestratorConfig:
     codeql_db_paths: list[str] | None = None
     # Derived at run start (never set by callers).
     codeql_db_router: Any | None = None
+    # Background database build from run-start provisioning; joined
+    # (bounded) right before the CodeQL pre-sweep, so the build
+    # overlaps inventory/prep instead of blocking run start.
+    codeql_db_future: Any | None = None
     threat_model: dict[str, Any] | None = None
     validate: bool = True
     prefilter: bool = True
@@ -4109,6 +4113,45 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
                 sarif_cache = SarifCache.from_directory(config.out_dir)
         except Exception:
             logger.debug("baseline pre-scan failed", exc_info=True)
+
+    if getattr(config, "codeql_db_future", None) is not None:
+        # Run-start provisioning kicked off a background database
+        # build; join it here — the last moment before the first
+        # CodeQL consumer — so the build overlapped everything above.
+        # The join polls the shutdown rails and clamps to the run
+        # deadline: SIGTERM salvage and a supervisor bound must never
+        # sit behind a blocking multi-minute wait.
+        from .codeql_provision import (
+            await_provisioned_dbs,
+            stamp_run_config_dbs,
+        )
+
+        def _abort_wait() -> bool:
+            if is_sigterm_requested():
+                return True
+            _g = getattr(config, "environment_guard_state", None)
+            return _g is not None and _g.concluded
+
+        _built_dbs = await_provisioned_dbs(
+            config.codeql_db_future, out_dir=config.out_dir,
+            deadline_monotonic=getattr(
+                config, "run_deadline_monotonic", None,
+            ),
+            should_abort=_abort_wait,
+        )
+        config.codeql_db_future = None
+        if _built_dbs:
+            from .codeql_dbs import CodeqlDbRouter
+            config.codeql_db_router = CodeqlDbRouter(
+                list(config.codeql_db_paths or []) + _built_dbs,
+            )
+            config.codeql_db_paths = config.codeql_db_router.paths or None
+            config.codeql_db_path = config.codeql_db_router.primary
+            if config.out_dir:
+                # A resumed segment reads the run config — it must
+                # see databases the background build delivered after
+                # the config was first persisted.
+                stamp_run_config_dbs(config.out_dir, _built_dbs)
 
     if config.codeql_db_paths and not sarif_cache:
         # One suite per database; run_suite writes per-language SARIF

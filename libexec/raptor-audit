@@ -1619,6 +1619,40 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"\nStarting audit of {target_path}", flush=True)
     print(f"Output: {out_dir}\n", flush=True)
 
+    # CodeQL database provisioning: an explicit --codeql-db wins
+    # untouched; otherwise discover cached databases for this exact
+    # tree and start bounded background builds where extraction runs
+    # no target build commands (trust-gated otherwise). Skips are
+    # persisted to codeql-provision.json and surfaced in the report —
+    # the channel never again goes down silently.
+    codeql_db_future = None
+    if not args.codeql_db:
+        try:
+            from core.audit.codeql_provision import provision_codeql_dbs
+            _provision = provision_codeql_dbs(target_path, out_dir=out_dir)
+            if _provision.db_paths:
+                args.codeql_db = list(_provision.db_paths)
+                print(
+                    f"CodeQL: reusing {len(_provision.db_paths)} cached "
+                    f"database(s)", flush=True,
+                )
+            codeql_db_future = _provision.build_future
+            if _provision.building_languages:
+                print(
+                    "CodeQL: building database(s) for "
+                    f"{', '.join(_provision.building_languages)} in the "
+                    "background", flush=True,
+                )
+            for _skip in _provision.skipped:
+                print(
+                    f"CodeQL: no database for {_skip.language} — "
+                    f"{_skip.reason}; {_skip.remedy}", flush=True,
+                )
+        except Exception:  # noqa: BLE001 — provisioning never blocks the run
+            logging.getLogger(__name__).warning(
+                "codeql database provisioning failed", exc_info=True,
+            )
+
     models = args.model or []
     opts = AuditPipelineOpts(
         target_path=target_path,
@@ -1649,6 +1683,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         annotations_dir=Path(args.annotations_dir) if args.annotations_dir else None,
         codeql_db_path=(args.codeql_db[0] if args.codeql_db else None),
         codeql_db_paths=args.codeql_db,
+        codeql_db_future=codeql_db_future,
         threat_model=threat_model,
         on_progress=on_progress,
         # Tri-state: explicit negative > explicit positive > None
@@ -2182,6 +2217,31 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     models = run_cfg.get("models") or []
     include_kinds_raw = run_cfg.get("include_kinds")
+
+    # Re-validate stamped CodeQL databases (existence + structural
+    # marker) and cheaply re-probe the shared cache for this tree — a
+    # resumed segment must neither aim the channel at an evicted path
+    # nor run blind when the cache gained a database after segment 1
+    # (e.g. from its background build).
+    resume_codeql_dbs: list = []
+    try:
+        from core.audit.codeql_provision import (
+            discover_codeql_dbs,
+            validate_db_paths,
+        )
+        _stamped = (
+            run_cfg.get("codeql_db_paths")
+            or ([run_cfg["codeql_db_path"]]
+                if run_cfg.get("codeql_db_path") else [])
+        )
+        resume_codeql_dbs = validate_db_paths(_stamped)
+        for _p in discover_codeql_dbs(target_path):
+            if _p not in resume_codeql_dbs:
+                resume_codeql_dbs.append(_p)
+    except Exception:  # noqa: BLE001 — re-validation never blocks resume
+        logging.getLogger(__name__).debug(
+            "codeql resume re-validation failed", exc_info=True)
+
     max_seconds = (
         args.max_time if args.max_time is not None
         else run_cfg.get("max_seconds")
@@ -2222,12 +2282,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
             Path(run_cfg["annotations_dir"])
             if run_cfg.get("annotations_dir") else None
         ),
-        codeql_db_path=run_cfg.get("codeql_db_path"),
-        codeql_db_paths=(
-            run_cfg.get("codeql_db_paths")
-            or ([run_cfg["codeql_db_path"]]
-                if run_cfg.get("codeql_db_path") else None)
+        codeql_db_path=(
+            resume_codeql_dbs[0] if resume_codeql_dbs else None
         ),
+        codeql_db_paths=resume_codeql_dbs or None,
         threat_model=threat_model,
         on_progress=on_progress,
         dynamic_validation=(

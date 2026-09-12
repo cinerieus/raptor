@@ -240,6 +240,24 @@ def generate_report(
         if tripped_channels:
             report["channel_health"] = tripped_channels
 
+    # CodeQL database provisioning outcome: languages left without a
+    # database (skipped builds, timed-out or failed background builds)
+    # must reach the operator with the flag or marker that would
+    # provide one — the channel never skips silently.
+    try:
+        from .codeql_provision import load_provision_status
+        provision = load_provision_status(out_dir)
+    except Exception:  # noqa: BLE001 — reporting must not fail the run
+        logger.debug("codeql provision status load failed", exc_info=True)
+        provision = None
+    if provision and (
+        provision.get("skipped")
+        or provision.get("build_timed_out")
+        or provision.get("build_aborted")
+        or provision.get("build_failed")
+    ):
+        report["codeql_provision"] = provision
+
     # Phase aborts (persistent LLM auth refusal): a listed phase
     # produced NO trustworthy output — its empty results must not be
     # read as "phase ran and found nothing". Written at abort time by
@@ -1303,6 +1321,37 @@ def _format_summary(report: dict[str, Any]) -> str:
                 f"completed before the trip, "
                 f"{rec.get('total_errors', 0)} failed."
             )
+
+    provision = report.get("codeql_provision")
+    if provision:
+        lines.append("")
+        lines.append("### ⚠️ CodeQL database(s) missing")
+        for skip in provision.get("skipped", [])[:10]:
+            lines.append(
+                f"  - {_line(skip.get('language', '?'), max_chars=20)}: "
+                f"{_line(skip.get('reason', '?'), max_chars=160)} — "
+                f"{_line(skip.get('remedy', '?'), max_chars=160)}"
+            )
+        if provision.get("build_timed_out"):
+            lines.append(
+                "  - background database build did not finish inside "
+                "this run's wait budget (it completes into the shared "
+                "cache — the next run reuses it)"
+            )
+        if provision.get("build_aborted"):
+            lines.append(
+                "  - background database build wait was interrupted "
+                "by a shutdown request — not a wait-budget timeout"
+            )
+        if provision.get("build_failed"):
+            lines.append(
+                "  - background database build failed (see the run "
+                "log); pass --codeql-db <path> to supply one"
+            )
+        lines.append(
+            "  CodeQL steps for the affected language(s) were skipped, "
+            "not refuted."
+        )
 
     phase_aborts = report.get("phase_aborts")
     if phase_aborts:
