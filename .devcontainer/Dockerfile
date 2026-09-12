@@ -72,7 +72,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
 # SEMGREP (static-analysis, scan, raptor-scan, agentic commands)
 # ============================================================================
 
-RUN pip install --no-cache-dir semgrep==1.172.0
+RUN pip install --no-cache-dir semgrep==1.177.0
 
 # ============================================================================
 # RR DEBUGGER (rr-debugger skill, crash-analysis agents)
@@ -137,9 +137,9 @@ RUN apt-get update \
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x -o /tmp/nodesource_setup.sh \
     && bash /tmp/nodesource_setup.sh \
     && rm /tmp/nodesource_setup.sh \
-    && apt-get install -y --no-install-recommends nodejs=24.20.0-1nodesource1 \
+    && apt-get install -y --no-install-recommends nodejs=24.21.0-1nodesource1 \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code@2.1.163
+    && npm install -g @anthropic-ai/claude-code@2.1.269
 
 # ============================================================================
 # JS PACKAGE MANAGERS (npm-managed yarn — apt source + package removed above)
