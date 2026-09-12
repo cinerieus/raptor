@@ -96,11 +96,20 @@ class TestCodeqlDegradedDispatch:
 
 
 class TestCodeqlUnsupportedQueryId:
-    """A codeql chain step naming a query ID (not an on-disk query
-    file) must skip loudly, not error on every dispatch — and the
-    producers must not emit ID-shaped entries at all."""
+    """A codeql chain step naming a query ID the pack-index resolver
+    cannot map to an installed query file must skip loudly, not error
+    on every dispatch — and the producers must not emit unresolvable
+    ID-shaped entries at all. The resolver is stubbed unresolvable so
+    the contract holds on hosts with the packs installed (resolvable
+    IDs are covered in test_codeql_query_resolver)."""
 
-    def test_query_id_with_database_skips_not_errors(self, tmp_path):
+    def test_query_id_with_database_skips_not_errors(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: None,
+        )
         db = tmp_path / "codeql-db"
         db.mkdir()
         config = OrchestratorConfig(
@@ -123,13 +132,38 @@ class TestCodeqlUnsupportedQueryId:
             "unsupported query id must not surface as a channel error"
         )
 
-    def test_fallback_chain_omits_query_id_entries(self):
+    def test_fallback_chain_omits_unresolvable_query_ids(
+        self, monkeypatch,
+    ):
         from core.audit.orchestrator import _cwe_fallback_chain
 
         # CWE-78's dispatch value is "cpp/command-line-injection" — a
-        # pack query ID with no on-disk file.
+        # pack query ID. When the id resolver finds no installed pack
+        # query (stubbed here so the assertion holds on hosts WITH
+        # the packs installed), the chain's codeql slot stays empty.
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: None,
+        )
         types = {e["type"] for e in _cwe_fallback_chain("CWE-78")}
         assert "codeql" not in types
+
+    def test_fallback_chain_keeps_resolved_query_id(
+        self, tmp_path, monkeypatch,
+    ):
+        from core.audit.orchestrator import _cwe_fallback_chain
+
+        ql = tmp_path / "CommandLineInjection.ql"
+        ql.write_text("select 1")
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: str(ql),
+        )
+        entries = [
+            e for e in _cwe_fallback_chain("CWE-78")
+            if e["type"] == "codeql"
+        ]
+        assert entries and entries[0]["config"]["query"] == str(ql)
 
     def test_fallback_chain_keeps_on_disk_query_file(
         self, tmp_path, monkeypatch,
@@ -149,9 +183,15 @@ class TestCodeqlUnsupportedQueryId:
             codeql_entries[0]["config"]["query"] == str(qfile)
         )
 
-    def test_hypothesis_chain_omits_query_id_entries(self):
+    def test_hypothesis_chain_omits_unresolvable_query_ids(
+        self, monkeypatch,
+    ):
         from core.audit.orchestrator import _hypothesis_to_tool_chain
 
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: None,
+        )
         chain = _hypothesis_to_tool_chain(
             "os command injection via system()", "a.c", cwe="CWE-78",
         )

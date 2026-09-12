@@ -10433,9 +10433,11 @@ def _launch_codeql_warmup(config: "OrchestratorConfig") -> None:
     """Launch the background whole-run CodeQL warm-up (one thread).
 
     Enumerates the dispatch table's query universe for each database's
-    language, filters it through the SAME dispatchability gate the
-    chain producers apply (``_codeql_query_file`` — run_codeql_sweep
-    only ever sees on-disk query files), and hands the survivors to
+    language, resolves each spec through the SAME dispatchability gate
+    the chain producers apply (``_codeql_query_file`` — on-disk file
+    passthrough, else pack-ID resolution), and hands the RESOLVED
+    on-disk paths — the exact ``query_path`` values the dispatch site
+    later feeds ``run_codeql_sweep``, so the memo keys line up — to
     :func:`core.audit.sweep.warm_codeql_memo` — one database at a
     time on a single daemon thread (concurrent analyze on ONE db dies
     on codeql's exclusive disk-cache lock; concurrent JVMs across dbs
@@ -10475,8 +10477,15 @@ def _launch_codeql_warmup(config: "OrchestratorConfig") -> None:
         pack = _CODEQL_PACK_FOR_LANGUAGE.get(lang or "")
         if pack is None:
             continue
+        # Hand the RESOLVED paths onward: warm_codeql_memo (like
+        # run_codeql_sweep) only accepts on-disk query files, so a
+        # pack ID passed raw would be silently dropped there and the
+        # warm-up would stay vacuous for every table entry the
+        # resolver just activated.
         queries = [
-            q for q in ids_by_pack.get(pack, ()) if _codeql_query_file(q)
+            resolved
+            for q in ids_by_pack.get(pack, ())
+            if (resolved := _codeql_query_file(q))
         ]
         if not queries:
             logger.debug(
@@ -15958,11 +15967,11 @@ def _hypothesis_to_tool_chain(
         except ImportError:
             pass
         else:
-            codeql_query = codeql_query_for_cwe(cwe)
-            if codeql_query and _codeql_query_file(codeql_query):
+            codeql_query = _resolved_codeql_query(
+                codeql_query_for_cwe(cwe) or "",
+            )
+            if codeql_query:
                 chain.append({"type": "codeql", "config": {"query": codeql_query}})
-            elif codeql_query:
-                _note_codeql_unsupported_query_id(codeql_query)
 
     if "integer_truncation" not in seen_types:
         try:
@@ -16328,29 +16337,58 @@ def _note_codeql_degraded_skip(file_path: str, function_name: str) -> None:
 _CODEQL_UNSUPPORTED_IDS_LOGGED: set[str] = set()
 
 
-def _codeql_query_file(query: str) -> bool:
-    """Whether a chain codeql query spec is dispatchable.
+def _codeql_query_file(query: str) -> str | None:
+    """THE shared lookup surface for chain codeql query specs.
 
-    ``run_codeql_sweep`` requires an existing on-disk query file; the
-    CWE dispatch table carries pack query IDs (``cpp/overflow-buffer``)
-    that nothing in this codebase resolves to a file — dispatching one
-    errors unconditionally.
+    Both the dispatch gate and pack-wide enumeration consumers
+    consult this one function, so a spec class it accepts activates
+    everywhere at once. Returns the dispatchable on-disk ``.ql`` path:
+    an existing file path passes through; a pack query ID
+    (``cpp/overflow-buffer``) resolves against the installed packs'
+    ``@id`` index (core.audit.codeql_query_resolver, cached per
+    process). None = not dispatchable (``run_codeql_sweep`` requires
+    a query file). Truthiness-compatible with the old boolean gate.
     """
-    return bool(query) and Path(query).exists()
+    if not query:
+        return None
+    if Path(query).exists():
+        return query
+    try:
+        from .codeql_query_resolver import resolve_query_id
+        return resolve_query_id(query)
+    except Exception:  # noqa: BLE001 — resolution is best-effort
+        logger.debug(
+            "codeql id resolution failed for %r", query, exc_info=True,
+        )
+        return None
+
+
+def _resolved_codeql_query(query: str) -> str | None:
+    """Producer-side wrapper over :func:`_codeql_query_file`: same
+    lookup, plus the loud-once note when a spec is unresolvable so
+    the chain's codeql slot stays honestly empty."""
+    resolved = _codeql_query_file(query)
+    if resolved:
+        return resolved
+    if query:
+        _note_codeql_unsupported_query_id(query)
+    return None
 
 
 def _note_codeql_unsupported_query_id(
     query: str, file_path: str = "", function_name: str = "",
 ) -> None:
     """One loud line per query id when a codeql step names a query ID
-    instead of an on-disk query file, debug after — honest degradation
-    instead of a permanently erroring dispatch."""
+    that is neither an on-disk query file nor resolvable against the
+    installed packs, debug after — honest degradation instead of a
+    permanently erroring dispatch."""
     if query not in _CODEQL_UNSUPPORTED_IDS_LOGGED:
         _CODEQL_UNSUPPORTED_IDS_LOGGED.add(query)
         logger.info(
-            "codeql chain step unsupported: codeql query id %r is not "
-            "an on-disk query file and no resolver exists — skipping "
-            "(fallback channels cover the claim)",
+            "codeql chain step unsupported: query id %r is not an "
+            "on-disk query file and did not resolve to an installed "
+            "pack query — skipping (fallback channels cover the "
+            "claim)",
             query,
         )
     logger.debug(
@@ -16553,11 +16591,9 @@ def _cwe_fallback_chain(
         for cocci_rule in resolve_cocci_rules_for_cwe(cwe)
     )
 
-    codeql_query = codeql_query_for_cwe(cwe)
-    if codeql_query and _codeql_query_file(codeql_query):
+    codeql_query = _resolved_codeql_query(codeql_query_for_cwe(cwe) or "")
+    if codeql_query:
         chain.append({"type": "codeql", "config": {"query": codeql_query}})
-    elif codeql_query:
-        _note_codeql_unsupported_query_id(codeql_query)
 
     if joern_applicable(cwe):
         sinks = sinks_for_cwe(cwe)
@@ -18012,10 +18048,14 @@ def _run_tool_chain(
                             tier_counters, "codeql", "skipped",
                         )
                     continue
-                if not _codeql_query_file(tool_cfg.get("query") or ""):
+                _cq_query = _codeql_query_file(
+                    tool_cfg.get("query") or "",
+                )
+                if not _cq_query:
                     # Defense in depth behind the producers' filter: a
-                    # query ID (not an on-disk file) would error on
-                    # every dispatch inside run_codeql_sweep.
+                    # spec that is neither an on-disk file nor a
+                    # resolvable pack ID would error on every dispatch
+                    # inside run_codeql_sweep.
                     _note_codeql_unsupported_query_id(
                         tool_cfg.get("query") or "",
                         file_path, function_name,
@@ -18036,7 +18076,7 @@ def _run_tool_chain(
                     config,
                     "codeql",
                     {
-                        "query": _memo_hash_file(tool_cfg["query"]),
+                        "query": _memo_hash_file(_cq_query),
                         # The database's row data is too large to hash;
                         # its metadata file pins the build identity and
                         # the memo's run lifetime bounds the rest (the
@@ -18056,7 +18096,7 @@ def _run_tool_chain(
                         target_path=effective_target,
                         file_path=file_path,
                         function_name=function_name,
-                        query_path=tool_cfg["query"],
+                        query_path=_cq_query,
                         database_path=_tool_db,
                         line_start=line_start,
                         line_end=_cq_line_end,

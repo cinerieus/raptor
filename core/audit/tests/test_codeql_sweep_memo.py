@@ -687,22 +687,69 @@ class TestLaunchCodeqlWarmup:
         assert done.wait(10)
         assert warm_calls == [(str(db), [str(qfile)], config.codeql_memo)]
 
-    def test_pack_ids_without_on_disk_files_launch_nothing(
+    def test_unresolvable_pack_ids_launch_nothing(
         self, tmp_path: Path, monkeypatch,
     ):
         """The warm-up mirrors the chain producers' dispatchability
-        gate: a query ID that is not an on-disk file can never reach
-        run_codeql_sweep, so there is nothing to warm."""
+        gate: a query ID that is neither an on-disk file nor
+        resolvable against the installed packs can never reach
+        run_codeql_sweep, so there is nothing to warm. The resolver
+        is stubbed to keep the premise on hosts with the standard
+        packs installed."""
         import core.audit.orchestrator as orch_mod
 
         db = self._make_lang_db(tmp_path, "cpp")
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: None,
+        )
 
         def boom(*a, **k):
             raise AssertionError("warm-up must not launch")
 
         monkeypatch.setattr(sweep_mod, "warm_codeql_memo", boom)
-        # Real dispatch table: pack IDs only, none on disk.
+        # Real dispatch table: pack IDs only, none resolvable.
         orch_mod._launch_codeql_warmup(self._config([str(db)]))
+
+    def test_resolvable_pack_ids_warm_with_resolved_paths(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """Joint activation with the pack-ID resolver: a table entry
+        that resolves must reach warm_codeql_memo as the RESOLVED
+        on-disk path — the raw ID is not a file and would be silently
+        dropped there, leaving the warm-up vacuous."""
+        import threading
+
+        import core.audit.cwe_dispatch as cwe_dispatch
+        import core.audit.orchestrator as orch_mod
+
+        db = self._make_lang_db(tmp_path, "cpp")
+        qfile = _make_id_query(tmp_path, "cpp/overflow-buffer", "a.ql")
+        monkeypatch.setattr(
+            cwe_dispatch, "codeql_query_ids_by_pack",
+            lambda: {"cpp": ["cpp/overflow-buffer", "cpp/unresolvable"]},
+        )
+        monkeypatch.setattr(
+            "core.audit.codeql_query_resolver.resolve_query_id",
+            lambda qid: (
+                str(qfile) if qid == "cpp/overflow-buffer" else None
+            ),
+        )
+
+        done = threading.Event()
+        warm_calls: list[tuple] = []
+
+        def fake_warm(database_path, query_paths, memo=None, **kw):
+            warm_calls.append((database_path, list(query_paths), memo))
+            done.set()
+            return {"queries": 1, "prefilled": 1, "orphan_rules": 0}
+
+        monkeypatch.setattr(sweep_mod, "warm_codeql_memo", fake_warm)
+
+        config = self._config([str(db)])
+        orch_mod._launch_codeql_warmup(config)
+        assert done.wait(10)
+        assert warm_calls == [(str(db), [str(qfile)], config.codeql_memo)]
 
     def test_no_databases_is_a_noop(self, monkeypatch):
         import core.audit.orchestrator as orch_mod
