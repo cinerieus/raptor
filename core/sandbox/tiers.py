@@ -150,8 +150,19 @@ def resolve_call_floor(
         return ContainmentTier.BARE, FLOOR_SOURCE_OPERATOR_DISABLE
     if require_fresh_procfs:
         return untrusted_default_floor(), FLOOR_SOURCE_DEFAULT
-    if untrusted_workload or require_fresh_procfs is False:
+    if require_fresh_procfs is False:
+        # Kwarg present-but-zeroed: the env-var-honouring derivation
+        # (untrusted_fresh_procfs_required) is the only in-tree minter
+        # of this shape, so the waived floor is correctly attributed
+        # to the env consent source.
         return waived_untrusted_floor(), FLOOR_SOURCE_ENV
+    if untrusted_workload:
+        # Untrusted-marked call that never derived the contract kwarg:
+        # fail CLOSED at the class default. Granting the waived floor
+        # here would attribute consent nobody verified — the resolver
+        # never reads the env var itself, so the lowered floor belongs
+        # only to callers that carried the derivation through.
+        return untrusted_default_floor(), FLOOR_SOURCE_DEFAULT
     return ContainmentTier.BARE, FLOOR_SOURCE_DEFAULT
 
 

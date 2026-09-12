@@ -435,7 +435,9 @@ def get_proxy_persist_state(run_dir: Path) -> "dict | None":
 
 def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
                        restrict_reads: bool,
-                       mountless_backend: bool = False) -> None:
+                       mountless_backend: bool = False,
+                       containment_tier: "str | None" = None,
+                       containment_floor: "str | None" = None) -> None:
     """Record whether a sandbox invocation's posture could hide the
     telemetry-MAC key from the sandboxed child.
 
@@ -461,6 +463,25 @@ def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
         run_key = str(Path(run_dir).resolve())
     except OSError:
         return
+
+    def _weakest_tier(cur_label: "str | None",
+                      new_label: "str | None") -> "str | None":
+        """Weakest-wins merge for containment-tier labels (same
+        posture rule as the booleans: if ANY call in the run ran at a
+        weaker tier / lower floor, the run's record carries it).
+        Unknown labels win nothing and lose nothing — tolerate future
+        vocabulary rather than corrupt the record."""
+        if new_label is None:
+            return cur_label
+        if cur_label is None:
+            return new_label
+        from .tiers import label_tier
+        try:
+            return (new_label
+                    if label_tier(new_label) < label_tier(cur_label)
+                    else cur_label)
+        except KeyError:
+            return cur_label
     with _lock:
         cur = _run_postures.get(run_key)
         if cur is None:
@@ -471,6 +492,12 @@ def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
             }
             if mountless_backend:
                 _run_postures[run_key]["mountless_backend"] = True
+            if containment_tier is not None:
+                _run_postures[run_key]["containment_tier"] = (
+                    containment_tier)
+            if containment_floor is not None:
+                _run_postures[run_key]["containment_floor"] = (
+                    containment_floor)
         else:
             cur["mount_ns_active"] = (cur["mount_ns_active"]
                                       and bool(mount_ns_active))
@@ -479,6 +506,14 @@ def record_run_posture(run_dir: Path, *, mount_ns_active: bool,
             cur["mac_key_hidden"] = cur["mac_key_hidden"] and hidden
             if mountless_backend:
                 cur["mountless_backend"] = True
+            _merged_tier = _weakest_tier(
+                cur.get("containment_tier"), containment_tier)
+            if _merged_tier is not None:
+                cur["containment_tier"] = _merged_tier
+            _merged_floor = _weakest_tier(
+                cur.get("containment_floor"), containment_floor)
+            if _merged_floor is not None:
+                cur["containment_floor"] = _merged_floor
 
 
 def get_run_posture(run_dir: Path) -> dict[str, bool] | None:

@@ -589,9 +589,53 @@ def test_read_restricted_direct_mountless_selection_uses_private_scratch(
 @pytest.mark.integration
 @pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
 @pytest.mark.parametrize("restrict_reads", [True, False])
-def test_mountless_untrusted_refuses_landlock_abi_below_three(
+def test_mountless_unwaived_untrusted_refuses_on_abi_below_three(
         tmp_path, monkeypatch, restrict_reads):
-    """ABI 1/2 cannot safely contain any mountless untrusted run."""
+    """ABI 1/2 removes the mountless lane from the achievable set for
+    untrusted work (no TRUNCATE right — the write policy cannot be
+    enforced on a host-visible filesystem). An UNWAIVED untrusted run
+    then has no admitted lane left below its mount-tier floor: it is
+    refused at the mountless dispatch, category carried, override
+    named, exactly one spawn attempt."""
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+    from core.sandbox.errors import SandboxFloorError, SandboxSetupError
+    calls = []
+
+    def fail_bind(cmd, **kwargs):
+        calls.append(kwargs)
+        cp = subprocess.CompletedProcess(cmd, returncode=126,
+                                         stdout="", stderr="")
+        cp._setup_status = ("M", "forced mount-ns failure")
+        return cp
+
+    monkeypatch.setattr(_spawn_mod, "run_sandboxed", fail_bind)
+    monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
+    monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 2)
+    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
+    with pytest.raises(SandboxSetupError) as excinfo:
+        _ctx.run_untrusted(
+            ["true"], target=str(tmp_path), output=str(tmp_path), timeout=60,
+            restrict_reads=restrict_reads,
+        )
+    assert len(calls) == 1
+    assert isinstance(excinfo.value, SandboxFloorError)
+    assert excinfo.value.setup_category == "M"
+    assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in str(excinfo.value)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_mountless_waived_untrusted_continues_down_ladder_on_low_abi(
+        tmp_path, monkeypatch, caplog):
+    """With the waiver set, the same ABI-1/2 host no longer produces a
+    refusal ABOVE a reachable weaker lane (the old shape: the mountless
+    retry hard-refused while the spawn-exception ladder landed the same
+    workload on the unshare-CLI lane under the same waiver). The waived
+    run skips the unachievable mountless retry and continues down the
+    demotion ladder to a lane its consented floor admits, with the
+    per-call consented-degrade warning naming the exposure."""
+    import logging as _logging
     from core.sandbox import _spawn as _spawn_mod
     from core.sandbox import context as _ctx
     from core.sandbox.errors import SandboxSetupError
@@ -608,13 +652,24 @@ def test_mountless_untrusted_refuses_landlock_abi_below_three(
     monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
     monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 2)
     monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
-    with pytest.raises(SandboxSetupError) as excinfo:
-        _ctx.run_untrusted(
-            ["true"], target=str(tmp_path), output=str(tmp_path), timeout=60,
-            restrict_reads=restrict_reads,
-        )
+    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
+        try:
+            r = _ctx.run_untrusted(
+                ["true"], target=str(tmp_path), output=str(tmp_path),
+                timeout=60)
+        except SandboxSetupError as e:
+            if "containment floor" in str(e):
+                pytest.fail(f"waived run was refused by the floor: {e}")
+            pytest.skip(f"fallback lane unavailable on this host: {e}")
+    if r.returncode != 0:
+        pytest.skip(f"fallback-lane child failed: rc={r.returncode}")
+    # No mountless retry was attempted — the one spawn call is the
+    # failed mount attempt; the run continued on the subprocess lane.
     assert len(calls) == 1
-    assert "ABI is below 3" in str(excinfo.value)
+    assert "not achievable" in r.sandbox_info.get("mount_ns_degraded", "")
+    assert r.sandbox_info["containment_tier"] == "ns-only"
+    assert any("HOST process table" in rec.getMessage()
+               for rec in caplog.records), caplog.text
 
 
 @pytest.mark.integration
@@ -928,26 +983,45 @@ def test_no_mount_ns_host_refuses_untrusted_run(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="linux-only waiver")
-def test_waiver_warn_covers_pass_fds_demotion(monkeypatch, caplog):
+def test_waived_pass_fds_demotion_warns_per_call(
+        tmp_path, monkeypatch, caplog):
     """A waived untrusted call carrying pass_fds= lands on the
-    subprocess fallback even on a fully capable host — the waiver
-    warning must name that per-call shape, not just backend
-    unavailability. Without the waiver the helper stays silent (the
-    contract is intact and the refusal path owns the messaging)."""
+    subprocess fallback even on a fully capable host — the consented-
+    degrade branch of the dispatch floor check must warn on that
+    per-call shape, naming the pass_fds demotion and the HOST process
+    table exposure. Without the waiver the same shape is refused (the
+    refusal path owns the messaging) with the demotion named."""
     import logging as _logging
     from core.sandbox import context as _ctx
-    monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
-    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
-        _ctx._warn_if_waiver_degrades({"pass_fds": [5]})
-    assert any("pass_fds" in rec.getMessage()
-               and "HOST process table" in rec.getMessage()
-               for rec in caplog.records), caplog.text
+    from core.sandbox.errors import SandboxFloorError, SandboxSetupError
+    if not (_ctx.check_net_available() and _ctx.check_mount_available()):
+        pytest.skip("mount-capable host required for the pass_fds shape")
+    _r, _w = os.pipe()
+    try:
+        monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+        with caplog.at_level(_logging.WARNING,
+                             logger="core.sandbox.context"):
+            try:
+                _ctx.run_untrusted(
+                    ["true"], target=str(tmp_path), output=str(tmp_path),
+                    timeout=60, pass_fds=[_r])
+            except SandboxSetupError as e:
+                pytest.skip(f"fallback lane unavailable: {e}")
+        assert any("pass_fds" in rec.getMessage()
+                   and "HOST process table" in rec.getMessage()
+                   for rec in caplog.records), caplog.text
 
-    caplog.clear()
-    monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", raising=False)
-    with caplog.at_level(_logging.WARNING, logger="core.sandbox.context"):
-        _ctx._warn_if_waiver_degrades({"pass_fds": [5]})
-    assert not caplog.records, caplog.text
+        monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
+                           raising=False)
+        with pytest.raises(SandboxFloorError) as excinfo:
+            _ctx.run_untrusted(
+                ["true"], target=str(tmp_path), output=str(tmp_path),
+                timeout=60, pass_fds=[_r])
+        assert "pass_fds" in str(excinfo.value)
+        assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in str(excinfo.value)
+    finally:
+        os.close(_r)
+        os.close(_w)
 
 
 # ------------------------------- environmental use_sandbox=False gate

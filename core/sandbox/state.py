@@ -156,6 +156,11 @@ _sandbox_landlock_only_warned = False
 # Namespace-preserving bind-tree fallback. The posture is static enough for a
 # process-level warning; per-call reporting still records every affected run.
 _mountless_backend_warned = False
+# Consent banner: a non-default consent source (the
+# RAPTOR_ALLOW_DEGRADED_UNTRUSTED waiver) lowered the untrusted
+# containment floor for this process. Once per process; the per-call
+# consented-degrade warning fires every time the lowered floor bites.
+_floor_lowered_banner_warned = False
 _bare_run_posture_warned = False
 _net_and_tcp_allowlist_warned = False
 # Degraded-mode Landlock TCP-connect deny (block_network without a
