@@ -776,6 +776,7 @@ def build_joern_evidence(
     on_progress: Callable | None = None,
     joern_server=None,
     abort_check: Callable[[], bool] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, list] | None:
     """Run Joern pre-sweep (standard_sinks.sc) if available.
 
@@ -831,6 +832,7 @@ def build_joern_evidence(
         heap_mb=tunables.heap_mb,
         server=joern_server,
         status_out=status,
+        deadline_monotonic=deadline_monotonic,
         # An in-target run output dir must not feed the CPG content
         # key: its artifacts change every segment, flapping the key
         # and re-buying a full rebuild per resume.
@@ -956,6 +958,7 @@ def resolve_joern_evidence(
     joern_server=None,
     out_dir=None,
     abort_event=None,
+    deadline_monotonic: float | None = None,
 ) -> tuple:
     """Resolve Joern evidence.
 
@@ -990,7 +993,8 @@ def resolve_joern_evidence(
     future = executor.submit(
         build_joern_evidence, target_path, out_dir, joern_overrides,
         _progress, joern_server,
-        abort_event.is_set if abort_event is not None else None,
+        abort_check=abort_event.is_set if abort_event is not None else None,
+        deadline_monotonic=deadline_monotonic,
     )
     executor.shutdown(wait=False)
     return (None, future)

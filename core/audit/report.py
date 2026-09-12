@@ -220,6 +220,26 @@ def generate_report(
     if presweep:
         report["joern_presweep"] = presweep
 
+    # Mid-run channel-health trips (the joern gate): a tripped channel
+    # skipped its remaining dispatches for the run — its zero-receipt
+    # tiers mean "channel went down", not "tool found nothing", and
+    # the operator must see that distinction stated.
+    try:
+        tier_diag = load_json(
+            out_dir / "tier-diagnostics.json", max_bytes=_MAX_STATE_BYTES,
+        )
+    except Exception:  # noqa: BLE001 — reporting must not fail the run
+        logger.debug("tier diagnostics load failed", exc_info=True)
+        tier_diag = None
+    health = (tier_diag or {}).get("channel_health")
+    if isinstance(health, dict):
+        tripped_channels = {
+            name: rec for name, rec in health.items()
+            if isinstance(rec, dict) and rec.get("tripped")
+        }
+        if tripped_channels:
+            report["channel_health"] = tripped_channels
+
     # Phase aborts (persistent LLM auth refusal): a listed phase
     # produced NO trustworthy output — its empty results must not be
     # read as "phase ran and found nothing". Written at abort time by
@@ -1265,6 +1285,23 @@ def _format_summary(report: dict[str, Any]) -> str:
                 f"taint-flow evidence is incomplete (functions read as "
                 f"'no flows' rather than 'not swept'). Re-run /audit "
                 f"or /agentic to regenerate the sweep."
+            )
+
+    channel_health = report.get("channel_health")
+    if channel_health:
+        for name, rec in sorted(channel_health.items()):
+            lines.append("")
+            lines.append(f"### ⚠️ {name} channel unhealthy (mid-run trip)")
+            reason = rec.get("trip_reason") or "consecutive dispatch failures"
+            lines.append(
+                f"The {name} channel tripped its health gate ({reason}) "
+                f"and its remaining dispatches were skipped — "
+                f"hypotheses after the trip carry no {name} receipts. "
+                f"Skipped is not refuted: treat the missing receipts "
+                f"as unanswered questions. "
+                f"{rec.get('total_successes', 0)} dispatch(es) "
+                f"completed before the trip, "
+                f"{rec.get('total_errors', 0)} failed."
             )
 
     phase_aborts = report.get("phase_aborts")

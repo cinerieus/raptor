@@ -206,6 +206,13 @@ from .sweep import (
     run_semgrep_sweep,
     run_smt_verb_direct,
 )
+from .joern_health import (
+    JoernChannelHealth,
+    channel_unhealthy as _joern_channel_unhealthy,
+    dispatch_blocked as _joern_dispatch_blocked,
+    health_snapshot as _channel_health_snapshot,
+    record_outcome as _record_joern_outcome,
+)
 from .sweep_memo import SweepMemo, hash_file as _memo_hash_file, hash_text as _memo_hash_text
 from .topo_order import topological_sort as _topological_sort
 from .triage import TriageBucket, classify_all, format_triage_summary
@@ -838,6 +845,13 @@ class OrchestratorConfig:
     )
     include_dirs_memo: "BoundedMemo" = field(
         default_factory=_default_tu_cache, repr=False,
+    )
+    # Run-scoped joern channel health gate: consecutive dispatch
+    # failures trip it, dispatch sites then skip joern steps instead
+    # of dialing a dead/restarting server for the rest of the run.
+    # See core.audit.joern_health for the trip semantics.
+    joern_health: JoernChannelHealth = field(
+        default_factory=JoernChannelHealth, repr=False,
     )
     # Tool-chain early exit: once a chain step yields a receipt the
     # dispatching site would accept as promotion-grade (G2's
@@ -4483,6 +4497,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
                 joern_overrides=config.joern_overrides,
                 on_joern_progress=_joern_progress_cb,
                 joern_server=joern_server,
+                deadline_monotonic=getattr(
+                    config, "run_deadline_monotonic", None,
+                ),
                 out_dir=config.out_dir,
             )
 
@@ -5566,7 +5583,9 @@ def _review_duration_hints(
 _IRIS_JOERN_PAIR_BUDGET = 64
 
 
-def _make_iris_joern_tool_runner(joern_server) -> Callable:
+def _make_iris_joern_tool_runner(
+    joern_server, config: "OrchestratorConfig | None" = None,
+) -> Callable:
     """Build the IRIS refinement ToolRunner backed by the live Joern server.
 
     Mirrors ``core.iris.codeql_runner.make_codeql_tool_runner``: the
@@ -5576,6 +5595,11 @@ def _make_iris_joern_tool_runner(joern_server) -> Callable:
     pairwise against sink specs via targeted live taint queries; a
     flow confirms both endpoints.  The pair walk is budgeted so a
     spec-heavy round cannot monopolise the single-threaded REPL.
+
+    Per-pair outcomes feed the channel-health gate when *config* is
+    provided, and the walk stops as soon as the gate reports the
+    channel down — a dead server must not consume the whole pair
+    budget one timeout at a time.
     """
 
     def joern_tool_runner(specs):
@@ -5598,6 +5622,10 @@ def _make_iris_joern_tool_runner(joern_server) -> Callable:
             for snk in sinks:
                 if budget <= 0:
                     break
+                if config is not None and _joern_channel_unhealthy(config):
+                    errors.append("joern channel health gate tripped")
+                    budget = 0
+                    break
                 budget -= 1
                 attempts += 1
                 # Per-pair error accounting: an empty flow list with a
@@ -5616,7 +5644,13 @@ def _make_iris_joern_tool_runner(joern_server) -> Callable:
                 )
                 if flows or not pair_errors:
                     successes += 1
+                    _record_joern_outcome(config, error=False)
                 if pair_errors:
+                    _record_joern_outcome(
+                        config, error=True,
+                        detail="; ".join(str(e) for e in pair_errors),
+                        key=f"iris:{src.function}->{snk.function}",
+                    )
                     errors.extend(str(e) for e in pair_errors)
                 if not flows:
                     continue
@@ -6358,7 +6392,9 @@ def _iris_refine_and_bypass(
         if iris_candidates:
             joern_tool_runner = None
             if joern_server is not None:
-                joern_tool_runner = _make_iris_joern_tool_runner(joern_server)
+                joern_tool_runner = _make_iris_joern_tool_runner(
+                    joern_server, config=config,
+                )
 
             bypass_runner = None
             try:
@@ -8194,13 +8230,20 @@ def _run_audit_body(
 
     logger.debug("entering _resolve_gate_demoted")
     _pass_ledger.start_phase("resolve_gate_demoted")
+    # A mid-run health-gate trip means joern stopped looking: mark it
+    # unavailable so is_class_covered discards it from any stale
+    # dispatch record (belt-and-braces behind the skipped_types fix —
+    # phantom coverage must not demote suspicious to clean).
+    _gate_caps = dict(tool_capabilities or {})
+    if _joern_channel_unhealthy(config):
+        _gate_caps["joern"] = False
     _resolve_gate_demoted(
         result,
         config,
         sarif_cache,
         checklist,
         domain_model=domain_model,
-        available_tools=tool_capabilities,
+        available_tools=_gate_caps,
         mechanical_findings=mechanical_findings,
     )
     _pass_ledger.end_phase()
@@ -8293,7 +8336,11 @@ def _run_audit_body(
         logger.debug("entering _persist_findings")
         _persist_findings(result, config)
 
-    if iris_taint_specs and joern_server is not None and result.findings > 0:
+    if (
+        iris_taint_specs and joern_server is not None
+        and result.findings > 0
+        and not _joern_channel_unhealthy(config)
+    ):
         try:
             from .iris_specs import compile_joern_config
 
@@ -8776,7 +8823,10 @@ def _run_audit_body(
             logger.debug("fp_feedback: save failed", exc_info=True)
 
     try:
-        write_tier_diagnostics(result.tier_counters, config.out_dir)
+        write_tier_diagnostics(
+            result.tier_counters, config.out_dir,
+            channel_health=_channel_health_snapshot(config),
+        )
         diag_text = format_tier_diagnostics(result.tier_counters)
         if diag_text.count("\n") > 1:
             logger.info(diag_text)
@@ -9074,7 +9124,10 @@ def _sigterm_salvage(
         logger.debug("salvage: graded export failed", exc_info=True)
 
     try:
-        write_tier_diagnostics(result.tier_counters, config.out_dir)
+        write_tier_diagnostics(
+            result.tier_counters, config.out_dir,
+            channel_health=_channel_health_snapshot(config),
+        )
     except Exception:
         logger.debug("salvage: tier diagnostics failed", exc_info=True)
 
@@ -16602,6 +16655,45 @@ def _joern_budget_timeout_s(config: OrchestratorConfig) -> int | None:
     return max(1, min(default, int(remaining)))
 
 
+# Per-pair live-query budget: the callee's 30s default is sized for a
+# small CPG. On a large graph a healthy per-pair dataflow solve can
+# exceed it, and each such timeout feeds the health gate as a failure
+# — a slow-but-healthy server would trip the gate on latency alone.
+# One extra base multiple per step of serialized CPG, capped: enough
+# headroom for graphs several times larger, while a wedged query
+# still cannot hold a worker past the run-deadline clamp.
+_JOERN_LIVE_QUERY_BASE_S = 30
+_JOERN_LIVE_CPG_BYTES_PER_STEP = 256 * 1024 * 1024
+_JOERN_LIVE_TIMEOUT_MAX_MULTIPLE = 4
+
+
+def _joern_live_timeout_s(
+    config: OrchestratorConfig, joern_server: Any,
+) -> int:
+    """CPG-scaled, deadline-clamped budget for one live taint query.
+
+    Returns 0 when the remaining run budget is too small to dispatch
+    (callers skip, mirroring :func:`_joern_budget_timeout_s`).
+    """
+    clamp = _joern_budget_timeout_s(config)
+    if clamp == 0:
+        return 0
+    cpg_bytes: int | None = None
+    _size_fn = getattr(joern_server, "cpg_size_bytes", None)
+    if callable(_size_fn):
+        try:
+            cpg_bytes = _size_fn()
+        except Exception:  # noqa: BLE001 — size is advisory only
+            cpg_bytes = None
+    steps = int((cpg_bytes or 0) // _JOERN_LIVE_CPG_BYTES_PER_STEP)
+    scaled = _JOERN_LIVE_QUERY_BASE_S * min(
+        1 + steps, _JOERN_LIVE_TIMEOUT_MAX_MULTIPLE,
+    )
+    if clamp is not None:
+        return min(scaled, clamp)
+    return scaled
+
+
 _MAX_XREF_BYTES = 16384
 _MAX_XREF_NEIGHBORS = 16
 
@@ -17773,18 +17865,37 @@ def _run_tool_chain(
                         pre_hit = True
                         joern_hit = True
 
-                if not pre_hit and joern_server is not None:
+                if (
+                    not pre_hit
+                    and joern_server is not None
+                    and not _joern_dispatch_blocked(config)
+                ):
                     sinks = tool_cfg.get("sinks", [])
                     _live_errors: list = []
+                    _live_timeout = _joern_live_timeout_s(
+                        config, joern_server,
+                    )
+                    if _live_timeout == 0:
+                        # Remaining run budget too small — skip, and
+                        # keep the channel out of the dispatch record.
+                        if skipped_types is not None:
+                            skipped_types.add(tool_type)
+                        if tier_counters:
+                            _increment_tier_dict(
+                                tier_counters, "joern", "skipped",
+                            )
+                        continue
                     live_hits = _joern_live_query(
                         joern_server,
                         function_name,
                         sinks,
+                        timeout=_live_timeout,
                         errors_out=_live_errors,
                     )
                     if live_hits:
                         confirmed.append("joern:live")
                         joern_hit = True
+                        _record_joern_outcome(config, error=False)
                         if tier_counters:
                             _increment_tier_dict(tier_counters, "joern", "confirmed")
                     elif _live_errors:
@@ -17794,14 +17905,31 @@ def _run_tool_chain(
                             "tool_chain joern error %s:%s: %s",
                             file_path, function_name, _live_errors,
                         )
+                        _record_joern_outcome(
+                            config, error=True,
+                            detail="; ".join(str(e) for e in _live_errors),
+                            key=f"{file_path}:{function_name}",
+                        )
                         if errored_types is not None:
                             errored_types.add(tool_type)
                         if tier_counters:
                             _increment_tier_dict(tier_counters, "joern", "errors")
-                    elif tier_counters:
-                        _increment_tier_dict(tier_counters, "joern", "refuted")
-                elif not pre_hit and tier_counters:
-                    _increment_tier_dict(tier_counters, "joern", "skipped")
+                    else:
+                        _record_joern_outcome(config, error=False)
+                        if tier_counters:
+                            _increment_tier_dict(tier_counters, "joern", "refuted")
+                elif not pre_hit:
+                    # No server, or the channel-health gate tripped —
+                    # the channel did NOT look. Record it in
+                    # skipped_types so callers drop it from the
+                    # dispatch record: a gated channel left in
+                    # tools_dispatched reads as "covering channel ran
+                    # silent" and lets the gate-resolution pass demote
+                    # suspicious → clean on phantom coverage.
+                    if skipped_types is not None:
+                        skipped_types.add(tool_type)
+                    if tier_counters:
+                        _increment_tier_dict(tier_counters, "joern", "skipped")
 
                 if joern_hit and joern_server is not None:
                     _enrich_joern_evidence(
@@ -17823,6 +17951,11 @@ def _run_tool_chain(
                     _note_codeql_degraded_skip(
                         file_path, function_name,
                     )
+                    # Skipped = did not look: keep it out of the
+                    # dispatch record (same phantom-coverage rule as
+                    # the gated joern skips).
+                    if skipped_types is not None:
+                        skipped_types.add(tool_type)
                     if tier_counters:
                         _increment_tier_dict(
                             tier_counters, "codeql", "skipped",
@@ -17836,6 +17969,8 @@ def _run_tool_chain(
                         tool_cfg.get("query") or "",
                         file_path, function_name,
                     )
+                    if skipped_types is not None:
+                        skipped_types.add(tool_type)
                     if tier_counters:
                         _increment_tier_dict(
                             tier_counters, "codeql", "skipped",
@@ -17972,9 +18107,16 @@ def _run_tool_chain(
                     ident, sink = extract_flow_endpoints(hypothesis, sinks)
 
                 jv_timeout = _joern_budget_timeout_s(config)
-                if not ident or not sink or joern_server is None:
-                    # No binding (identifier-consistency control) or no
-                    # live server — decline, don't guess.
+                if (
+                    not ident or not sink or joern_server is None
+                    or _joern_dispatch_blocked(config)
+                ):
+                    # No binding (identifier-consistency control), no
+                    # live server, or the channel-health gate tripped
+                    # — decline, don't guess. The channel did not
+                    # look, so it must leave the dispatch record too.
+                    if skipped_types is not None:
+                        skipped_types.add(tool_type)
                     if tier_counters:
                         _increment_tier_dict(tier_counters, tool_type, "skipped")
                 elif jv_timeout == 0:
@@ -17986,6 +18128,8 @@ def _run_tool_chain(
                         "nearly exhausted",
                         tool_type, file_path, function_name,
                     )
+                    if skipped_types is not None:
+                        skipped_types.add(tool_type)
                     if tier_counters:
                         _increment_tier_dict(tier_counters, tool_type, "skipped")
                 else:
@@ -18011,6 +18155,7 @@ def _run_tool_chain(
                         )
                     if jv_result.outcome == "confirmed":
                         confirmed.append(jv_result.rule_id or f"joern:{tool_type}")
+                        _record_joern_outcome(config, error=False)
                         if tier_counters:
                             _increment_tier_dict(tier_counters, tool_type, "confirmed")
                     elif jv_result.outcome == "error":
@@ -18018,6 +18163,13 @@ def _run_tool_chain(
                             "tool_chain %s error %s:%s: %s",
                             tool_type, file_path, function_name,
                             jv_result.errors,
+                        )
+                        _record_joern_outcome(
+                            config, error=True,
+                            detail="; ".join(
+                                str(e) for e in (jv_result.errors or [])
+                            ),
+                            key=f"{file_path}:{function_name}",
                         )
                         if errored_types is not None:
                             errored_types.add(tool_type)
@@ -18028,10 +18180,15 @@ def _run_tool_chain(
                         # no flow with endpoints present).  The chain
                         # contract returns confirmations only; the
                         # refutation evidence stays in the sweep log.
+                        _record_joern_outcome(config, error=False)
                         if tier_counters:
                             _increment_tier_dict(tier_counters, tool_type, "refuted")
-                    elif tier_counters:
-                        _increment_tier_dict(tier_counters, tool_type, "inconclusive")
+                    else:
+                        # Inconclusive still reached the server — a
+                        # completed round trip for health purposes.
+                        _record_joern_outcome(config, error=False)
+                        if tier_counters:
+                            _increment_tier_dict(tier_counters, tool_type, "inconclusive")
 
             elif tool_type == "coccinelle_flow":
                 from .cocci_flow import run_flow_cocci_sweep
@@ -18824,30 +18981,54 @@ def _proactive_validate(
                     _increment_tier_dict(tier_counters, "joern", "confirmed")
                 pre_hit = True
 
-        if not pre_hit and sinks and joern_server is not None:
-            ran.add("joern")
-            _live_errors: list = []
-            live_hits = _joern_live_query(
-                joern_server,
-                outcome.function,
-                sinks,
-                errors_out=_live_errors,
-            )
-            if live_hits:
-                confirmed_tools.append("joern:live")
+        if (
+            not pre_hit and sinks and joern_server is not None
+            and not _joern_dispatch_blocked(config)
+        ):
+            _live_timeout = _joern_live_timeout_s(config, joern_server)
+            if _live_timeout == 0:
                 if tier_counters:
-                    _increment_tier_dict(tier_counters, "joern", "confirmed")
-            elif _live_errors:
-                # Degraded query — unanswered, not refuted.
-                logger.debug(
-                    "cwe-dispatch joern error %s:%s: %s",
-                    outcome.file, outcome.function, _live_errors,
+                    _increment_tier_dict(tier_counters, "joern", "skipped")
+            else:
+                ran.add("joern")
+                _live_errors: list = []
+                live_hits = _joern_live_query(
+                    joern_server,
+                    outcome.function,
+                    sinks,
+                    timeout=_live_timeout,
+                    errors_out=_live_errors,
                 )
-                errored.add("joern")
-                if tier_counters:
-                    _increment_tier_dict(tier_counters, "joern", "errors")
-            elif tier_counters:
-                _increment_tier_dict(tier_counters, "joern", "refuted")
+                if live_hits:
+                    confirmed_tools.append("joern:live")
+                    _record_joern_outcome(config, error=False)
+                    if tier_counters:
+                        _increment_tier_dict(
+                            tier_counters, "joern", "confirmed",
+                        )
+                elif _live_errors:
+                    # Degraded query — unanswered, not refuted.
+                    logger.debug(
+                        "cwe-dispatch joern error %s:%s: %s",
+                        outcome.file, outcome.function, _live_errors,
+                    )
+                    _record_joern_outcome(
+                        config, error=True,
+                        detail="; ".join(str(e) for e in _live_errors),
+                        key=f"{outcome.file}:{outcome.function}",
+                    )
+                    errored.add("joern")
+                    if tier_counters:
+                        _increment_tier_dict(tier_counters, "joern", "errors")
+                else:
+                    _record_joern_outcome(config, error=False)
+                    if tier_counters:
+                        _increment_tier_dict(tier_counters, "joern", "refuted")
+        elif not pre_hit and sinks and joern_server is not None:
+            # Health gate tripped: the channel does not look — do NOT
+            # add it to the ran/dispatch record (phantom coverage).
+            if tier_counters:
+                _increment_tier_dict(tier_counters, "joern", "skipped")
 
     _cwe_db = _codeql_db_for(config, outcome.file)
     if _has_cwe_dispatch and "codeql" not in dispatched and _cwe_db:
@@ -19266,7 +19447,8 @@ def _run_critique(
                 )
                 continue
             _gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
+                outcome.function, joern_server, result.tier_counters,
+                config=config)
             if _gblk:
                 logger.info(
                     "critique promotion blocked %s:%s — sink-guard veto: %s",
@@ -20690,6 +20872,7 @@ def _guard_blocks_promotion(
     function_name: str,
     joern_server,
     tier_counters: dict | None = None,
+    config: OrchestratorConfig | None = None,
 ) -> str | None:
     """Consult the guarded-sink veto for a promotion decision.
 
@@ -20706,13 +20889,30 @@ def _guard_blocks_promotion(
     flaps keyed to server state).  Runs without a Joern lane are
     unaffected (``None`` from the gate, promotion proceeds as before).
     """
+    if config is not None and _joern_channel_unhealthy(config):
+        # A tripped channel cannot answer the veto, and dialing it
+        # burns a full client timeout per uncached function before
+        # returning the same GUARD_UNAVAILABLE. Same fail-closed
+        # doctrine as below, decided without the doomed round trip
+        # (read-only check — the half-open probe belongs to the
+        # verification chains, not the veto).
+        return "guard-unavailable"
     verdict = _check_sink_guarded_cached(function_name, joern_server)
     if verdict == "guarded":
+        _record_joern_outcome(config, error=False)
         return "guarded"
     if verdict == GUARD_UNAVAILABLE:
+        # Feed the health gate: a degraded veto consultation is a
+        # failed joern round trip like any other.
+        _record_joern_outcome(
+            config, error=True, detail="guard-unavailable",
+            key=f"guard:{function_name}",
+        )
         if tier_counters is not None:
             _increment_tier_dict(tier_counters, "joern_guard", "errors")
         return "guard-unavailable"
+    if verdict is not None and joern_server is not None:
+        _record_joern_outcome(config, error=False)
     return None
 
 
@@ -20943,7 +21143,8 @@ def _promote_suspicious_one(
     )
     if mech_tool:
         _gblk = _guard_blocks_promotion(
-            outcome.function, joern_server, result.tier_counters)
+            outcome.function, joern_server, result.tier_counters,
+            config=config)
         if _gblk:
             logger.info(
                 "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
@@ -21001,7 +21202,8 @@ def _promote_suspicious_one(
             # Same sink-guard veto as every other promotion lane
             # (mech-detector above, critique, secondary sweep).
             _pf_gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
+                outcome.function, joern_server, result.tier_counters,
+                config=config)
             if _pf_gblk:
                 logger.info(
                     "sweep promotion blocked %s:%s via %s — "
@@ -21125,7 +21327,7 @@ def _promote_suspicious_one(
             )
             if agg_channels and not _guard_blocks_promotion(
                     outcome.function, joern_server,
-                    result.tier_counters):
+                    result.tier_counters, config=config):
                 tool = "+".join(confirmed)
                 promoted = _promote_outcome(outcome, tool)
                 _record_aggregated_promotion(
@@ -21160,7 +21362,8 @@ def _promote_suspicious_one(
             )
             return
         _gblk = _guard_blocks_promotion(
-            outcome.function, joern_server, result.tier_counters)
+            outcome.function, joern_server, result.tier_counters,
+            config=config)
         if _gblk:
             logger.info(
                 "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
@@ -21471,7 +21674,8 @@ def _synthesize_unmapped_suspicious(
         )
         return
     _gblk = _guard_blocks_promotion(
-        outcome.function, joern_server, result.tier_counters)
+        outcome.function, joern_server, result.tier_counters,
+        config=config)
     if _gblk:
         _increment_tier_dict(
             result.tier_counters, "synthesis_on_demand", "inconclusive",
@@ -22326,7 +22530,7 @@ def _promote_clean_refuted(
                         continue
                     _gblk = _guard_blocks_promotion(
                         outcome.function, joern_server,
-                        result.tier_counters)
+                        result.tier_counters, config=config)
                     if _gblk:
                         logger.info(
                             "clean-refuted promotion blocked %s:%s via %s "
@@ -22418,7 +22622,8 @@ def _promote_clean_refuted(
                 _queue_premise_study_question(config, outcome, h)
                 continue
             _gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
+                outcome.function, joern_server, result.tier_counters,
+                config=config)
             if _gblk:
                 logger.info(
                     "refuted-hypothesis promotion blocked %s:%s via %s — "
@@ -22637,7 +22842,8 @@ def _dispatch_secondary_hypotheses(
                 )
                 continue
             _gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
+                outcome.function, joern_server, result.tier_counters,
+                config=config)
             if _gblk:
                 logger.info(
                     "secondary-hypothesis promotion blocked %s:%s via %s — "

@@ -164,9 +164,16 @@ def inject_discovered_evidence(
 def write_tier_diagnostics(
     tier_counters: dict[str, Any],
     out_dir: Path,
+    channel_health: dict[str, Any] | None = None,
 ) -> None:
-    """Write tier-diagnostics.json to the output directory."""
-    data = {}
+    """Write tier-diagnostics.json to the output directory.
+
+    ``channel_health`` (channel name → health snapshot, e.g. the
+    joern gate's ``to_dict()``) is written under ``channel_health``
+    when provided, so a tripped channel's zero-receipt tiers read as
+    "channel went down mid-run" instead of "tool found nothing".
+    """
+    data: dict[str, Any] = {}
     for name, tc in tier_counters.items():
         data[name] = {
             "confirmed": tc.confirmed,
@@ -186,6 +193,8 @@ def write_tier_diagnostics(
         sc = load_json(sc_path, max_bytes=_MAX_SCOPE_COVERAGE_BYTES)
         if sc is not None:
             data["scope_coverage"] = sc
+    if channel_health:
+        data["channel_health"] = channel_health
     path = out_dir / "tier-diagnostics.json"
     save_json(path, data)
 

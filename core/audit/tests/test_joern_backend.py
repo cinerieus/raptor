@@ -335,7 +335,8 @@ class TestPreSweepAbort:
         captured: dict = {}
 
         def fake_build(target_path, out_dir, joern_overrides,
-                       on_progress, joern_server, abort_check=None):
+                       on_progress, joern_server, abort_check=None,
+                       deadline_monotonic=None):
             captured["abort_check"] = abort_check
             return None
 

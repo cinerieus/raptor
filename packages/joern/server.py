@@ -998,6 +998,21 @@ class JoernServer:
             self._restarting.clear()
             self._restart_lock.release()
 
+    def cpg_size_bytes(self) -> int | None:
+        """Serialized size of the loaded CPG file, or None.
+
+        The only mechanical graph-size signal available client-side —
+        callers use it to scale query budgets. None when the CPG was
+        built in-JVM (``import_code``) or nothing is loaded.
+        """
+        path = self._cpg_path
+        if path is None:
+            return None
+        try:
+            return path.stat().st_size
+        except OSError:
+            return None
+
     def import_cpg(
         self, cpg_path: Path, *, timeout: int | None = None,
     ) -> bool:

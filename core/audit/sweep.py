@@ -3405,6 +3405,44 @@ _PRE_SWEEP_INTERRUPTION_MARKERS = (
 
 #: Bounded re-queue attempts for an interrupted pre-sweep window.
 _PRE_SWEEP_MAX_REQUEUES = 2
+
+# The bulk pre-sweep window runs the full standard-sink catalog's
+# whole-CPG dataflow solves in ONE submission, so its runtime scales
+# with graph size while the configured query timeout is sized for a
+# single query. Scale the window's budget by the serialized CPG size
+# (the only mechanical size signal available client-side): one extra
+# timeout-multiple per _PRE_SWEEP_CPG_BYTES_PER_STEP of CPG. Too
+# small a budget and the window straddles the boundary on big CPGs —
+# each straddle fires a server restart plus a multi-minute CPG
+# re-import that the re-queue machinery then has to wait out, and the
+# run's taint evidence is lost outright when the re-queues run out.
+# Too large (hence the cap) and one genuinely wedged window holds the
+# single-threaded REPL — and every review worker's query behind it —
+# for a large slice of the run.
+_PRE_SWEEP_CPG_BYTES_PER_STEP = 256 * 1024 * 1024
+_PRE_SWEEP_TIMEOUT_MAX_MULTIPLE = 4
+
+# Below this remaining-wall-budget floor a pre-sweep window (or a
+# re-queue of one) is not worth starting: the window would be clamped
+# so hard it can only time out, and the timeout then fires a server
+# restart the rest of the run pays for.
+_PRE_SWEEP_MIN_WINDOW_S = 30
+
+
+def _presweep_bulk_timeout_s(
+    query_timeout: int, cpg_bytes: int | None,
+) -> int:
+    """Budget for the bulk pre-sweep window, scaled by CPG size.
+
+    Floor: the configured per-query timeout (small CPGs keep the
+    configured budget). Cap: ``_PRE_SWEEP_TIMEOUT_MAX_MULTIPLE`` times
+    that. Unknown CPG size keeps the floor.
+    """
+    if not cpg_bytes or cpg_bytes <= 0 or query_timeout <= 0:
+        return query_timeout
+    steps = int(cpg_bytes // _PRE_SWEEP_CPG_BYTES_PER_STEP)
+    multiple = min(1 + steps, _PRE_SWEEP_TIMEOUT_MAX_MULTIPLE)
+    return query_timeout * multiple
 #: How long to wait for the restarted server before each re-queue.
 #: Covers a JVM boot + CPG reload (~1-2 min on big targets).
 _PRE_SWEEP_RECOVERY_WAIT_S = 300
@@ -3468,6 +3506,7 @@ def run_joern_pre_sweep(
     status_out: dict | None = None,
     exclude_dirs: tuple[str, ...] = (),
     abort_check: Callable[[], bool] | None = None,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, list]:
     """Run standard taint queries before the LLM loop.
 
@@ -3541,8 +3580,45 @@ def run_joern_pre_sweep(
     if server is not None:
         if _aborted("server taint query"):
             return {}
+        cpg_bytes: int | None = None
+        _size_fn = getattr(server, "cpg_size_bytes", None)
+        if callable(_size_fn):
+            try:
+                cpg_bytes = _size_fn()
+            except Exception:  # noqa: BLE001 — size is advisory only
+                cpg_bytes = None
+        bulk_timeout = _presweep_bulk_timeout_s(query_timeout, cpg_bytes)
+        if bulk_timeout != query_timeout:
+            logger.info(
+                "joern pre-sweep window budget scaled to %ds "
+                "(CPG %.0f MB; per-query default %ds)",
+                bulk_timeout, (cpg_bytes or 0) / (1024 * 1024),
+                query_timeout,
+            )
+
+        # Composed worst case (initial window + bounded re-queues +
+        # recovery waits) must never overrun the run's wall budget:
+        # clamp every wait leg to the remaining time, and refuse to
+        # start a window the clamp would doom to a timeout (a timed-
+        # out window fires a server restart the rest of the run pays
+        # for).
+        def _remaining_s() -> float | None:
+            if deadline_monotonic is None:
+                return None
+            return deadline_monotonic - time.monotonic()
+
+        _rem = _remaining_s()
+        if _rem is not None:
+            if _rem < _PRE_SWEEP_MIN_WINDOW_S:
+                logger.warning(
+                    "joern pre-sweep skipped — remaining run budget "
+                    "(%.0fs) below the minimum window (%ds)",
+                    max(_rem, 0.0), _PRE_SWEEP_MIN_WINDOW_S,
+                )
+                return {}
+            bulk_timeout = min(bulk_timeout, int(_rem))
         result = server.query_script(
-            sinks_script, timeout=query_timeout, substitutions=sink_subst,
+            sinks_script, timeout=bulk_timeout, substitutions=sink_subst,
         )
         requeued = 0
         interrupted = 1 if _presweep_interrupted(result.errors) else 0
@@ -3557,20 +3633,42 @@ def run_joern_pre_sweep(
                 "; ".join(str(e) for e in result.errors)[:300],
                 requeued + 1, _PRE_SWEEP_MAX_REQUEUES,
             )
+            _rem = _remaining_s()
+            _recovery_wait: float = _PRE_SWEEP_RECOVERY_WAIT_S
+            if _rem is not None:
+                if _rem < _PRE_SWEEP_MIN_WINDOW_S:
+                    logger.warning(
+                        "joern pre-sweep re-queue abandoned — "
+                        "remaining run budget (%.0fs) below the "
+                        "minimum window", max(_rem, 0.0),
+                    )
+                    break
+                _recovery_wait = min(_recovery_wait, _rem)
             if not _wait_for_presweep_server(
                 server,
-                deadline_s=_PRE_SWEEP_RECOVERY_WAIT_S,
+                deadline_s=_recovery_wait,
                 poll_s=_PRE_SWEEP_RECOVERY_POLL_S,
                 on_progress=on_progress,
             ):
                 logger.warning(
                     "joern pre-sweep re-queue abandoned — server did "
-                    "not recover within %ds", _PRE_SWEEP_RECOVERY_WAIT_S,
+                    "not recover within %.0fs", _recovery_wait,
                 )
                 break
             requeued += 1
+            _rem = _remaining_s()
+            _window = bulk_timeout
+            if _rem is not None:
+                if _rem < _PRE_SWEEP_MIN_WINDOW_S:
+                    logger.warning(
+                        "joern pre-sweep re-queue abandoned — "
+                        "remaining run budget (%.0fs) below the "
+                        "minimum window", max(_rem, 0.0),
+                    )
+                    break
+                _window = min(_window, int(_rem))
             result = server.query_script(
-                sinks_script, timeout=query_timeout,
+                sinks_script, timeout=_window,
                 substitutions=sink_subst,
             )
             if _presweep_interrupted(result.errors):
