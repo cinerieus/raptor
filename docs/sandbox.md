@@ -31,10 +31,12 @@ For CLI flag reference, see [commands](commands.md).
   ioctls, raw/packet/netlink sockets, plus namespace creation on the
   fork-backend lane (`unshare` / `clone` with any `CLONE_NEW*` flag /
   `setns`; `clone3` returns ENOSYS) so a target cannot build a nested
-  namespace to confuse the supervisor. The subprocess/preexec lanes
-  cannot install that seccomp rule (their own bootstrap needs
-  `unshare`); there a nested namespace is bounded by Landlock and
-  no-new-privs instead.
+  namespace to confuse the supervisor. The plain subprocess lane
+  installs the same namespace-creation deny rules via its preexec —
+  its payload never legitimately unshares. (The former unshare-CLI
+  lane was the one lane that could not take them, because its own
+  bootstrap had to `unshare` under the filter; it was deleted in
+  favour of the fork backend.)
 - No core dumps, memory/CPU caps, and a per-sandbox process cap that
   bounds fork bombs.
 - Environment sanitised through a strict allowlist; API keys and other
@@ -120,7 +122,7 @@ total order of **containment tiers** per platform:
 |---|---|---|
 | `mount-ns` | fork spawn backend | pivot_root bind tree, full namespace set, fresh procfs, Landlock, seccomp |
 | `mountless-ns` | fork spawn backend, no bind tree | full namespace set, fresh procfs, Landlock, seccomp; host paths visible by name |
-| `ns-only` | unshare-CLI subprocess | user/PID/IPC(/net) namespaces, Landlock, seccomp; host procfs visible |
+| `ns-only` | fork spawn backend, Landlock-absent mode | full namespace set, fresh procfs, seccomp; no Landlock filesystem/TCP policy (kernels without Landlock, floor-consented only) |
 | `landlock` | plain subprocess | Landlock, seccomp, rlimits; host namespaces |
 | `none` | plain subprocess | rlimits only |
 | `seatbelt` | macOS `sandbox-exec` | SBPL write/read scoping, network denial, process-info denial (macOS's top tier; never compared to Linux tiers) |
@@ -164,8 +166,11 @@ the stamp accordingly), `containment_floor`, and `floor_source`
 weakest tier per run directory into `sandbox-summary.json`'s posture
 record. When the waiver lowers the floor, a one-line banner names the
 consent source, and every waived call that lands on a
-host-procfs-visible lane (`ns-only` or below) warns individually; the
-mountless fallback keeps its existing once-per-process notice.
+reduced lane (`ns-only` or below) warns individually — naming the
+host process table when the lane leaves it visible, or the missing
+Landlock policy layer on the `ns-only` tier (which keeps a fresh
+pid-ns procfs); the mountless fallback keeps its existing
+once-per-process notice.
 
 **What a floor refusal looks like at the verification seams.** The
 attacker-payload executors — `/audit`'s dark-witness execution,
@@ -184,6 +189,15 @@ remedies: ...`), and re-raises the typed error so the run fails loudly
 rather than continuing to mint identical refusals. An unverifiable
 environment is neither a confirmation nor a refutation — fix the host
 (or consent to a lower floor) and re-run.
+
+The refusal is also recorded at run level: whenever a floor refusal
+fires for a call that has a run/audit directory, the sandbox appends
+a `floor_refusal` record to the run's evidence stream, and
+`sandbox-summary.json` then carries `total_floor_refusals`, the
+structured `floor_refusals` records, and a `floor_refusal_line`
+rendered in the same wording as the per-finding summary line — so a
+run whose payload executions were refused is distinguishable from a
+run that simply recorded nothing, even after the fact.
 
 ---
 

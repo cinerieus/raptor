@@ -115,13 +115,18 @@ global escape hatch, not a silent degrade. When the override waives
 a refusal that lands the run on a host-procfs-visible lane — the
 no-backend refusal, or a per-call `pass_fds=` demotion — every
 affected untrusted run logs a WARNING. With the override set, those
-runs proceed with the old warn-only degrade. Two bounds on the
-waiver: on a kernel with no Landlock at all, "Landlock/seccomp-only
-containment" does not exist, so a demoted call that declared a
-filesystem/TCP policy (`target=`/`output=`/`allowed_tcp_ports=`/
-`restrict_reads=`) still refuses; and the override DOES extend to
-the `block_network` refusal on hosts missing both the namespace
-backend and Landlock ABI v4+ — accepting it there means accepting
+runs proceed with the old warn-only degrade. Bounds and extensions
+of the waiver: on a kernel with no Landlock at all, the waiver
+admits the spawn backend's **ns-only mode** — full namespaces, a
+FRESH pid-ns procfs (fail-closed), seccomp, rlimits, but NO
+filesystem-write/TCP/read policy enforcement — for the shapes the
+namespace backend can serve (a once-per-process notice at
+construction plus a per-call warning name what is unenforced); a
+demoted call that declared a filesystem/TCP policy and cannot reach
+a namespace lane still refuses (the plain lane delivers nothing the
+waived floor accepts there). The override DOES extend to the
+`block_network` refusal on hosts missing both the namespace backend
+and Landlock ABI v4+ — accepting it there means accepting
 UNRESTRICTED network for those runs, and the warning says so (the
 narrower per-run escapes are a profile without the network block,
 e.g. `--sandbox target_run`, or `degraded_net_deny=False`).
@@ -665,14 +670,14 @@ setting them manually either does nothing or weakens a boundary.
 
 | Variable | Set by | Purpose |
 |----------|--------|---------|
-| `RAPTOR_DIR` | `bin/raptor` (exported after symlink resolution) | Installation root; RAPTOR's own children derive libexec/tool paths. `get_safe_env()` **re-pins** it to the current tree so a multi-checkout operator's ambient value cannot cross-import trees. The only value ever added to `sys.path`. Stripped from EVERY sandboxed target env by default (member of `TARGET_ENV_STRIP_SET`; the pid1-shim's mirror tuple follows, and `--strip-raptor-dir` survives as an argv-compat no-op) — the checkout path is a pure "inside RAPTOR" tell; only keep-trust dispatch children retain it. |
+| `RAPTOR_DIR` | `bin/raptor` (exported after symlink resolution) | Installation root; RAPTOR's own children derive libexec/tool paths. `get_safe_env()` **re-pins** it to the current tree so a multi-checkout operator's ambient value cannot cross-import trees. The only value ever added to `sys.path`. Stripped from EVERY sandboxed target env by default (member of `TARGET_ENV_STRIP_SET`) — the checkout path is a pure "inside RAPTOR" tell; only keep-trust dispatch children retain it. |
 | `RAPTOR_CALLER_DIR` | `bin/raptor` | Operator's `$PWD` at launch; default-target resolution for commands run without a path. Refuses control bytes. |
 | `_RAPTOR_TRUSTED` | `bin/raptor`, sandbox shims | Trust marker: `libexec/` scripts exit 2 unless it or `CLAUDECODE` is present. Stripped from target-bound envs BY DEFAULT at the sandbox env chokepoint (`TARGET_ENV_STRIP_SET` — trust markers + the session credential; the keep-trust skill dispatch is the only exception) so target-spawned processes cannot invoke libexec as trusted callers. Power users may set `_RAPTOR_TRUSTED=1` to drive libexec scripts directly — with the understanding that it bypasses the dispatch guard. |
 | `CLAUDECODE` | Claude Code | Same trust-marker role, set by the harness for its child processes; allowlisted, stripped from untrusted targets. |
-| `_RAPTOR_KEEP_TRUST_MARKERS` | `run_untrusted_networked(keep_trust_markers=True)` | One-hop control flag telling the pid1 shim to keep the markers for RAPTOR's own skill dispatches; popped before the child exec. |
-| `_RAPTOR_ENV_RESTORE` | `core/sandbox/_env_quarantine` (launcher-bound envs only) | JSON payload of quarantined loader variables (`LD_*`/`DYLD_*`/`GCONV_PATH`/`GLIBC_TUNABLES`) so they never load code into the trusted launcher chain; the pid1/seatbelt shims pop it and re-apply the pairs at target exec. RAPTOR-minted: a caller-supplied copy is dropped, never merged, and never reaches a child. |
+| `_RAPTOR_KEEP_TRUST_MARKERS` | legacy in-band key (no writer) | Carried NO authority even before the unshare-CLI lane was deleted (the keep decision travels as the sanctioned call kwarg); still defensively stripped from every target-bound env. |
+| `_RAPTOR_ENV_RESTORE` | `core/sandbox/_env_quarantine` (launcher-bound envs only) | JSON payload of quarantined loader variables (`LD_*`/`DYLD_*`/`GCONV_PATH`/`GLIBC_TUNABLES`) so they never load code into the trusted launcher chain; the seatbelt shim pops it and re-applies the pairs at target exec. RAPTOR-minted: a caller-supplied copy is dropped, never merged, and never reaches a child. |
 | `_RAPTOR_STATUS_FD` | sandbox spawn | fd where the seatbelt shim writes one readiness byte after the profile applies — absence fails loud ("sandbox did not engage"). |
-| `_RAPTOR_DEATH_FD` | sandbox spawn | Read end of a liveness pipe; orchestrator death (even SIGKILL) closes it and the shim kills the sandbox process group — no leaked namespaces. |
+| `_RAPTOR_DEATH_FD` | macOS seatbelt spawn | Read end of a liveness pipe; orchestrator death (even SIGKILL) closes it and the watcher shim kills the sandbox process group — no leaked process trees. (The Linux spawn backend passes its death pipe as an inherited fd, not via env.) |
 | `_RAPTOR_GRANT_PINS` | sandbox spawn | Grant-path identity pins (path + dev/ino JSON) for the macOS seatbelt watcher shim; a granted directory swapped mid-run (symlink/rename) is detected and the sandbox tree killed. Minted only by the spawn layer (caller-env copies are dropped) and stripped before the target runs. |
 | `RAPTOR_LLM_SOCKET`, `RAPTOR_LLM_TOKEN_FD` | `spawn_worker()` / dispatcher lifecycle | Credential-isolation dispatcher route: UDS path + fd carrying a one-shot worker auth token (fd passed via `pass_fds`). Never set manually — a socket path without its freshly allocated token fd is a broken route; presence of the socket var is itself a "dispatcher exists" signal. |
 | `RAPTOR_LLM_QUIET` | `raptor-llm-ask` | Suppresses the run-end scorecard summary line for pipeable output (any non-empty value). |
