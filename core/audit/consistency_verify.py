@@ -80,6 +80,12 @@ REASON_HYPOTHESIS_UNBINDABLE = "hypothesis-unbindable"
 REASON_OWNERSHIP_UNRESOLVED = "ownership-unresolved"
 REASON_GUARD_ELSEWHERE = "guard-elsewhere"
 REASON_CENSUS_TRUNCATED = "census-truncated"
+# The supplied census has no entry for any hypothesis callee. Distinct
+# from REASON_HYPOTHESIS_UNBINDABLE (no callee candidates AT ALL —
+# retrying cannot help): the orchestrator's prep-census pass-through
+# keys its fallback rebuild on this code, so it must stay structured,
+# not a prose fragment.
+REASON_CENSUS_MISS = "census-miss"
 
 INCONCLUSIVE_REASONS = frozenset({
     REASON_CONTRACT_UNRESOLVED,
@@ -92,6 +98,7 @@ INCONCLUSIVE_REASONS = frozenset({
     REASON_OWNERSHIP_UNRESOLVED,
     REASON_GUARD_ELSEWHERE,
     REASON_CENSUS_TRUNCATED,
+    REASON_CENSUS_MISS,
 })
 
 # Enumerated refutation reasons.
@@ -1272,7 +1279,7 @@ def run_consistency_check(
             break
     if entry is None:
         return _inconclusive(
-            REASON_HYPOTHESIS_UNBINDABLE,
+            REASON_CENSUS_MISS,
             f"no census entry for any hypothesis callee "
             f"({', '.join(candidates[:5])})",
         )

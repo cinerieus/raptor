@@ -1258,6 +1258,13 @@ def run_consistency_prepass(
         "leads": capped_leads,
         "mechanical": mechanical,
         "handoffs": handoffs,
+        # Contract witnesses harvested once here (source texts + target
+        # headers). Travels with the census to the in-chain dispatch —
+        # a chain-side re-check that reuses the census sees only its
+        # own source_texts and would otherwise miss header-declared
+        # wur contracts, downgrading registry-grade receipts to
+        # majority-only.
+        "wur_functions": wur_names,
         "telemetry": telemetry,
     }
 

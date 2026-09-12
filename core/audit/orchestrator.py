@@ -790,6 +790,20 @@ class OrchestratorConfig:
     # context only). In-process channels always run: their refuted/
     # confirmed receipts feed the refutation floors and merge fence.
     tool_chain_early_exit: bool = True
+    # Derived at run start (never set by callers): the consistency
+    # prepass's return census ({callee: CalleeCensus}) and the source
+    # texts it was built over, threaded to the in-chain consistency
+    # channel so each hypothesis dispatch reuses the standing census
+    # instead of re-walking the tree. The channel keeps its own
+    # bounded rebuild as fallback when prep produced none.
+    consistency_census: dict[str, Any] | None = None
+    consistency_source_texts: dict[str, str] | None = None
+    # The prepass's harvested wur contract witnesses (source texts +
+    # target headers). Must travel with the census: the chain-side
+    # harvest only sees source_texts, and header-declared contracts
+    # would otherwise downgrade registry-grade receipts to
+    # majority-only.
+    consistency_wur_functions: frozenset[str] | None = None
 
 
 @dataclass
@@ -4814,6 +4828,21 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
                 # type-cohort) — groups already built above.
                 peer_groups=peer_groups,
             )
+            # Thread the standing census (and the texts it was built
+            # over — census_verdict needs them for exhibits, snippets
+            # and the wur harvest) to the in-chain consistency
+            # dispatch. An empty census (build failed / budget) stays
+            # None so the channel's bounded rebuild fallback applies.
+            config.consistency_census = (
+                consistency_prepass.get("census") or None
+            )
+            if config.consistency_census is not None:
+                config.consistency_source_texts = prepass_texts
+                _prep_wur = consistency_prepass.get("wur_functions")
+                if _prep_wur:
+                    config.consistency_wur_functions = frozenset(
+                        _prep_wur,
+                    )
             for mf in consistency_prepass.get("mechanical", []):
                 key = f"{mf['file']}:{mf['function']}"
                 mechanical_findings.setdefault(key, []).append(mf)
@@ -16451,6 +16480,38 @@ def _run_tool_chain(
                     ),
                     inventory=getattr(config, "inventory", None),
                 )
+                # Standing prep census pass-through: the prepass
+                # already computed {callee: CalleeCensus} over the gap
+                # files, so the per-hypothesis rebuild (an rglob +
+                # bounded tree read PER dispatch) is only the fallback.
+                # The prep texts travel with the census — the verdict
+                # needs them for exhibits/snippets and the wur harvest,
+                # and census sites are only meaningful against the
+                # texts they were counted over. Never used against an
+                # overridden target (binary decompilation tmpdirs): the
+                # prep census describes the real tree, not the excerpt.
+                _cs_census = None
+                _cs_texts = None
+                if target_path_override is None:
+                    _cs_census = getattr(
+                        config, "consistency_census", None,
+                    ) or None
+                    if _cs_census is not None:
+                        _cs_texts = getattr(
+                            config, "consistency_source_texts", None,
+                        ) or None
+                        # The prep-harvested contract witnesses ride
+                        # with the census (header-declared wur is
+                        # invisible to the chain-side source_texts
+                        # harvest).
+                        _cs_wur = getattr(
+                            config, "consistency_wur_functions", None,
+                        )
+                        if _cs_wur:
+                            cs_ctx.wur_functions = (
+                                frozenset(cs_ctx.wur_functions)
+                                | _cs_wur
+                            )
                 cs_res = run_consistency_check(
                     effective_target,
                     file_path,
@@ -16458,11 +16519,47 @@ def _run_tool_chain(
                     hypothesis,
                     inventory=getattr(config, "inventory", None),
                     context=cs_ctx,
+                    source_texts=_cs_texts,
+                    census=_cs_census,
                     # Joern-flow escalator (outcome-gated inside the
                     # verdict): one bounded caller-closure query when
                     # the cheap reachability leg answers unknown.
                     joern_server=joern_server,
                 )
+                from .consistency_verify import REASON_CENSUS_MISS
+                if (
+                    _cs_census is not None
+                    and cs_res.outcome == "inconclusive"
+                    and (cs_res.reason or "").startswith(
+                        REASON_CENSUS_MISS,
+                    )
+                ):
+                    # The prep census covers the checklist's files;
+                    # a hypothesis callee living outside them has no
+                    # entry there. Retry on the channel's own bounded
+                    # rebuild (callee-mention tree scan) so the
+                    # pass-through never narrows what the rebuild
+                    # could bind. Keyed on the channel's structured
+                    # reason code — never its prose detail.
+                    #
+                    # Corpus caveat: this retry only fires on a MISS.
+                    # For callees that DO have a prep entry, the two
+                    # paths count over different corpora — the prep
+                    # census over the checklist's files, the rebuild
+                    # over up to 40 callee-mentioning files tree-wide
+                    # — so majority ratios (and with them a
+                    # detection-role consistency verdict) can differ
+                    # between them. Registry-grade wur receipts are
+                    # corpus-independent and ride along unchanged.
+                    cs_res = run_consistency_check(
+                        effective_target,
+                        file_path,
+                        function_name,
+                        hypothesis,
+                        inventory=getattr(config, "inventory", None),
+                        context=cs_ctx,
+                        joern_server=joern_server,
+                    )
                 # Receipts already earned by earlier chain steps
                 # corroborate (compiler -Wunused-result, cocci,
                 # fail_open confirmations on the same claim).
