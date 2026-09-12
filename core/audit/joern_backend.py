@@ -764,6 +764,7 @@ def build_joern_evidence(
     target_path, out_dir, joern_overrides=None,
     on_progress: Callable | None = None,
     joern_server=None,
+    abort_check: Callable[[], bool] | None = None,
 ) -> dict[str, list] | None:
     """Run Joern pre-sweep (standard_sinks.sc) if available.
 
@@ -775,10 +776,24 @@ def build_joern_evidence(
     Completed sweeps are persisted to the run dir's prep cache keyed
     by (CPG content hash, sink-list hash); a resumed segment on an
     unchanged tree reloads instead of re-running the live query.
+
+    ``abort_check`` is polled at step boundaries here and inside
+    :func:`core.audit.sweep.run_joern_pre_sweep`: True returns None
+    without building/querying (and without writing cache or status) —
+    the consumer has discarded the result.
     """
     try:
         from .sweep import run_joern_pre_sweep
     except ImportError:
+        return None
+
+    def _aborted() -> bool:
+        if abort_check is not None and abort_check():
+            logger.debug("joern pre-sweep build aborted by consumer")
+            return True
+        return False
+
+    if _aborted():
         return None
 
     tunables = joern_tunables(overrides=joern_overrides)
@@ -790,6 +805,9 @@ def build_joern_evidence(
         cached = load_presweep_flows_cache(out_dir, identity)
         if cached is not None:
             return cached or None
+
+    if _aborted():
+        return None
 
     cache_dir = resolve_cpg_cache_dir(out_dir)
     status: dict = {}
@@ -806,7 +824,12 @@ def build_joern_evidence(
         # key: its artifacts change every segment, flapping the key
         # and re-buying a full rebuild per resume.
         exclude_dirs=run_exclude_dirs(out_dir, target_path),
+        abort_check=abort_check,
     )
+    if abort_check is not None and abort_check():
+        # Aborted mid-sweep: a partial result must not be cached or
+        # write interruption status for a run that discarded it.
+        return None
     if status.get("interrupted"):
         status["flows_recovered"] = sum(
             len(v) for v in (flows or {}).values()
@@ -921,10 +944,15 @@ def resolve_joern_evidence(
     on_joern_progress: Callable[[str], None] | None = None,
     joern_server=None,
     out_dir=None,
+    abort_event=None,
 ) -> tuple:
     """Resolve Joern evidence.
 
     Returns (joern_flows, joern_future).
+
+    ``abort_event`` (threading.Event): set by a consumer that has
+    discarded the future — the background build stops at its next
+    step boundary instead of running to completion unread.
     """
     if not joern_available(overrides=joern_overrides):
         return (None, None)
@@ -951,6 +979,7 @@ def resolve_joern_evidence(
     future = executor.submit(
         build_joern_evidence, target_path, out_dir, joern_overrides,
         _progress, joern_server,
+        abort_event.is_set if abort_event is not None else None,
     )
     executor.shutdown(wait=False)
     return (None, future)

@@ -266,3 +266,144 @@ class TestEnrichJoernEvidenceBatchedSinkArgs:
             {"a.c:fn": rec}, "a.c:fn", "fn", ["memcpy"], object(),
         )
         assert rec.joern_sink_args == [{"sink": "memcpy", "arg_index": 2}]
+
+
+class TestPreSweepAbort:
+    """The consumer-discard signal stops the background pre-sweep at
+    step boundaries instead of paying a build nobody reads."""
+
+    def test_build_aborts_before_the_sweep(self, monkeypatch):
+        import core.audit.sweep as sweep_mod
+        from core.audit.joern_backend import build_joern_evidence
+
+        def boom(*a, **k):
+            raise AssertionError("pre-sweep must not run after abort")
+
+        monkeypatch.setattr(sweep_mod, "run_joern_pre_sweep", boom)
+        assert build_joern_evidence(
+            "/nonexistent", None, abort_check=lambda: True,
+        ) is None
+
+    def test_resolve_forwards_the_abort_event(self, monkeypatch):
+        import threading
+
+        import core.audit.joern_backend as jb
+
+        monkeypatch.setattr(jb, "joern_available", lambda overrides=None: True)
+        monkeypatch.setattr(jb, "target_has_c_sources", lambda p: True)
+
+        captured: dict = {}
+
+        def fake_build(target_path, out_dir, joern_overrides,
+                       on_progress, joern_server, abort_check=None):
+            captured["abort_check"] = abort_check
+            return None
+
+        monkeypatch.setattr(jb, "build_joern_evidence", fake_build)
+
+        ev = threading.Event()
+        _flows, fut = jb.resolve_joern_evidence(
+            "/x", abort_event=ev,
+        )
+        assert fut is not None
+        fut.result(timeout=10)
+        # Bound-method equality (identity differs per access).
+        assert captured["abort_check"] == ev.is_set
+        assert captured["abort_check"]() is False
+        ev.set()
+        assert captured["abort_check"]() is True
+
+    def test_pre_sweep_abort_before_server_query(self):
+        import core.audit.sweep as sweep_mod
+
+        class _MustNotQuery:
+            def query_script(self, *a, **k):
+                raise AssertionError("query must not run after abort")
+
+        flows = sweep_mod.run_joern_pre_sweep(
+            Path("/nonexistent-target-dir"), {},
+            server=_MustNotQuery(),
+            abort_check=lambda: True,
+        )
+        assert flows == {}
+
+    def test_abort_after_sweep_writes_neither_cache_nor_status(
+        self, tmp_path, monkeypatch,
+    ):
+        """An abort landing MID-sweep must not persist the partial
+        result: caching partial flows under the full content identity
+        would let a resumed segment reload them as complete (silent
+        cross-run evidence loss), and an interruption-status record
+        for a discarded run is noise the summary would surface."""
+        import threading
+        from types import SimpleNamespace
+
+        import core.audit.joern_backend as jb
+        import core.audit.sweep as sweep_mod
+
+        out = tmp_path / "run"
+        out.mkdir()
+        abort = threading.Event()
+
+        monkeypatch.setattr(
+            jb, "joern_tunables",
+            lambda overrides=None: SimpleNamespace(
+                cpg_timeout_s=1, query_timeout_s=1, heap_mb=None,
+            ),
+        )
+        # A real cache identity: without the abort guard the partial
+        # flows below WOULD be persisted under it.
+        monkeypatch.setattr(
+            jb, "_presweep_flows_identity", lambda t: ("cpg", "sinks"),
+        )
+        monkeypatch.setattr(
+            jb, "load_presweep_flows_cache", lambda o, i: None,
+        )
+
+        def interrupted_sweep(*args, status_out=None, abort_check=None,
+                              **kwargs):
+            if status_out is not None:
+                status_out["interrupted"] = 1
+            abort.set()  # the consumer discards while the sweep runs
+            return {"a.c:fn": [{"source_method": "fn"}]}  # partial
+
+        monkeypatch.setattr(
+            sweep_mod, "run_joern_pre_sweep", interrupted_sweep,
+        )
+
+        result = jb.build_joern_evidence(
+            tmp_path, out, abort_check=abort.is_set,
+        )
+        assert result is None
+        assert not (out / jb.PRESWEEP_STATUS_FILENAME).exists()
+        assert not (out / jb.PRESWEEP_FLOWS_CACHE_RELPATH).exists()
+
+    def test_subprocess_mode_abort_skips_the_cpg_build(
+        self, tmp_path, monkeypatch,
+    ):
+        """The CPG-build poll is the interrupt's single most expensive
+        skip — bind it specifically: the abort arrives AFTER the
+        entry poll, so only the CPG-build boundary can honour it."""
+        import core.audit.sweep as sweep_mod
+        import packages.joern.prereqs as prereqs
+        import packages.joern.runner as runner_mod
+
+        monkeypatch.setattr(prereqs, "is_available", lambda: True)
+
+        def boom(*a, **k):
+            raise AssertionError("CPG build must not start after abort")
+
+        monkeypatch.setattr(runner_mod, "build_cpg", boom)
+        monkeypatch.setattr(runner_mod, "build_cpg_cached", boom)
+
+        polls = {"n": 0}
+
+        def late_abort() -> bool:
+            polls["n"] += 1
+            return polls["n"] > 1  # entry poll passes; CPG poll aborts
+
+        flows = sweep_mod.run_joern_pre_sweep(
+            tmp_path, {}, abort_check=late_abort,
+        )
+        assert flows == {}
+        assert polls["n"] >= 2

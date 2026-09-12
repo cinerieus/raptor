@@ -6303,3 +6303,233 @@ class TestValidateConfirmedPrefilterFloor:
             "confirmed": [], "ruled_out": [{"fresh": True}],
         })
         assert not _validate_confirmed_gap({"a.c:fn": rec}, "a.c:fn")
+
+
+class TestDiscardPresweepFuture:
+    """Empty-gaps runs discard the server-start pre-sweep future."""
+
+    def test_unstarted_future_is_cancelled(self):
+        from concurrent.futures import Future
+
+        from core.audit.orchestrator import _discard_presweep_future
+
+        fut: Future = Future()
+        _discard_presweep_future(fut)
+        assert fut.cancelled()
+
+    def test_discard_sets_the_abort_event(self):
+        """cancel() essentially never lands (the 1-worker executor
+        starts the task at submit) — the abort event is the real
+        interrupt, and it must be set for running AND unstarted
+        futures alike."""
+        import threading
+        from concurrent.futures import Future
+
+        from core.audit.orchestrator import _discard_presweep_future
+
+        for started in (False, True):
+            fut: Future = Future()
+            if started:
+                fut.set_running_or_notify_cancel()
+            ev = threading.Event()
+            _discard_presweep_future(fut, abort_event=ev)
+            assert ev.is_set()
+
+    def test_running_future_interrupts_and_logs_its_failure(self, caplog):
+        """Real interrupt path: a running build stops when the abort
+        event is set, and the attached done-callback logs a failing
+        discarded future instead of letting it vanish unobserved."""
+        import logging as _logging
+        import threading
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor
+
+        from core.audit.orchestrator import _discard_presweep_future
+
+        ev = threading.Event()
+
+        def fake_build():
+            # Step-boundary polling stand-in: waits for the abort,
+            # then fails — exercising both the interrupt and the
+            # logging callback.
+            assert ev.wait(timeout=10)
+            raise RuntimeError("pre-sweep died")
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            fut = pool.submit(fake_build)
+            _time.sleep(0.05)  # task is running: cancel() cannot land
+            with caplog.at_level(
+                _logging.DEBUG, logger="core.audit.orchestrator",
+            ):
+                _discard_presweep_future(fut, abort_event=ev)
+                assert not fut.cancelled()
+                with pytest.raises(RuntimeError):
+                    fut.result(timeout=10)
+                deadline = _time.monotonic() + 5
+                while _time.monotonic() < deadline:
+                    if "discarded joern pre-sweep failed" in caplog.text:
+                        break
+                    _time.sleep(0.02)
+            assert "discarded joern pre-sweep failed" in caplog.text
+        finally:
+            pool.shutdown(wait=True)
+
+    def test_none_is_a_noop(self):
+        from core.audit.orchestrator import _discard_presweep_future
+
+        _discard_presweep_future(None)
+
+
+def _presweep_target(tmp_path: Path, n_functions: int = 1):
+    """Tiny C target + checklist for run-level pre-sweep wiring tests."""
+    target = tmp_path / "target"
+    (target / "src").mkdir(parents=True)
+    items = []
+    src_lines: list[str] = []
+    line = 1
+    for i in range(n_functions):
+        body = (
+            f"int handler_{i}(char *input, int len) {{\n"
+            "  char buf[64];\n"
+            "  memcpy(buf, input, len);\n"
+            "  return buf[0];\n"
+            "}"
+        )
+        n = body.count("\n") + 1
+        items.append({
+            "name": f"handler_{i}",
+            "line_start": line, "line_end": line + n - 1,
+        })
+        src_lines.append(body)
+        line += n
+    (target / "src" / "app.c").write_text("\n".join(src_lines) + "\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    checklist = {"files": [{"path": "src/app.c", "items": items}]}
+    (out / "checklist.json").write_text(json.dumps(checklist))
+    return target, out
+
+
+def _presweep_config(target: Path, out: Path, **kw):
+    defaults: dict = {
+        "target_path": target,
+        "out_dir": out,
+        "resume": False,
+        "force": True,
+        "max_workers": 1,
+        "batch_sloc_threshold": 0,
+        "prefilter": False,
+        "validate": False,
+        # The wiring under test is the future hand-off, not a live
+        # server; a joern-equipped host must not start a real JVM.
+        "joern_overrides": {"enabled": False},
+    }
+    defaults.update(kw)
+    return OrchestratorConfig(**defaults)
+
+
+def _clean_review_fn(ctx, config):
+    return ReviewOutcome(
+        file=ctx["file"], function=ctx["function"],
+        status="clean", body="ok",
+    )
+
+
+@pytest.mark.slow
+class TestPresweepSubmittedAtServerStart:
+    """The pre-sweep future is submitted before prep runs (ordering
+    probe) and adopted by prep — never resubmitted; an empty-gaps run
+    discards it."""
+
+    def test_submission_precedes_prep_and_is_adopted(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from concurrent.futures import Future
+
+        import core.audit.orchestrator as orch_mod
+
+        target, out = _presweep_target(tmp_path)
+        events: list[str] = []
+        fut: Future = Future()
+        fut.set_result(None)  # completed: the drain path is a no-op
+
+        def fake_resolve(*args, **kwargs):
+            events.append("presweep_submit")
+            return (None, fut)
+
+        real_prep = orch_mod._compute_audit_prep
+        received: dict = {}
+
+        def probed_prep(config, **kwargs):
+            events.append("prep")
+            received.update(kwargs)
+            return real_prep(config, **kwargs)
+
+        monkeypatch.setattr(
+            orch_mod, "_resolve_joern_evidence_raw", fake_resolve,
+        )
+        monkeypatch.setattr(orch_mod, "_compute_audit_prep", probed_prep)
+
+        result = orch_mod.run_orchestrator(
+            _presweep_config(target, out), _clean_review_fn,
+        )
+
+        assert result.reviewed >= 1
+        assert events[0] == "presweep_submit"
+        assert "prep" in events
+        # Prep adopted the server-start future instead of resubmitting.
+        assert events.count("presweep_submit") == 1
+        assert received.get("presweep_future") is fut
+        assert received.get("presweep_activity") is not None
+
+    def test_empty_gaps_run_interrupts_the_running_build(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """Real interrupt path: the pre-sweep task is already RUNNING
+        when the empty-gaps discard fires (the 1-worker executor
+        starts it at submit, so cancel() cannot land) — the discard
+        must set the abort event the build polls, and the build must
+        finish promptly instead of paying a full pre-sweep."""
+        import threading
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor
+
+        import core.audit.orchestrator as orch_mod
+
+        target, out = _presweep_target(tmp_path, n_functions=1)
+        # Empty checklist → zero gaps → nothing consumes the future.
+        (out / "checklist.json").write_text(json.dumps({"files": []}))
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        state: dict = {}
+
+        def fake_resolve(*args, abort_event=None, **kwargs):
+            assert abort_event is not None
+            state["abort_event"] = abort_event
+
+            def fake_build():
+                # Mirrors build_joern_evidence's step-boundary poll.
+                state["interrupted"] = abort_event.wait(timeout=30)
+                return None
+
+            fut = pool.submit(fake_build)
+            _time.sleep(0.05)  # running before prep — like production
+            state["future"] = fut
+            return (None, fut)
+
+        monkeypatch.setattr(
+            orch_mod, "_resolve_joern_evidence_raw", fake_resolve,
+        )
+        try:
+            orch_mod.run_orchestrator(
+                _presweep_config(target, out), _clean_review_fn,
+            )
+        finally:
+            pool.shutdown(wait=True)
+
+        assert isinstance(state.get("abort_event"), threading.Event)
+        assert state["abort_event"].is_set()
+        assert state["interrupted"] is True
+        assert state["future"].done()
+        assert not state["future"].cancelled()

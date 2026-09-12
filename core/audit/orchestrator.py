@@ -1268,6 +1268,39 @@ def _await_joern_build(
     return joern_future
 
 
+def _discard_presweep_future(
+    future: "Future | None",
+    abort_event: "_threading.Event | None" = None,
+) -> None:
+    """Discard a server-start pre-sweep future nobody will consume.
+
+    The 1-worker executor starts the task at submit, so ``cancel()``
+    essentially never lands — the real interrupt is ``abort_event``,
+    polled by ``build_joern_evidence`` at its step boundaries, which
+    stops the build instead of paying a full pre-sweep (and, in
+    subprocess mode, a CPG build on a non-daemon worker that delays
+    interpreter exit) for a result nobody reads. A running future
+    additionally gets a callback so a failure is at least logged
+    instead of vanishing with the unobserved future.
+    """
+    if future is None:
+        return
+    if abort_event is not None:
+        abort_event.set()
+    if future.cancel():
+        return
+
+    def _log_result(fut: Future) -> None:
+        try:
+            fut.result(timeout=0)
+        except Exception:
+            logger.debug(
+                "discarded joern pre-sweep failed", exc_info=True,
+            )
+
+    future.add_done_callback(_log_result)
+
+
 def _get_dangerous_flows(approx) -> dict | None:
     """Extract dangerous_flows from a TaintApprox object or dict.
 
@@ -1579,6 +1612,37 @@ def run_orchestrator(
             and hasattr(joern_server, "_proc")
             and joern_server._proc is None
         )
+
+    # --- Joern pre-sweep future: submitted at server start ---
+    # build_joern_evidence depends only on target/out_dir/server (its
+    # cache and interruption-status identity is CPG-content +
+    # sink-list keyed, never gap-keyed), but its future used to be
+    # submitted mid-prep gated on ``if gaps:`` — the whole prep
+    # duration was lost from the pre-sweep window and every
+    # early-dispatched gap landed in reviewed_before_joern (a paid
+    # re-review later). Prep consumes this future through the same
+    # ``if gaps:`` seam; an empty-gaps run discards it there.
+    joern_presweep_future: Future | None = None
+    joern_presweep_activity = [time.monotonic()]
+    joern_presweep_abort = _threading.Event()
+    if not config.target_path.is_file():
+
+        def _presweep_progress(msg: str) -> None:
+            joern_presweep_activity[0] = time.monotonic()
+            if on_progress:
+                on_progress(-1, 0, ReviewOutcome(
+                    file="", function="", status="clean", body=msg,
+                ))
+
+        _flows_unused, joern_presweep_future = _resolve_joern_evidence_raw(
+            _joern_target(config),
+            joern_overrides=config.joern_overrides,
+            on_joern_progress=_presweep_progress,
+            joern_server=joern_server,
+            out_dir=config.out_dir,
+            abort_event=joern_presweep_abort,
+        )
+
     # Per-call LLM telemetry: one JSONL record per provider round-trip
     # (call class, duration, tokens, cache read/write counters,
     # timeout/retry disposition) in the run directory. Diagnostics
@@ -1604,6 +1668,9 @@ def run_orchestrator(
             joern_server=joern_server,
             joern_timeout_s=joern_timeout_s,
             prep_cache=prep_cache,
+            joern_presweep_future=joern_presweep_future,
+            joern_presweep_activity=joern_presweep_activity,
+            joern_presweep_abort=joern_presweep_abort,
         )
     finally:
         # This run's flush hooks must not outlive it (a later run in
@@ -3849,12 +3916,21 @@ def _resolve_max_workers(config: OrchestratorConfig) -> int:
     return derive_max_workers(config.models[0] if config.models else "default")
 
 
-def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
+def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
+                        presweep_future=None, presweep_activity=None,
+                        presweep_abort=None):
     """Compute all mode-independent prep for the audit loop.
 
     Returns a dict of prep results, or None if checklist is missing.
     In ensemble mode, this is called once and the result shared across
     both passes — all computation here is mode-independent.
+
+    ``presweep_future`` / ``presweep_activity``: the Joern pre-sweep
+    future run_orchestrator submitted at server start (and the
+    last-activity stamp its progress callback updates). When present
+    they replace the historical mid-prep submission; an empty-gaps run
+    discards the future. Direct callers without them keep the mid-prep
+    submission path.
     """
     checklist = load_checklist(config.out_dir)
     if not checklist:
@@ -4352,28 +4428,37 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
         reuse_stats=reuse_blocked_stats,
     )
 
-    _joern_last_activity = [time.monotonic()]
+    _joern_last_activity = (
+        presweep_activity if presweep_activity is not None
+        else [time.monotonic()]
+    )
 
     if gaps:
+        if presweep_future is not None:
+            # Submitted at server start (run_orchestrator) — the
+            # pre-sweep has been running for the whole prep duration
+            # already; just adopt it.
+            joern_future = presweep_future
+        else:
 
-        def _joern_progress_cb(msg: str) -> None:
-            _joern_last_activity[0] = time.monotonic()
-            if on_progress:
-                placeholder = ReviewOutcome(
-                    file="",
-                    function="",
-                    status="clean",
-                    body=msg,
-                )
-                on_progress(-1, 0, placeholder)
+            def _joern_progress_cb(msg: str) -> None:
+                _joern_last_activity[0] = time.monotonic()
+                if on_progress:
+                    placeholder = ReviewOutcome(
+                        file="",
+                        function="",
+                        status="clean",
+                        body=msg,
+                    )
+                    on_progress(-1, 0, placeholder)
 
-        joern_flows, joern_future = _resolve_joern_evidence_raw(
-            _joern_target(config),
-            joern_overrides=config.joern_overrides,
-            on_joern_progress=_joern_progress_cb,
-            joern_server=joern_server,
-            out_dir=config.out_dir,
-        )
+            joern_flows, joern_future = _resolve_joern_evidence_raw(
+                _joern_target(config),
+                joern_overrides=config.joern_overrides,
+                on_joern_progress=_joern_progress_cb,
+                joern_server=joern_server,
+                out_dir=config.out_dir,
+            )
 
         if joern_flows is not None:
             evidence_index = _merge_joern_flows(
@@ -4388,6 +4473,11 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
                     joern_flows,
                     taint_summary_results,
                 )
+    elif presweep_future is not None:
+        # Empty-gaps run: nothing will consume the server-start
+        # pre-sweep — discard it (historical behaviour submitted
+        # nothing here at all).
+        _discard_presweep_future(presweep_future, abort_event=presweep_abort)
 
     iris_taint_specs, project_sinks = _iris_prep_specs(
         config, gaps, taint_summary_results,
@@ -6436,6 +6526,9 @@ def _run_audit_body(
     joern_server,
     joern_timeout_s,
     prep_cache=None,
+    joern_presweep_future=None,
+    joern_presweep_activity=None,
+    joern_presweep_abort=None,
 ):
     """Inner orchestrator body, always wrapped in try/finally for server cleanup."""
     global _active_target_path
@@ -6485,6 +6578,9 @@ def _run_audit_body(
         try:
             _prep = _compute_audit_prep(
                 config, joern_server=joern_server, on_progress=on_progress,
+                presweep_future=joern_presweep_future,
+                presweep_activity=joern_presweep_activity,
+                presweep_abort=joern_presweep_abort,
             )
         finally:
             if _prep_event is not None:
@@ -6494,7 +6590,16 @@ def _run_audit_body(
                 _prep_event.set()
         if _prep is None:
             result.terminated_by = "no_checklist"
+            _discard_presweep_future(
+                joern_presweep_future, abort_event=joern_presweep_abort,
+            )
             return result
+    elif joern_presweep_future is not None:
+        # Prep reused from the ensemble cache: this pass's own
+        # server-start submission has no consumer — discard it.
+        _discard_presweep_future(
+            joern_presweep_future, abort_event=joern_presweep_abort,
+        )
 
     checklist = _prep["checklist"]
     context_map = _prep["context_map"]

@@ -3467,6 +3467,7 @@ def run_joern_pre_sweep(
     server=None,
     status_out: dict | None = None,
     exclude_dirs: tuple[str, ...] = (),
+    abort_check: Callable[[], bool] | None = None,
 ) -> dict[str, list]:
     """Run standard taint queries before the LLM loop.
 
@@ -3477,6 +3478,9 @@ def run_joern_pre_sweep(
     ``exclude_dirs`` are caller-declared exclusion roots (a run's
     output dir inside the target) forwarded to the CPG build so run
     artifacts stay out of both the content key and the graph.
+    ``abort_check`` is polled at step boundaries (before the CPG
+    build, before each query, on re-queue): True aborts with ``{}`` —
+    the consumer has discarded the result.
 
     Server mode shares the single-threaded REPL with the review loop's
     verification queries: a stuck query ANYWHERE restarts the server,
@@ -3504,6 +3508,18 @@ def run_joern_pre_sweep(
         logger.debug("joern not available on PATH; skipping pre-sweep")
         return {}
 
+    def _aborted(step: str) -> bool:
+        # Consumer-discard signal (empty-gaps run): stop at the next
+        # step boundary instead of paying the CPG build / query for a
+        # result nobody will read.
+        if abort_check is not None and abort_check():
+            logger.debug("joern pre-sweep aborted before %s", step)
+            return True
+        return False
+
+    if _aborted("script checks"):
+        return {}
+
     target_path = Path(target_path)
     if not target_path.is_dir():
         return {}
@@ -3523,6 +3539,8 @@ def run_joern_pre_sweep(
     sink_subst = {"__SINK_NAMES__": scala_string_list(STANDARD_SWEEP_SINKS)}
 
     if server is not None:
+        if _aborted("server taint query"):
+            return {}
         result = server.query_script(
             sinks_script, timeout=query_timeout, substitutions=sink_subst,
         )
@@ -3531,6 +3549,7 @@ def run_joern_pre_sweep(
         while (
             _presweep_interrupted(result.errors)
             and requeued < _PRE_SWEEP_MAX_REQUEUES
+            and not _aborted("pre-sweep re-queue")
         ):
             logger.warning(
                 "joern pre-sweep window interrupted (%s) — re-queueing "
@@ -3612,6 +3631,8 @@ def run_joern_pre_sweep(
     if parse_langs:
         build_kwargs["languages"] = parse_langs
 
+    if _aborted("CPG build"):
+        return {}
     if cache_dir is not None:
         cpg = build_cpg_cached(target_path, cache_dir, **build_kwargs)
     else:
@@ -3621,6 +3642,8 @@ def run_joern_pre_sweep(
         return {}
 
     try:
+        if _aborted("taint query"):
+            return {}
         result = run_query(
             cpg, str(sinks_script), timeout=query_timeout,
             substitutions=sink_subst,
