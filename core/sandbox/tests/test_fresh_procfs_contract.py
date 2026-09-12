@@ -504,6 +504,15 @@ def test_read_restricted_mountless_retry_and_cache_use_private_scratch(
         return cp
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    # Pin every capability probe the routing consults — the spawn
+    # backend is fully faked, so nothing real engages. Without the
+    # net (user-namespace foundation) and engagement-gate pins, a
+    # userns-denied host computes use_sandbox=False (or refuses at the
+    # gate) and never reaches the faked backend this test observes.
+    from core.sandbox import probes as _probes
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: True)
+    monkeypatch.setattr(_probes, "check_unshare_engages",
+                        lambda flags: (True, ""))
     monkeypatch.setattr(_ctx, "check_mount_available", lambda: True)
     monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
     monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 6)
@@ -558,6 +567,12 @@ def test_read_restricted_direct_mountless_selection_uses_private_scratch(
         return cp
 
     monkeypatch.setattr(_spawn_mod, "run_sandboxed", fake_spawn)
+    # Same probe pinning as the retry/cache test above: the backend is
+    # faked, so force the routing probes rather than inherit the host's.
+    from core.sandbox import probes as _probes
+    monkeypatch.setattr(_ctx, "check_net_available", lambda: True)
+    monkeypatch.setattr(_probes, "check_unshare_engages",
+                        lambda flags: (True, ""))
     monkeypatch.setattr(_ctx, "check_mount_available", lambda: True)
     monkeypatch.setattr(_ctx, "check_landlock_available", lambda: True)
     monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 6)
