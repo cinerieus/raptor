@@ -36,9 +36,18 @@ if TYPE_CHECKING:
 
 @dataclass
 class PhaseCost:
-    """Cost for a single phase of the audit."""
+    """Cost for a single phase of the audit.
+
+    Two wall accountings, never summed together: ``wall_time_s`` is
+    PER-CALL wall time (parallel workers overlap, so cross-phase sums
+    can exceed run duration), ``pass_wall_time_s`` is the serial
+    pass-boundary clock from start_phase/end_phase markers. Folding
+    the markers into ``wall_time_s`` double-counted every call booked
+    inside an instrumented pass.
+    """
 
     wall_time_s: float = 0.0
+    pass_wall_time_s: float = 0.0
     calls: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -56,6 +65,8 @@ class PhaseCost:
             "tokens_out": self.tokens_out,
             "cost_usd": round(self.cost_usd, 4),
         }
+        if self.pass_wall_time_s:
+            d["pass_wall_time_s"] = round(self.pass_wall_time_s, 2)
         if self.cache_read_tokens or self.cache_write_tokens:
             d["cache_read_tokens"] = self.cache_read_tokens
             d["cache_write_tokens"] = self.cache_write_tokens
@@ -117,17 +128,36 @@ class PhaseCostLedger:
         return self.phases[phase]
 
     def start_phase(self, phase: str) -> None:
-        """Mark the start of a phase for wall-clock tracking."""
-        if self._active_phase:
-            self.end_phase()
-        self._active_phase = phase
-        self._phase_start = time.monotonic()
+        """Mark the start of a phase for wall-clock tracking.
+
+        Single-slot by design: starting a phase while another is
+        active ends the active one first, so serial callers can lay
+        down sequential markers without paired ends. The slot is
+        lock-protected only so a marker cannot race ``record_call``'s
+        phase-dict insertion from parallel workers — two threads
+        MARKING phases would still steal each other's slot, so phase
+        markers belong at serial (main-thread) pass boundaries;
+        background threads must not place them.
+        """
+        now = time.monotonic()
+        with self._lock:
+            self._end_phase_locked(now)
+            self._active_phase = phase
+            self._phase_start = now
 
     def end_phase(self) -> None:
         """Mark the end of the current phase."""
+        with self._lock:
+            self._end_phase_locked(time.monotonic())
+
+    def _end_phase_locked(self, now: float) -> None:
+        """Book the active phase's pass wall time. Caller holds
+        ``_lock``. Lands in ``pass_wall_time_s``, never
+        ``wall_time_s`` — calls booked inside an instrumented pass
+        already carry their own per-call wall figures there."""
         if self._active_phase:
             pc = self._ensure_phase(self._active_phase)
-            pc.wall_time_s += time.monotonic() - self._phase_start
+            pc.pass_wall_time_s += now - self._phase_start
             self._active_phase = None
             self._phase_start = 0.0
 
@@ -279,6 +309,10 @@ class PhaseCostLedger:
         return sum(p.wall_time_s for p in self.phases.values())
 
     @property
+    def total_pass_wall_time_s(self) -> float:
+        return sum(p.pass_wall_time_s for p in self.phases.values())
+
+    @property
     def total_calls(self) -> int:
         return sum(p.calls for p in self.phases.values())
 
@@ -296,6 +330,10 @@ class PhaseCostLedger:
             "wall_time_s": round(self.total_wall_time_s, 2),
             "calls": self.total_calls,
         }
+        if self.total_pass_wall_time_s:
+            totals["pass_wall_time_s"] = round(
+                self.total_pass_wall_time_s, 2,
+            )
         cr = self.total_cache_read_tokens
         cw = self.total_cache_write_tokens
         if cr or cw:
@@ -365,6 +403,8 @@ class PhaseCostLedger:
                 f"${pc.cost_usd:.4f}, "
                 f"{pc.wall_time_s:.1f}s wall"
             )
+            if pc.pass_wall_time_s:
+                line += f" ({pc.pass_wall_time_s:.1f}s pass wall)"
             if pc.failed_calls or pc.failed_attempts_cost_usd:
                 line += (
                     f" (+{pc.failed_calls} failed attempts, "

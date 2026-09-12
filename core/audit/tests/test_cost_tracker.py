@@ -107,3 +107,117 @@ class TestCostTracker:
         ct = PhaseCostLedger()
         ct.record_call("review", cost_usd=0.01)
         json.dumps(ct.to_dict())
+
+
+class TestPhaseWallClock:
+    """Phase markers book wall time into cost-breakdown.json."""
+
+    def _fake_clock(self, monkeypatch):
+        import core.audit.cost_tracker as ct_mod
+
+        state = {"now": 100.0}
+
+        def fake_monotonic():
+            return state["now"]
+
+        monkeypatch.setattr(ct_mod.time, "monotonic", fake_monotonic)
+        return state
+
+    def test_phases_serialize_pass_wall_time(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        ct = PhaseCostLedger()
+        ct.start_phase("prep_gap_compute")
+        clock["now"] += 2.5
+        # Sequential marker: closes prep_gap_compute, opens the next.
+        ct.start_phase("prep_triage")
+        clock["now"] += 1.25
+        ct.end_phase()
+
+        d = ct.to_dict()
+        assert d["phases"]["prep_gap_compute"]["pass_wall_time_s"] == 2.5
+        assert d["phases"]["prep_triage"]["pass_wall_time_s"] == 1.25
+        # Zero-call, wall-only phases still serialize.
+        assert d["phases"]["prep_gap_compute"]["calls"] == 0
+        # Marker time never lands in the PER-CALL accounting.
+        assert d["phases"]["prep_gap_compute"]["wall_time_s"] == 0.0
+
+    def test_pass_wall_never_mixes_with_call_wall(self, monkeypatch):
+        """The two wall accountings stay separate: a call booked
+        inside an instrumented pass keeps its per-call wall figure in
+        wall_time_s, the pass keeps its boundary clock in
+        pass_wall_time_s, and the totals sum them independently —
+        folding them together double-counted every in-pass call."""
+        clock = self._fake_clock(monkeypatch)
+        ct = PhaseCostLedger()
+        ct.start_phase("sweep_promotion")
+        ct.record_call("sweep_promotion", cost_usd=0.01, wall_time_s=4.0)
+        clock["now"] += 10.0
+        ct.end_phase()
+
+        pc = ct.phases["sweep_promotion"]
+        assert pc.wall_time_s == 4.0
+        assert pc.pass_wall_time_s == 10.0
+        d = ct.to_dict()
+        assert d["totals"]["wall_time_s"] == 4.0
+        assert d["totals"]["pass_wall_time_s"] == 10.0
+
+    def test_boundary_attribution_binds_the_middle_end(self, monkeypatch):
+        """Time between an ended pass and the next start is
+        unattributed — deleting a middle end_phase() would smear the
+        gap into the earlier pass."""
+        clock = self._fake_clock(monkeypatch)
+        ct = PhaseCostLedger()
+        ct.start_phase("pass_x")
+        clock["now"] += 1.0
+        ct.end_phase()
+        clock["now"] += 5.0  # un-instrumented gap
+        ct.start_phase("pass_y")
+        clock["now"] += 2.0
+        ct.end_phase()
+
+        assert ct.phases["pass_x"].pass_wall_time_s == 1.0
+        assert ct.phases["pass_y"].pass_wall_time_s == 2.0
+        assert ct.total_pass_wall_time_s == 3.0
+
+    def test_end_phase_without_active_is_a_noop(self):
+        ct = PhaseCostLedger()
+        ct.end_phase()
+        assert ct.phases == {}
+
+    def test_repeated_phase_accumulates(self, monkeypatch):
+        clock = self._fake_clock(monkeypatch)
+        ct = PhaseCostLedger()
+        for _ in range(2):
+            ct.start_phase("sweep_promotion")
+            clock["now"] += 1.0
+            ct.end_phase()
+        assert ct.phases["sweep_promotion"].pass_wall_time_s == 2.0
+
+    def test_markers_tolerate_concurrent_record_call(self):
+        """Serial phase markers on the main thread + record_call from
+        parallel workers: no deadlock, no lost bookings. (Two threads
+        MARKING phases is unsupported by design — single slot.)"""
+        import threading
+
+        ct = PhaseCostLedger()
+        stop = threading.Event()
+
+        def worker():
+            while not stop.is_set():
+                ct.record_call("review", cost_usd=0.001, wall_time_s=0.01)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for i in range(200):
+            ct.start_phase(f"pass_{i % 3}")
+        ct.end_phase()
+        stop.set()
+        for t in threads:
+            t.join(timeout=10)
+            assert not t.is_alive()
+
+        calls = ct.phases["review"].calls
+        assert calls > 0
+        assert abs(ct.phases["review"].cost_usd - calls * 0.001) < 1e-9
+        assert ct._active_phase is None

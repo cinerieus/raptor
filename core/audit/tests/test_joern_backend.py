@@ -268,6 +268,46 @@ class TestEnrichJoernEvidenceBatchedSinkArgs:
         assert rec.joern_sink_args == [{"sink": "memcpy", "arg_index": 2}]
 
 
+class TestStartJoernServerCpgTiming:
+    """timings_out receives the CPG build/import wall time so run
+    diagnostics can tell cold from warm Joern starts."""
+
+    def _patched_backend(self, monkeypatch, *, clock_step: float):
+        import types
+
+        import core.audit.joern_backend as jb
+        import packages.joern.lifecycle as lifecycle
+
+        monkeypatch.setattr(jb, "joern_available", lambda overrides=None: True)
+        monkeypatch.setattr(jb, "target_has_c_sources", lambda p: True)
+        fake_srv = types.SimpleNamespace(_cpg_loaded=False)
+        monkeypatch.setattr(lifecycle, "joern_acquire", lambda tunables: fake_srv)
+        monkeypatch.setattr(jb, "install_flow_semantics", lambda *a, **k: 0)
+
+        state = {"now": 50.0}
+        monkeypatch.setattr(
+            jb.time, "monotonic", lambda: state["now"],
+        )
+
+        def fake_ensure(srv, target_path, tunables=None, exclude_dirs=()):
+            state["now"] += clock_step
+            return True
+
+        monkeypatch.setattr(jb, "_ensure_cpg_loaded", fake_ensure)
+        return jb, fake_srv
+
+    def test_cold_build_time_recorded(self, monkeypatch, tmp_path):
+        jb, fake_srv = self._patched_backend(monkeypatch, clock_step=12.5)
+        timings: dict[str, float] = {}
+        srv = jb.start_joern_server(tmp_path, timings_out=timings)
+        assert srv is fake_srv
+        assert timings["cpg_build_s"] == 12.5
+
+    def test_timings_out_optional(self, monkeypatch, tmp_path):
+        jb, fake_srv = self._patched_backend(monkeypatch, clock_step=1.0)
+        assert jb.start_joern_server(tmp_path) is fake_srv
+
+
 class TestPreSweepAbort:
     """The consumer-discard signal stops the background pre-sweep at
     step boundaries instead of paying a build nobody reads."""

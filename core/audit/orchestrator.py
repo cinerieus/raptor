@@ -1598,6 +1598,7 @@ def run_orchestrator(
         _joern_lifecycle = False
     else:
         _joern_path = _joern_target(config)
+        _joern_timings: dict[str, float] = {}
         joern_server = _start_joern_server_raw(
             _joern_path, config.joern_overrides, _jt,
             # Keep an in-target run output dir out of the CPG content
@@ -1606,7 +1607,14 @@ def run_orchestrator(
             exclude_dirs=_run_exclude_dirs(
                 config.out_dir, _joern_path,
             ),
+            timings_out=_joern_timings,
         )
+        # Cold-vs-warm start visibility: the CPG build/import wall time
+        # lands on the joern tier's diagnostics.
+        if _joern_timings.get("cpg_build_s"):
+            result.tier_counters["joern"].cpg_build_s = (
+                _joern_timings["cpg_build_s"]
+            )
         _joern_lifecycle = (
             joern_server is not None
             and hasattr(joern_server, "_proc")
@@ -3918,7 +3926,7 @@ def _resolve_max_workers(config: OrchestratorConfig) -> int:
 
 def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
                         presweep_future=None, presweep_activity=None,
-                        presweep_abort=None):
+                        presweep_abort=None, cost_ledger=None):
     """Compute all mode-independent prep for the audit loop.
 
     Returns a dict of prep results, or None if checklist is missing.
@@ -3931,11 +3939,23 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     they replace the historical mid-prep submission; an empty-gaps run
     discards the future. Direct callers without them keep the mid-prep
     submission path.
+
+    ``cost_ledger``: the run's PhaseCostLedger. Sub-pass boundaries
+    are marked with sequential ``start_phase`` calls (single-slot:
+    each marker closes the previous phase) so cost-breakdown.json
+    attributes prep wall time per pass. Prep runs serially on this
+    thread — the marker discipline the ledger requires.
     """
+    def _phase(name: str) -> None:
+        if cost_ledger is not None:
+            cost_ledger.start_phase(name)
+
     checklist = load_checklist(config.out_dir)
     if not checklist:
         logger.error("no checklist.json in %s", config.out_dir)
         return None
+
+    _phase("prep_macro_recovery")
 
     # Binary targets: the checklist speaks address space and the
     # target is a compiled artifact — source-tree pre-passes (macro
@@ -3986,6 +4006,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         except Exception:
             logger.debug("macro-function recovery failed", exc_info=True)
 
+    _phase("prep_context_map")
     context_map = load_context_map(config.out_dir)
     if context_map is None:
         context_map = _try_understand_bridge(config)
@@ -4025,6 +4046,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
             logger.debug(
                 "crypto inventory bootstrap failed", exc_info=True,
             )
+    _phase("prep_artifact_import")
     flow_traces = load_flow_traces(config.out_dir)
 
     variant_targets = _load_variants(config.out_dir)
@@ -4090,6 +4112,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
             len(sarif_clean_files) + len(sarif_cache._by_file),
         )
 
+    _phase("prep_taint_passes")
     taint_approx_results = _load_or_build_taint_approx_raw(
         config.target_path, config.out_dir,
         scope=config.scope,
@@ -4110,6 +4133,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
 
         _populate_sinks_array(context_map, sink_results)
 
+    _phase("prep_evidence_index")
     joern_future: Future | None = None
     joern_flows: dict[str, list] | None = None
 
@@ -4229,6 +4253,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     except Exception:
         logger.debug("binary layer0 pre-sweep failed", exc_info=True)
 
+    _phase("prep_capability_probe")
     from .capabilities import probe_capabilities
     from .degradation import assess_degradation, format_degradation_report
 
@@ -4349,6 +4374,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     except Exception:
         logger.debug("typestate model extraction failed", exc_info=True)
 
+    _phase("prep_gap_compute")
     coverage_records = _load_coverage_records(config.out_dir)
     # Per-function fuzz coverage: this run's own artifact, else the
     # newest sibling /fuzz run in the same project (the producer
@@ -4479,6 +4505,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         # nothing here at all).
         _discard_presweep_future(presweep_future, abort_event=presweep_abort)
 
+    _phase("prep_iris_specs")
     iris_taint_specs, project_sinks = _iris_prep_specs(
         config, gaps, taint_summary_results,
     )
@@ -4488,6 +4515,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         if ann_dir is not None:
             gaps = _merge_stale(gaps, ann_dir, config.target_path)
 
+    _phase("prep_edge_pass")
     _edge_pass_summary: dict[str, Any] = {}
     if config.edges:
         # Cross-function edge obligations (--edges): scope the tiered
@@ -4528,6 +4556,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
                 "function-only audit", exc_info=True,
             )
 
+    _phase("prep_gap_scoring")
     prior_constraints = load_constraints(config.out_dir)
     open_keys = (
         {f"{c.file}:{c.function}" for c in open_constraints(prior_constraints)}
@@ -4690,6 +4719,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
             scope_floor=getattr(config, "scope_floor", True),
         )
 
+    _phase("prep_context_sets")
     entry_points = extract_context_map_set(context_map, "entry_points")
 
     _ops_eps: set = set()
@@ -4792,6 +4822,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
             )
     except Exception:
         logger.debug("dispatch-table extraction failed", exc_info=True)
+    _phase("prep_triage")
     triage_results = classify_all(
         gaps,
         entry_points=frozenset(entry_points),
@@ -4842,6 +4873,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     except Exception:
         logger.debug("vendored suppression records failed", exc_info=True)
 
+    _phase("prep_peer_groups")
     from .negative_space import (
         check_sibling_negative_space,
         discover_conventions,
@@ -5026,6 +5058,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     except Exception:
         logger.debug("semantic consistency check failed", exc_info=True)
 
+    _phase("prep_mechanical_detectors")
     mechanical_findings: dict[str, list[dict[str, Any]]] = {}
     guard_clean_keys: set[str] = set()
     try:
@@ -5084,6 +5117,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     # return-census.json, LLM-free verdicts on census deviants,
     # flag/mode + cleanup comparators, capped checklist leads, and the
     # acknowledged-discard → fail_open handoff hypotheses.
+    _phase("prep_consistency_prepass")
     consistency_prepass: dict[str, Any] = {}
     try:
         from .consistency_prepass import (
@@ -5162,6 +5196,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     # obligation. The phase-1 field runs had a quiet fail_open tier —
     # seeding generates the candidates instead of waiting for the LLM
     # to phrase one.
+    _phase("prep_fail_open_census")
     fail_open_census: dict[str, Any] = {}
     try:
         from .fail_open_census import (
@@ -5211,6 +5246,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     # lock_region callback-under-lock candidates. Mechanical entries
     # and injected hypotheses only — verdicts stay with the dispatch
     # channels (G1 holds: the hypothesis exists before any finding).
+    _phase("prep_lifecycle_channels")
     try:
         from .condition_smt import DomainVocabulary
         from .fail_open_roles import RoleContext as _CensusRoleCtx
@@ -5326,6 +5362,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     # mechanically-injected-hypothesis precedent), and appends its
     # telemetry to the audit log. Channel list grows per landed
     # channel; every entry degrades independently.
+    _phase("prep_channel_prepasses")
     _channel_prepasses: list[tuple[str, str]] = [
         ("resource_bounds", "run_resource_bounds_prepass"),
         ("release_order", "run_release_order_prepass"),
@@ -5405,6 +5442,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
                 _ch_name, exc_info=True,
             )
 
+    _phase("prep_finalize")
     if mechanical_findings and config.out_dir:
         try:
             mech_path = config.out_dir / "mechanical-findings.json"
@@ -5425,6 +5463,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         widely_used_keys = detect_widely_used(checklist)
     except Exception:
         logger.debug("detect_widely_used failed", exc_info=True)
+
+    if cost_ledger is not None:
+        cost_ledger.end_phase()
 
     return {
         "checklist": checklist,
@@ -6581,6 +6622,7 @@ def _run_audit_body(
                 presweep_future=joern_presweep_future,
                 presweep_activity=joern_presweep_activity,
                 presweep_abort=joern_presweep_abort,
+                cost_ledger=result.cost_tracker,
             )
         finally:
             if _prep_event is not None:
@@ -7760,8 +7802,16 @@ def _run_audit_body(
             max_workers=resolved_workers,
         )
 
+    # Post-loop pass wall-clock phases: one start/end per pass at its
+    # outermost boundary, adjacent to the existing breadcrumbs. All
+    # passes run serially on this thread (the ledger's single-slot
+    # marker discipline); parallelism inside a pass books through
+    # record_call, which is independent of the phase slot.
+    _pass_ledger = result.cost_tracker
+
     if config.deepen_suspicious:
         logger.debug("entering post-deepen mechanical sweep")
+        _pass_ledger.start_phase("post_deepen_sweep")
         sink_reachable = build_sink_reachable_set(context_map)
         new_outcomes = []
         for outcome in result.outcomes:
@@ -7812,9 +7862,11 @@ def _run_audit_body(
             else:
                 new_outcomes.append(outcome)
         result.outcomes = new_outcomes
+        _pass_ledger.end_phase()
         logger.debug("exited post-deepen mechanical sweep")
 
     logger.debug("entering _iterative_re_review")
+    _pass_ledger.start_phase("iterative_re_review")
     result = _iterative_re_review(
         result,
         config,
@@ -7835,10 +7887,12 @@ def _run_audit_body(
         joern_server=joern_server,
         max_workers=resolved_workers,
     )
+    _pass_ledger.end_phase()
     logger.debug("exited _iterative_re_review")
 
     # --- Live-sink expansion + re-queue ---
     if live_classifications is not None and live_classifications.sinks:
+        _pass_ledger.start_phase("live_sink_requeue")
         try:
             expand_wrapper_sinks(
                 live_classifications,
@@ -7966,7 +8020,10 @@ def _run_audit_body(
         except Exception:
             logger.debug("live-sink expansion failed", exc_info=True)
 
+    _pass_ledger.end_phase()  # live_sink_requeue (when it ran)
+
     if config.sweep_validate_findings:
+        _pass_ledger.start_phase("sweep_promotion")
         pre_sweep = {
             (o.file, o.function): o.status for o in result.outcomes
         }
@@ -8097,8 +8154,11 @@ def _run_audit_body(
                     entry["function_qualified"] = outcome.function_qualified
                 append_audit_log(config.out_dir, entry)
 
+    _pass_ledger.end_phase()  # sweep_promotion (when it ran)
+
     if config.adversarial:
         logger.debug("entering _adversarial_refute_pass")
+        _pass_ledger.start_phase("adversarial_refute")
         try:
             _adversarial_refute_pass(
                 result, config, checklist,
@@ -8112,8 +8172,10 @@ def _run_audit_body(
                 "keep their verdicts",
                 exc_info=True,
             )
+        _pass_ledger.end_phase()
         logger.debug("exited _adversarial_refute_pass")
 
+    _pass_ledger.start_phase("confidence_propagation")
     try:
         from .propagation import propagate_confidence
         edge_index = shared.call_edge_index if shared else {}
@@ -8131,6 +8193,7 @@ def _run_audit_body(
         logger.debug("confidence propagation failed", exc_info=True)
 
     logger.debug("entering _resolve_gate_demoted")
+    _pass_ledger.start_phase("resolve_gate_demoted")
     _resolve_gate_demoted(
         result,
         config,
@@ -8140,10 +8203,13 @@ def _run_audit_body(
         available_tools=tool_capabilities,
         mechanical_findings=mechanical_findings,
     )
+    _pass_ledger.end_phase()
     logger.debug("exited _resolve_gate_demoted")
 
     logger.debug("entering _auto_synthesize_rules")
+    _pass_ledger.start_phase("auto_synthesize_rules")
     _auto_synthesize_rules(result, config)
+    _pass_ledger.end_phase()
     logger.debug("exited _auto_synthesize_rules")
 
     retired = checker_library.retire_low_precision()
@@ -8207,6 +8273,7 @@ def _run_audit_body(
         except Exception:
             logger.debug("layer disagreement persistence failed", exc_info=True)
 
+    _pass_ledger.start_phase("flow_trace_review")
     result = _review_flow_traces(
         result,
         config,
@@ -8219,6 +8286,8 @@ def _run_audit_body(
         audit_log=audit_log,
         start_time=start_time,
     )
+
+    _pass_ledger.end_phase()  # flow_trace_review
 
     if result.findings > 0:
         logger.debug("entering _persist_findings")
@@ -8278,6 +8347,7 @@ def _run_audit_body(
         except Exception:
             logger.debug("attacker synthesis failed", exc_info=True)
 
+    _pass_ledger.start_phase("post_loop_checks")
     post_loop_findings: list[dict] = []
     generated: list = []
 
@@ -8400,6 +8470,8 @@ def _run_audit_body(
         generated = detect_generated_files(gaps, target_path=config.target_path)
     except Exception:
         logger.debug("generated-file detection failed", exc_info=True)
+
+    _pass_ledger.end_phase()  # post_loop_checks
 
     if post_loop_findings:
         logger.info(

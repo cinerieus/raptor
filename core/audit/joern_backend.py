@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -131,12 +132,18 @@ def joern_tunables(overrides: dict[str, Any] | None = None):
 
 
 def start_joern_server(target_path, joern_overrides=None, tunables=None,
-                       out_dir=None, exclude_dirs: tuple[str, ...] = ()):
+                       out_dir=None, exclude_dirs: tuple[str, ...] = (),
+                       timings_out: dict[str, float] | None = None):
     """Start or reuse a persistent Joern server if Joern is available.
 
     Returns the server instance or None.  When reusing a lifecycle-managed
     server, builds/imports the CPG for *target_path* so queries run
     against the correct codebase.
+
+    ``timings_out``: optional dict receiving ``cpg_build_s`` — the
+    wall time of the CPG build/import step (near-zero on a warm cache
+    or an already-loaded server, the dominant startup cost when cold),
+    so run diagnostics can tell cold from warm starts.
 
     After the CPG loads, tool-corroborated project sanitisers from the
     IRIS store are installed as flow-semantics kill rows so taint
@@ -182,8 +189,12 @@ def start_joern_server(target_path, joern_overrides=None, tunables=None,
                          exc_info=True)
             return None
 
-    if not _ensure_cpg_loaded(srv, target_path, tunables,
-                              exclude_dirs=exclude_dirs):
+    _cpg_start = time.monotonic()
+    _cpg_ok = _ensure_cpg_loaded(srv, target_path, tunables,
+                                 exclude_dirs=exclude_dirs)
+    if timings_out is not None:
+        timings_out["cpg_build_s"] = time.monotonic() - _cpg_start
+    if not _cpg_ok:
         logger.warning("Joern CPG failed to load for %s — disabling Joern", target_path)
         try:
             srv.stop()

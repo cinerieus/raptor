@@ -6533,3 +6533,71 @@ class TestPresweepSubmittedAtServerStart:
         assert state["interrupted"] is True
         assert state["future"].done()
         assert not state["future"].cancelled()
+
+
+@pytest.mark.slow
+class TestPerPassWallClockPhases:
+    """Prep sub-passes and post-loop passes book wall time into the
+    run ledger (cost-breakdown.json's phases block)."""
+
+    def test_prep_and_postloop_phases_booked(self, tmp_path: Path):
+        from core.audit.orchestrator import run_orchestrator
+
+        target, out = _presweep_target(tmp_path)
+        result = run_orchestrator(
+            _presweep_config(target, out), _clean_review_fn,
+        )
+
+        phases = result.cost_tracker.phases
+        expected = (
+            "prep_macro_recovery",
+            "prep_context_map",
+            "prep_taint_passes",
+            "prep_evidence_index",
+            "prep_gap_compute",
+            "prep_triage",
+            "prep_mechanical_detectors",
+            "prep_finalize",
+            "iterative_re_review",
+            "confidence_propagation",
+            "resolve_gate_demoted",
+            "auto_synthesize_rules",
+            "flow_trace_review",
+            "post_loop_checks",
+        )
+        for name in expected:
+            assert name in phases, f"missing phase: {name}"
+        # Prep did real work — its pass wall time is measurably
+        # nonzero (per-phase nonzero is pinned deterministically by
+        # the fake-clock ledger tests). Pass wall stays out of the
+        # per-call wall_time_s accounting.
+        assert sum(
+            phases[n].pass_wall_time_s
+            for n in expected if n.startswith("prep_")
+        ) > 0.0
+        # No dangling open phase at run end.
+        assert result.cost_tracker._active_phase is None
+        # The phases serialize into the cost-breakdown shape.
+        d = result.cost_tracker.to_dict()
+        assert "prep_triage" in d["phases"]
+
+    def test_cpg_build_time_lands_on_the_joern_tier(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        import core.audit.orchestrator as orch_mod
+
+        target, out = _presweep_target(tmp_path)
+
+        def fake_start(path, overrides, jt, exclude_dirs=(),
+                       timings_out=None):
+            if timings_out is not None:
+                timings_out["cpg_build_s"] = 7.5
+            return None
+
+        monkeypatch.setattr(
+            orch_mod, "_start_joern_server_raw", fake_start,
+        )
+        result = orch_mod.run_orchestrator(
+            _presweep_config(target, out), _clean_review_fn,
+        )
+        assert result.tier_counters["joern"].cpg_build_s == 7.5
