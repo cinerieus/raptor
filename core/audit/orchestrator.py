@@ -777,6 +777,19 @@ class OrchestratorConfig:
     # per run — never share across runs (the run-lifetime bound is
     # part of the key contract).
     sweep_memo: SweepMemo = field(default_factory=SweepMemo, repr=False)
+    # Tool-chain early exit: once a chain step yields a receipt the
+    # dispatching site would accept as promotion-grade (G2's
+    # is_tool_evidence class, non-detection-role, unblocked by the
+    # site's premise/synth gates), the remaining subprocess-tier steps
+    # of that chain are skipped. Trade-off, both directions: exiting
+    # early saves minutes of semgrep/spatch/codeql/compiler subprocess
+    # time per confirmed hypothesis; running the full chain collects
+    # corroborating receipts that evidence fusion and the calibrated
+    # merge may weight (a single qualifying receipt already satisfies
+    # every verdict gate — extra receipts strengthen prose and prompt
+    # context only). In-process channels always run: their refuted/
+    # confirmed receipts feed the refutation floors and merge fence.
+    tool_chain_early_exit: bool = True
 
 
 @dataclass
@@ -827,6 +840,12 @@ class ReviewOutcome:
     # gate-resolution pass must not count it as class coverage (a
     # Joern query timeout is a failure, not a refutation).
     tools_errored: set | None = field(default=None, repr=False)
+    # Chain step types skipped by the tool-chain early exit AFTER a
+    # promotion-grade receipt confirmed the hypothesis. Distinct from
+    # errored (the channel was healthy) and excluded from
+    # tools_dispatched (the channel did not look — coverage and
+    # critique must not read the skip as a silent tool or as a bug).
+    tools_skipped: set | None = field(default=None, repr=False)
     semantic_confidence: str = ""
     provenance_all_trusted: bool = False
     caller_attributed: bool = False
@@ -15905,6 +15924,35 @@ def _ghidra_re_context(
     return re_types, xref_source
 
 
+# Chain step types the early exit may skip once a promotion-grade
+# receipt stands: the subprocess/server-tier engines whose refuted
+# outcomes land only in tier diagnostics (no per-function refutation
+# receipt feeds the refutation floors or the merge fence from these
+# branches), so skipping them after a qualifying confirmation can only
+# lose corroborating receipts — never flip a verdict. In-process
+# channels (consistency, fail_open, ptr_lifecycle, ...) are NEVER
+# skipped: their confirmed/refuted results are recorded as per-function
+# channel receipts, and the smt step's refutation clears prior smt
+# confirmations.
+_EARLY_EXIT_SKIPPABLE_TYPES: frozenset[str] = frozenset({
+    "semgrep", "coccinelle", "coccinelle_flow", "codeql", "compiler",
+    "joern", "joern_guard", "joern_flow",
+})
+
+
+def _promotion_grade_receipt(receipt: str) -> bool:
+    """Would this single receipt promote at the dispatching sites?
+
+    The G2 evidence-grade firewall (``is_tool_evidence``) AND the
+    detection-role classifier must both pass: a detection-role stamp
+    corroborates via aggregation and may not end the chain (later
+    channels are exactly what aggregation needs).
+    """
+    from .evidence_grade import is_tool_evidence
+
+    return is_tool_evidence(receipt) and not _is_detection_only(receipt)
+
+
 def _memoized_sweep_step(
     config: OrchestratorConfig,
     tool: str,
@@ -15941,6 +15989,8 @@ def _run_tool_chain(
     domain_vocab: Any = None,
     cwe: str = "",
     errored_types: set | None = None,
+    early_exit_check: Callable[[str], bool] | None = None,
+    skipped_types: set | None = None,
 ) -> list[str]:
     """Run tools from *chain* in order, collecting all confirmations.
 
@@ -15951,6 +16001,17 @@ def _run_tool_chain(
     When *errored_types* is provided, the step types that errored are
     collected into it so callers can record per-function tool failures
     (a channel that errored did not meaningfully run).
+
+    When *early_exit_check* is provided AND
+    ``config.tool_chain_early_exit`` is on, each collected confirmation
+    is tested against it; once one qualifies (the dispatching site
+    would promote on that receipt alone), the remaining
+    ``_EARLY_EXIT_SKIPPABLE_TYPES`` steps are skipped.  Skipped step
+    types are collected into *skipped_types* and journaled, so
+    coverage/critique readers can distinguish "did not look (early
+    exit)" from "looked and stayed silent".  In-process channels and
+    the smt step still run — their receipts feed the refutation
+    machinery.
 
     When *sarif_cache* is provided, semgrep sweeps check for prior
     SARIF results before spawning a subprocess.  Cached SARIF hits
@@ -15971,9 +16032,54 @@ def _run_tool_chain(
             if not domain_vocab.has_content:
                 domain_vocab = None
 
+    _early_exit_enabled = (
+        early_exit_check is not None
+        and getattr(config, "tool_chain_early_exit", True)
+    )
+    _exit_receipt: str | None = None
+    _exit_skipped: list[str] = []
+    _ran_types: set = set()
+
     for entry in chain:
         tool_type = entry["type"]
         tool_cfg = entry["config"]
+
+        if (
+            _early_exit_enabled
+            and early_exit_check is not None
+            and _exit_receipt is None
+        ):
+            for _c in confirmed:
+                try:
+                    if early_exit_check(_c):
+                        _exit_receipt = _c
+                        break
+                except Exception:  # noqa: BLE001 — a predicate error
+                    # must never kill the chain; the receipt simply
+                    # does not qualify and the chain runs in full.
+                    logger.debug(
+                        "early-exit predicate failed on %s", _c,
+                        exc_info=True,
+                    )
+        if _exit_receipt is not None \
+                and tool_type in _EARLY_EXIT_SKIPPABLE_TYPES:
+            _exit_skipped.append(tool_type)
+            # A chain may carry several entries of one type (binary
+            # decompiler rules append extra semgrep entries): a type
+            # that already EXECUTED in this call stays dispatched —
+            # the tool did look, and dropping it from the dispatch
+            # record would demote the confirming receipt's
+            # verification tier.
+            if skipped_types is not None and tool_type not in _ran_types:
+                skipped_types.add(tool_type)
+            logger.info(
+                "tool_chain early exit: %s skipped for %s:%s — "
+                "promotion-grade receipt %s already stands",
+                tool_type, file_path, function_name, _exit_receipt,
+            )
+            continue
+
+        _ran_types.add(tool_type)
 
         # Wall-clock bracket for tier diagnostics: tier-diagnostics
         # wall_time_s was declared on TierCounters but never
@@ -16181,6 +16287,25 @@ def _run_tool_chain(
                         )
                 else:
                     smt_confirmations = [c for c in confirmed if c.startswith("smt:")]
+                    # Early-exit invariant, pinned: an armed exit
+                    # receipt is never revalidated after arming, so
+                    # clearing receipts here must not be able to pull
+                    # one out from under the exit. Verification-role
+                    # smt receipts ("smt:check-oob" and friends) ARE
+                    # promotion-grade and can arm — the invariant
+                    # rests solely on the one-smt-slot-per-chain
+                    # dedup (seen_types; smt_invariant is a separate,
+                    # later, detection-role type): a single smt step
+                    # either confirms or refutes, so at refute time
+                    # there is no earlier smt confirmation in
+                    # ``confirmed`` to clear, armed or otherwise. If
+                    # chains ever gain a second smt slot, re-check
+                    # _exit_receipt here.
+                    assert _exit_receipt is None \
+                        or _exit_receipt not in smt_confirmations, (
+                        "smt refutation would clear the armed "
+                        "early-exit receipt"
+                    )
                     if smt_confirmations:
                         logger.info(
                             "smt refuted %s:%s — clearing %d smt confirmations (%s); keeping %d pattern-match confirmations",
@@ -17213,6 +17338,23 @@ def _run_tool_chain(
                     time.monotonic() - _tier_t0,
                 )
 
+    if _exit_skipped and config.out_dir:
+        try:
+            append_audit_log(config.out_dir, {
+                "action": "tool_chain_early_exit",
+                "key": f"{file_path}:{function_name}",
+                "file": file_path,
+                "function": function_name,
+                "confirming_receipt": _exit_receipt,
+                "tools_skipped": sorted(set(_exit_skipped)),
+                "hypothesis": hypothesis[:200],
+            })
+        except Exception:
+            logger.debug(
+                "tool_chain early-exit journal row failed",
+                exc_info=True,
+            )
+
     return confirmed
 
 
@@ -17476,6 +17618,7 @@ def _sweep_validate(
 
         dispatched = {step.get("type") for step in chain if step.get("type")}
         errored: set = set()
+        skipped: set = set()
 
         confirmed = _run_tool_chain(
             chain,
@@ -17492,7 +17635,19 @@ def _sweep_validate(
             target_path_override=_decomp_tmp_dir if is_binary and _decomp_tmp_dir else None,
             cwe=cwe,
             errored_types=errored,
+            # Exit only on a receipt THIS site would stamp on its own:
+            # promotion-grade AND not premise-blocked (a function-local
+            # confirm under a cross-function counter falls through, so
+            # a later cross-function channel must still get its turn).
+            early_exit_check=lambda c: (
+                _promotion_grade_receipt(c)
+                and not _premise_blocks_confirm(premise_h, [c])
+            ),
+            skipped_types=skipped,
         )
+        # A skipped channel did not look — it must not claim class
+        # coverage in the gate-resolution pass.
+        dispatched -= skipped
 
         # No Frida auto-launch here — an earlier last-resort path gated
         # on a never-set ``config._binary_path`` attribute was dead code
@@ -17504,6 +17659,8 @@ def _sweep_validate(
         outcome.tools_dispatched = (outcome.tools_dispatched or set()) | dispatched
         if errored:
             outcome.tools_errored = (outcome.tools_errored or set()) | errored
+        if skipped:
+            outcome.tools_skipped = (outcome.tools_skipped or set()) | skipped
         if confirmed and _premise_blocks_confirm(premise_h, confirmed):
             _note_premise_blocked_validation(
                 outcome, premise_h, confirmed, config, tier_counters,
@@ -18251,6 +18408,10 @@ def _run_critique(
             tier_counters=result.tier_counters,
             joern_server=joern_server,
             cwe=cwe,
+            # This site promotes on the first verification-role
+            # receipt (the sink-guard veto below is receipt-
+            # independent), so one qualifying receipt ends the chain.
+            early_exit_check=_promotion_grade_receipt,
         )
         if confirmed:
             # Same promotion discipline as _promote_suspicious: only
@@ -18335,6 +18496,10 @@ def _run_critique(
                         sarif_cache=sarif_cache,
                         tier_counters=result.tier_counters,
                         joern_server=joern_server,
+                        # The recheck only logs "unresolved evidence"
+                        # on ANY confirmation; a qualifying receipt
+                        # already satisfies that.
+                        early_exit_check=_promotion_grade_receipt,
                     )
                     if confirmed:
                         logger.info(
@@ -19992,6 +20157,17 @@ def _promote_suspicious(
             tier_counters=result.tier_counters,
             joern_server=joern_server,
             cwe=cwe,
+            # Exit only on a receipt THIS site would promote on alone:
+            # promotion-grade, not synth-excluded (an excluded synth
+            # receipt is dropped below and other channels must still
+            # get their turn), not premise-blocked.
+            early_exit_check=lambda c: (
+                _promotion_grade_receipt(c)
+                and not _synth_receipt_promotion_block_reason(
+                    c, outcome, cwe, config,
+                )
+                and not _premise_blocks_confirm(premise_h, [c])
+            ),
         )
 
         if confirmed:
@@ -20513,6 +20689,7 @@ def _promote_suspicious_preconditions(
             (outcome.tools_dispatched or set()) | {"precondition"}
         )
         promoted.tools_errored = outcome.tools_errored
+        promoted.tools_skipped = outcome.tools_skipped
         promoted.semantic_confidence = outcome.semantic_confidence
         if promoted.review_result is not None:
             promoted.review_result["evidence_tool"] = tool
@@ -21409,6 +21586,13 @@ def _dispatch_secondary_hypotheses(
                 tier_counters=result.tier_counters,
                 joern_server=joern_server,
                 cwe=cwe,
+                # Exit only on a receipt this site would accept alone:
+                # promotion-grade and not blocked by the secondary
+                # hypothesis's own cross-function counter premise.
+                early_exit_check=lambda c: (
+                    _promotion_grade_receipt(c)
+                    and not _premise_blocks_confirm(h, [c])
+                ),
             )
             _increment_tier_dict(
                 result.tier_counters, "secondary_sweep",
@@ -21505,6 +21689,7 @@ def _dispatch_secondary_hypotheses(
             )
             rescued.tools_dispatched = outcome.tools_dispatched
             rescued.tools_errored = outcome.tools_errored
+            rescued.tools_skipped = outcome.tools_skipped
             rescued.semantic_confidence = outcome.semantic_confidence
             if rescued.review_result is not None:
                 rescued.review_result["evidence_tool"] = tool
@@ -21738,6 +21923,9 @@ def _adversarial_refute_pass(
                     tier_counters=result.tier_counters,
                     joern_server=joern_server,
                     cwe=cwe,
+                    # One verification-role receipt overturns the
+                    # textual refutation on its own.
+                    early_exit_check=_promotion_grade_receipt,
                 )
                 high_prec = [
                     t for t in (confirmed or [])
@@ -21803,6 +21991,7 @@ def _adversarial_refute_pass(
             )
             cleaned.tools_dispatched = outcome.tools_dispatched
             cleaned.tools_errored = outcome.tools_errored
+            cleaned.tools_skipped = outcome.tools_skipped
             result.outcomes[i] = cleaned
             result.suspicious -= 1
             result.clean += 1
@@ -22447,6 +22636,7 @@ def _demote_absent_promotions(
         )
         demoted.tools_dispatched = outcome.tools_dispatched
         demoted.tools_errored = outcome.tools_errored
+        demoted.tools_skipped = outcome.tools_skipped
         # Pure in-repo grading over constant inputs — only a partial
         # install (import failure) can legitimately fail here.
         with contextlib.suppress(ImportError):
@@ -22517,6 +22707,7 @@ def _promote_outcome(outcome: ReviewOutcome, tool: str) -> ReviewOutcome:
     )
     promoted.tools_dispatched = outcome.tools_dispatched
     promoted.tools_errored = outcome.tools_errored
+    promoted.tools_skipped = outcome.tools_skipped
     promoted.semantic_confidence = outcome.semantic_confidence
     promoted.function_qualified = getattr(
         outcome, "function_qualified", "",
@@ -23177,6 +23368,7 @@ def _resolve_gate_demoted(
             )
             resolved.tools_dispatched = outcome.tools_dispatched
             resolved.tools_errored = outcome.tools_errored
+            resolved.tools_skipped = outcome.tools_skipped
             result.outcomes[i] = resolved
             result.suspicious -= 1
             result.clean += 1
@@ -23308,6 +23500,7 @@ def _resolve_gate_demoted(
             )
             resolved.tools_dispatched = outcome.tools_dispatched
             resolved.tools_errored = outcome.tools_errored
+            resolved.tools_skipped = outcome.tools_skipped
             result.outcomes[i] = resolved
             result.suspicious -= 1
             result.clean += 1
@@ -23334,6 +23527,7 @@ def _resolve_gate_demoted(
             )
             resolved.tools_dispatched = outcome.tools_dispatched
             resolved.tools_errored = outcome.tools_errored
+            resolved.tools_skipped = outcome.tools_skipped
             result.outcomes[i] = resolved
             result.suspicious -= 1
             result.dormant += 1
@@ -24056,6 +24250,7 @@ def _demote_outcome(outcome: ReviewOutcome, reason: str) -> ReviewOutcome:
     )
     demoted.tools_dispatched = outcome.tools_dispatched
     demoted.tools_errored = outcome.tools_errored
+    demoted.tools_skipped = outcome.tools_skipped
     demoted.semantic_confidence = outcome.semantic_confidence
     demoted.provenance_all_trusted = outcome.provenance_all_trusted
     demoted.function_qualified = getattr(

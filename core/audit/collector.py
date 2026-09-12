@@ -258,6 +258,9 @@ def append_journal_for_outcome(
     tools_dispatched = sorted(
         str(t) for t in (getattr(outcome, "tools_dispatched", None) or ())
     )
+    tools_skipped = sorted(
+        str(t) for t in (getattr(outcome, "tools_skipped", None) or ())
+    ) or None
 
     reading_list_items: list[str] = []
     review_result = getattr(outcome, "review_result", None)
@@ -416,6 +419,7 @@ def append_journal_for_outcome(
         model=getattr(outcome, "model", None) or None,
         evidence_tools=evidence_tools,
         tools_dispatched=tools_dispatched,
+        tools_skipped=tools_skipped,
         cost_usd=getattr(outcome, "cost_usd", None) or None,
         duration_s=getattr(outcome, "duration_s", None) or None,
         verdict_rationale=verdict_rationale,

@@ -164,6 +164,12 @@ class ReviewJournalEntry:
     # (the old union let dispatched-but-unconfirming runs read
     # as confirming receipts in the durable journal).
     tools_dispatched: list[str] = field(default_factory=list)
+    # Chain step types skipped by the tool-chain early exit after a
+    # promotion-grade receipt confirmed the hypothesis. Kept separate
+    # from tools_dispatched (the channel did not look — it must not
+    # read as coverage or as a silently-refuting run) and from
+    # tools that errored. Additive; absent on rows without a skip.
+    tools_skipped: list[str] | None = None
     token_budget: int | None = None
     cost_usd: float | None = None
     duration_s: float | None = None
@@ -567,6 +573,7 @@ def _entry_from_dict(raw: dict[str, Any]) -> ReviewJournalEntry:
         model=raw.get("model"),
         evidence_tools=raw.get("evidence_tools", []),
         tools_dispatched=raw.get("tools_dispatched", []),
+        tools_skipped=raw.get("tools_skipped"),
         token_budget=raw.get("token_budget"),
         cost_usd=raw.get("cost_usd"),
         duration_s=raw.get("duration_s"),
