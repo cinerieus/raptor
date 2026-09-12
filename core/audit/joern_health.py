@@ -87,6 +87,7 @@ class JoernChannelHealth:
         self._skips_since_trip: int = 0
         self._probe_spent: bool = False
         self._recovered_once: bool = False
+        self._gated_spends: list[str] = []
 
     def allow_dispatch(self) -> bool:
         """True when the channel may dispatch.
@@ -166,6 +167,14 @@ class JoernChannelHealth:
                 "run)",
             )
 
+    def note_gated_spend(self, phase: str) -> None:
+        """Record that a paid phase was skipped because the channel is
+        down — surfaced in diagnostics/report so the $0 skip is an
+        operator-visible decision, never a silent absence."""
+        with self._lock:
+            if phase not in self._gated_spends:
+                self._gated_spends.append(phase)
+
     @property
     def tripped(self) -> bool:
         with self._lock:
@@ -186,6 +195,11 @@ class JoernChannelHealth:
         with self._lock:
             return self._total_successes
 
+    @property
+    def gated_spends(self) -> list[str]:
+        with self._lock:
+            return list(self._gated_spends)
+
     def to_dict(self) -> dict[str, Any]:
         with self._lock:
             data: dict[str, Any] = {
@@ -202,6 +216,8 @@ class JoernChannelHealth:
                 data["probe_spent"] = True
             if self._recovered_once:
                 data["recovered_once"] = True
+            if self._gated_spends:
+                data["gated_spends"] = list(self._gated_spends)
             return data
 
 
@@ -254,6 +270,10 @@ def health_snapshot(config: Any) -> dict[str, dict[str, Any]] | None:
     health = getattr(config, "joern_health", None)
     if health is None:
         return None
-    if health.total_errors == 0 and not health.tripped:
+    if (
+        health.total_errors == 0
+        and not health.tripped
+        and not health.gated_spends
+    ):
         return None
     return {"joern": health.to_dict()}

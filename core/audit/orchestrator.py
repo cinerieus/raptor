@@ -600,6 +600,19 @@ class OrchestratorConfig:
     # the deepen phase starts (or immediately when deepen has nothing
     # to do). 0 disables the reserve.
     deepen_reserve_fraction: float = 0.15
+    # Slice of the LLM cost cap held back for the study consumer's
+    # end-of-run drain (question resolutions + study-enriched
+    # re-reviews). Held TOGETHER with the deepen slice before the main
+    # loop and handed back at the drain boundary, so the priority
+    # order is enforced by construction: main reviews (and their
+    # refinement rounds) gate against cap - (deepen + study), the
+    # drain gates against cap - deepen, and the deepen phase gets its
+    # own slice last-released. Too small and a spend-to-cap run
+    # abandons its entire pending study backlog with zero re-reviews
+    # while refinement spends freely from the shared pool; too large
+    # and discovery reviews — the run's primary product — give up
+    # real budget to an enrichment pass. 0 disables the slice.
+    study_reserve_fraction: float = 0.05
     # Slice of the LLM cost cap held back from the PRE-review bulk
     # passes (prep, study, synthesis, summaries) so the per-function
     # review loop is guaranteed headroom. Held on the budget client at
@@ -6433,8 +6446,41 @@ def _iris_refine_and_bypass(
             taint_chain_callees=taint_chain_callees_post,
         )
         if iris_candidates:
+            # Spend gate: the refine loop pays LLM money to produce
+            # specs whose receipts come from the joern/codeql tool
+            # runners. With no healthy mechanical consumer — joern
+            # absent or health-gate tripped, and no CodeQL database —
+            # every dollar buys specs no tool will ever evaluate this
+            # run, so skip the paid phase outright, book the decision
+            # at $0, and surface it in the report. A healthy CodeQL
+            # runner keeps the phase paid even when joern is down.
+            _joern_consumer_up = (
+                joern_server is not None
+                and not _joern_channel_unhealthy(config)
+            )
+            if not _joern_consumer_up and not config.codeql_db_path:
+                reason = (
+                    "joern channel health gate tripped"
+                    if joern_server is not None
+                    else "no joern server"
+                )
+                logger.warning(
+                    "IRIS refinement skipped — no healthy mechanical "
+                    "consumer (%s, no CodeQL database); $0 spent",
+                    reason,
+                )
+                health = getattr(config, "joern_health", None)
+                if health is not None:
+                    health.note_gated_spend("iris_refinement")
+                tracker = getattr(result, "cost_tracker", None)
+                if tracker is not None:
+                    tracker.record_call(
+                        "iris_refinement_skipped", cost_usd=0.0,
+                    )
+                return None, []
+
             joern_tool_runner = None
-            if joern_server is not None:
+            if _joern_consumer_up:
                 joern_tool_runner = _make_iris_joern_tool_runner(
                     joern_server, config=config,
                 )
@@ -7478,14 +7524,19 @@ def _run_audit_body(
         study_consumer_thread.start()
         logger.info("study-consumer: started")
 
-    # --- Deepen budget reserve ---
-    # Hold back a slice of the cost cap so the deepen phase can
-    # execute the re-reviews it announces; the discovery loop (and the
-    # study/synthesis passes that run before deepen) gate against
-    # cap - reserve. Released right before the deepen phase.
+    # --- Deepen + study budget reserve ---
+    # Hold back the end-of-run consumers' slices so they can execute
+    # the work they announce; the discovery loop AND its refinement
+    # rounds gate against cap - (deepen + study). The study slice is
+    # handed back at the drain boundary, deepen's right before the
+    # deepen phase — enforcing main reviews > deepen > study by
+    # construction (each phase can only reach money the phases above
+    # it already could not touch).
     if review_reserve_held:
         _release_review_reserve(config)
-    deepen_reserve_held = _hold_deepen_reserve(config)
+    deepen_reserve_held = _hold_deepen_reserve(
+        config, study_active=study_consumer_thread is not None,
+    )
 
     try:
         executor_stats = run_executor_sync(
@@ -7647,18 +7698,11 @@ def _run_audit_body(
                 "exhaustion — pending batches cancelled",
             )
 
-    # --- Drain study consumer ---
-    if study_queue is not None:
-        study_queue.signal_producer_done()
-    if study_consumer_thread is not None:
-        _drain_study_consumer(
-            study_consumer_thread,
-            study_queue,
-            budget_exhausted=bool(
-                executor_stats.budget_stopped
-                or _check_budget(config, start_time, result)
-            ),
-        )
+    # --- Drain study consumer (reserve handover inside) ---
+    deepen_reserve_held = _drain_study_with_reserve_handover(
+        config, study_queue, study_consumer_thread,
+        deepen_reserve_held, start_time, result,
+    )
 
     # --- SIGTERM salvage: skip every optional post pass ---
     # In-flight completions are already harvested (the executor's
@@ -11790,15 +11834,29 @@ def _release_review_reserve(config: OrchestratorConfig) -> None:
         logger.debug("review reserve release failed", exc_info=True)
 
 
-def _hold_deepen_reserve(config: OrchestratorConfig) -> float:
-    """Hold the deepen phase's budget slice on the run's budget client.
+def _hold_deepen_reserve(
+    config: OrchestratorConfig, *, study_active: bool = False,
+) -> float:
+    """Hold the end-of-run consumers' budget slice on the budget client.
 
-    Only when deepen is enabled AND reachable (a budget client with a
-    finite cap exists and the fraction is positive). Returns the amount
-    held (0.0 when no reserve was taken)."""
-    if not config.deepen_suspicious:
-        return 0.0
-    fraction = getattr(config, "deepen_reserve_fraction", 0.0) or 0.0
+    The client holds ONE reserve at a time (a new hold replaces the
+    previous), so the priority chain is enforced by handover: before
+    the main loop this holds deepen + study together (reviews and
+    their refinement rounds gate against ``cap - both``); at the study
+    drain the caller re-holds deepen-only, releasing exactly the study
+    slice to the drain; the deepen phase releases the rest when it
+    starts. Returns the amount held (0.0 when no reserve was taken).
+    """
+    fraction = 0.0
+    if config.deepen_suspicious:
+        fraction += max(
+            0.0, getattr(config, "deepen_reserve_fraction", 0.0) or 0.0,
+        )
+    if study_active:
+        fraction += max(
+            0.0, getattr(config, "study_reserve_fraction", 0.0) or 0.0,
+        )
+    fraction = min(fraction, 0.9)
     if fraction <= 0:
         return 0.0
     client = getattr(config, "llm_budget_client", None)
@@ -11810,17 +11868,57 @@ def _hold_deepen_reserve(config: OrchestratorConfig) -> float:
         ) or 0
         if not cap or cap == float("inf"):
             return 0.0
-        held = client.hold_budget_reserve(cap * min(fraction, 0.9))
+        held = client.hold_budget_reserve(cap * fraction)
         if held:
             logger.info(
-                "deepen: holding $%.2f (%.0f%% of the $%.2f cap) in "
-                "reserve so announced re-reviews can execute",
-                held, 100.0 * min(fraction, 0.9), cap,
+                "deepen%s: holding $%.2f (%.0f%% of the $%.2f cap) in "
+                "reserve so announced re-reviews%s can execute",
+                "+study" if study_active else "",
+                held, 100.0 * fraction, cap,
+                " and pending study questions" if study_active else "",
             )
         return held
     except Exception:  # reserve is an optimisation, never fatal
         logger.debug("deepen reserve hold failed", exc_info=True)
         return 0.0
+
+
+def _drain_study_with_reserve_handover(
+    config: OrchestratorConfig,
+    study_queue: Any,
+    study_consumer_thread: Any,
+    deepen_reserve_held: float,
+    start_time: float,
+    result: "OrchestratorResult",
+) -> float:
+    """Drain-boundary step: hand the study slice back, then drain.
+
+    The budget client holds ONE reserve at a time, so re-holding
+    deepen-only here releases exactly the study slice to the drain
+    (and when deepen holds nothing of its own, the whole reserve is
+    released). The drain's exhaustion flag is re-evaluated against
+    the post-handover cap — the executor's sticky budget-stop flag
+    describes the OLD cap and would abandon the pending study
+    questions the slice exists to pay for; ``_check_budget``
+    re-checks every rail, including SIGTERM and wall clock, so
+    nothing weakens. Returns the updated deepen hold.
+    """
+    if study_queue is not None:
+        study_queue.signal_producer_done()
+    if study_consumer_thread is None:
+        return deepen_reserve_held
+    if deepen_reserve_held:
+        deepen_reserve_held = _hold_deepen_reserve(config)
+        if not deepen_reserve_held:
+            _release_deepen_reserve(config)
+    _drain_study_consumer(
+        study_consumer_thread,
+        study_queue,
+        budget_exhausted=bool(
+            _check_budget(config, start_time, result)
+        ),
+    )
+    return deepen_reserve_held
 
 
 def _release_deepen_reserve(config: OrchestratorConfig) -> None:

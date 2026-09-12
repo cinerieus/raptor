@@ -235,7 +235,8 @@ def generate_report(
     if isinstance(health, dict):
         tripped_channels = {
             name: rec for name, rec in health.items()
-            if isinstance(rec, dict) and rec.get("tripped")
+            if isinstance(rec, dict)
+            and (rec.get("tripped") or rec.get("gated_spends"))
         }
         if tripped_channels:
             report["channel_health"] = tripped_channels
@@ -1309,18 +1310,32 @@ def _format_summary(report: dict[str, Any]) -> str:
     if channel_health:
         for name, rec in sorted(channel_health.items()):
             lines.append("")
-            lines.append(f"### ⚠️ {name} channel unhealthy (mid-run trip)")
-            reason = rec.get("trip_reason") or "consecutive dispatch failures"
-            lines.append(
-                f"The {name} channel tripped its health gate ({reason}) "
-                f"and its remaining dispatches were skipped — "
-                f"hypotheses after the trip carry no {name} receipts. "
-                f"Skipped is not refuted: treat the missing receipts "
-                f"as unanswered questions. "
-                f"{rec.get('total_successes', 0)} dispatch(es) "
-                f"completed before the trip, "
-                f"{rec.get('total_errors', 0)} failed."
-            )
+            if rec.get("tripped"):
+                lines.append(
+                    f"### ⚠️ {name} channel unhealthy (mid-run trip)"
+                )
+                reason = (
+                    rec.get("trip_reason")
+                    or "consecutive dispatch failures"
+                )
+                lines.append(
+                    f"The {name} channel tripped its health gate "
+                    f"({reason}) and its remaining dispatches were "
+                    f"skipped — hypotheses after the trip carry no "
+                    f"{name} receipts. Skipped is not refuted: treat "
+                    f"the missing receipts as unanswered questions. "
+                    f"{rec.get('total_successes', 0)} dispatch(es) "
+                    f"completed before the trip, "
+                    f"{rec.get('total_errors', 0)} failed."
+                )
+            else:
+                lines.append(f"### ⚠️ {name} channel down")
+            for phase in rec.get("gated_spends", []):
+                lines.append(
+                    f"  - {_line(phase, max_chars=40)} skipped at $0 — "
+                    f"its LLM spend only pays into the {name} channel, "
+                    f"which was down for this run"
+                )
 
     provision = report.get("codeql_provision")
     if provision:
