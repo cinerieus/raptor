@@ -1,14 +1,23 @@
-"""Tests for the heap-mismatch engine's allocation tracking.
+"""Tests for the heap-mismatch engine.
 
-The allocation list lives in angr's ``state.globals``, whose ``copy``
-on state fork is SHALLOW — the list object is shared between sibling
-states.  These tests pin the copy-on-write discipline of the alloc
-recorder without needing angr: a stand-in state whose ``globals`` dict
-is shallow-copied reproduces exactly the sharing semantics of
-``SimStateGlobals.copy``.
+Allocation tracking: the allocation list lives in angr's
+``state.globals``, whose ``copy`` on state fork is SHALLOW — the list
+object is shared between sibling states.  The tracking tests pin the
+copy-on-write discipline of the alloc recorder without needing angr:
+a stand-in state whose ``globals`` dict is shallow-copied reproduces
+exactly the sharing semantics of ``SimStateGlobals.copy``.
+
+Public wrapper: ``find_heap_mismatch_witness`` runs through the same
+isolation dispatch as the other engines; the wrapper tests here cover
+its failure-shape contract end-to-end (real child spawn) plus the
+full witness solve (slow tier).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
 
 from core.symbolic._heap_mismatch import _ALLOC_KEY, _append_alloc
 
@@ -45,3 +54,72 @@ def test_append_alloc_records_in_own_state() -> None:
     _append_alloc(state, "p1", 32)
     _append_alloc(state, "p2", 64)
     assert state.globals[_ALLOC_KEY] == [("p1", 32), ("p2", 64)]
+
+
+def test_missing_binary_returns_failure_result(tmp_path: Path) -> None:
+    """Missing binary → succeeded=False + descriptive reason through
+    the REAL isolation dispatch (child spawn included) — the same
+    failure-shape contract the sibling engines pin."""
+    pytest.importorskip("angr")
+    from core.symbolic._heap_mismatch import find_heap_mismatch_witness
+
+    result = find_heap_mismatch_witness(
+        tmp_path / "does-not-exist",
+        target_address=0x400000,
+        timeout=10.0,
+    )
+    assert result.succeeded is False
+    assert "not found" in result.reason
+    assert result.concrete_input is None
+
+
+#: One symbolic-length copy into a smaller heap allocation: the copy
+#: hook's ``count > alloc_size`` query is satisfiable at the first
+#: memcpy call, so the solve stays fast and deterministic.
+_HEAP_MISMATCH_SOURCE = r"""
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(void) {
+    unsigned char n = 0;
+    char src[256];
+    if (read(0, &n, 1) != 1) return 1;
+    if (read(0, src, sizeof src) < 0) return 1;
+    char *dst = malloc(8);
+    if (!dst) return 1;
+    memcpy(dst, src, n);
+    return 0;
+}
+"""
+
+
+@pytest.mark.slow
+def test_heap_mismatch_witness_end_to_end(tmp_path: Path) -> None:
+    """Full pipeline through the public wrapper: hooked exploration
+    finds the satisfiable ``count > alloc_size`` copy and returns a
+    concrete stdin witness plus the copy-function evidence."""
+    pytest.importorskip("angr")
+    from core.symbolic import load_binary
+    from core.symbolic._heap_mismatch import find_heap_mismatch_witness
+    from core.symbolic.tests.conftest import compile_fixture
+
+    binary = compile_fixture(tmp_path, _HEAP_MISMATCH_SOURCE)
+    # The engine finds via its hook predicate, not the address; the
+    # entry point just has to pass the mapped-segment sanity gate.
+    entry = load_binary(binary).entry_point
+    result = find_heap_mismatch_witness(
+        binary,
+        target_address=entry,
+        timeout=120.0,
+    )
+    assert result.succeeded is True, result.reason
+    assert result.concrete_input is not None
+    assert result.metadata.get("copy_fn") == "memcpy"
+    assert result.metadata.get("call_addr") is not None
+    # NOT asserted: that the witness's length byte itself exceeds the
+    # allocation. The copy hook checks ``count > alloc_size``
+    # SATISFIABILITY without pinning it, so the dumped stdin is any
+    # model of the path — the engine's witness contract is "reaches
+    # the feasible-mismatch copy", not "this exact input overflows"
+    # (verified empirically: the first byte varies run to run).
