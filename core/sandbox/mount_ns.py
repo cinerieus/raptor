@@ -30,7 +30,8 @@ matches the inline step comments in the function body):
        it) is never copied, and the copy stops at a total
        bytes/entry budget rather than crawling a pathological host
        /etc (see _copy_etc_tree).
-    5. rbind-mounts /dev and /sys from the host.
+    5. builds a minimal per-sandbox /dev (fresh tmpfs, per-node binds,
+       fresh devpts — never the host's pty slaves) and rbinds /sys.
     6. Bind-mounts host /proc (a fresh procfs would need a pid-ns first).
     7. Mounts fresh tmpfs at /run and /tmp for per-sandbox isolation
        (7b: re-creates inherited temp-dir env paths inside it).
@@ -740,6 +741,120 @@ def _ro_remount_flags(path: str) -> int:
     return flags
 
 
+# The device nodes a per-sandbox /dev carries. Everything real tools
+# need to START (glibc, ld.so, ASAN, curl, gcc, interpreters): the
+# bit-bucket/entropy/discard set plus /dev/tty (a per-process virtual
+# device — it resolves to the OPENER's controlling terminal, and the
+# sandboxed child is setsid'd with no ctty, so opening it is ENXIO at
+# the VFS layer, never the operator's terminal). Deliberately absent:
+# host /dev/pts/* (the operator's pty slaves — a fresh devpts instance
+# below serves openpty()), block devices, /dev/kvm, /dev/fuse,
+# hugepages/mqueue, and every other host node the former recursive
+# bind dragged in.
+_MINIMAL_DEV_NODES = ("null", "zero", "full", "random", "urandom", "tty")
+
+
+def _mount_minimal_dev(root: str) -> None:
+    """Build a minimal per-sandbox /dev instead of recursively binding
+    the host's.
+
+    The recursive host bind carried ALL host nodes — including
+    /dev/pts/* — into the sandbox, and the default posture
+    (``restrict_reads=False``) leaves reads unrestricted, so a hostile
+    build script or fuzz target in the default lane could read-open
+    the operator's same-uid pty slave and compete for keystrokes.
+    Landlock narrowing never covered this lane. A fresh tmpfs with
+    per-node binds (the rootless-container construction: mknod needs
+    CAP_MKNOD in the INIT userns, but bind-mounting an existing host
+    node re-uses the host devtmpfs superblock, which the userns
+    SB_I_NODEV restriction does not apply to) provides exactly the
+    nodes tools need and nothing else.
+
+    Failure policy: a missing ESSENTIAL node (null/zero/urandom —
+    everything from shell redirection to glibc startup assumes them)
+    raises (OSError → the spawn child's setup handler; a host without
+    a bindable /dev/null is broken, and continuing would produce
+    subtly-wrong tool behaviour). The optional nodes (full, random,
+    tty) and the fresh devpts instance degrade with a warning — their
+    absence costs capability but exposes nothing, the correct failure
+    direction for this control. A host /dev entry that is not a char
+    device refuses setup outright (tampered/exotic host).
+    """
+    dev = f"{root}/dev"
+    _mount("tmpfs", dev, "tmpfs", 0, "mode=755")
+    _essential = ("null", "zero", "urandom")
+    for name in _MINIMAL_DEV_NODES:
+        host_node = f"/dev/{name}"
+        try:
+            st = os.lstat(host_node)
+        except OSError as exc:
+            if name in _essential:
+                # See the failure policy in the docstring: a host
+                # without /dev/null (or zero/urandom) is broken, and
+                # a sandbox silently missing it produces subtly-wrong
+                # tool behaviour downstream.
+                raise OSError(
+                    exc.errno or _ELOOP,
+                    f"mount_ns: essential host node {host_node} is "
+                    f"missing; refusing a degraded /dev",
+                ) from exc
+            # Optional node absent (containers sometimes lack
+            # /dev/full): nothing to expose, nothing to bind.
+            warn_post_fork(
+                b"mount_ns: host /dev/" + name.encode()
+                + b" missing; sandbox /dev goes without it\n")
+            continue
+        if not stat_module.S_ISCHR(st.st_mode):
+            # A host /dev entry that is not a character device is a
+            # tampered or exotic host; refuse to carry it in. NOTE:
+            # this raise surfaces as an 'M' setup status, whose
+            # degrade path retries MOUNTLESS — where the host's whole
+            # /dev is visible again. Acceptable: triggering this
+            # requires a root-tampered host /dev, and the mountless
+            # lane's posture is stamped/warned on its own terms.
+            raise OSError(
+                _ELOOP,
+                f"mount_ns: host {host_node} is not a character "
+                f"device; refusing to bind it into the sandbox",
+            )
+        stub = f"{dev}/{name}"
+        os.close(os.open(stub, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                         0o600))
+        _mount(host_node, stub, None, MS_BIND)
+    # Self-referential conveniences every /dev ships (bash process
+    # substitution reads /dev/fd; tools open /dev/std*). Symlinks into
+    # the (per-pid-ns, freshly remounted) procfs.
+    os.symlink("/proc/self/fd", f"{dev}/fd")
+    os.symlink("/proc/self/fd/0", f"{dev}/stdin")
+    os.symlink("/proc/self/fd/1", f"{dev}/stdout")
+    os.symlink("/proc/self/fd/2", f"{dev}/stderr")
+    # /dev/shm: fresh tmpfs so POSIX shared memory / named semaphores
+    # (shm_open, sem_open — Python multiprocessing's SemLock) work
+    # WITHOUT exposing the host's shm segments. Mode 1777 matches the
+    # host convention (sticky world-writable scratch).
+    os.makedirs(f"{dev}/shm", exist_ok=True)
+    _mount("tmpfs", f"{dev}/shm", "tmpfs", 0, "mode=1777")
+    # Fresh devpts instance: serves openpty()/script/expect INSIDE the
+    # sandbox with pty pairs that exist only in this namespace — the
+    # host's pts nodes are simply not present. ptmxmode=0666 lets the
+    # (non-root-mapped) child open the multiplexor; the ptmx symlink
+    # is the modern layout glibc's openpty resolves.
+    pts = f"{dev}/pts"
+    os.makedirs(pts, exist_ok=True)
+    try:
+        _mount("devpts", pts, "devpts", 0,
+               "newinstance,ptmxmode=0666,mode=0620")
+    except OSError:
+        # Capability degrade, not exposure: no ptys inside the
+        # sandbox. Kernels that refuse a userns devpts mount are the
+        # only known shape.
+        warn_post_fork(
+            b"mount_ns: fresh devpts mount failed; openpty() will not "
+            b"work inside this sandbox (host ptys stay hidden)\n")
+    else:
+        os.symlink("pts/ptmx", f"{dev}/ptmx")
+
+
 def setup_mount_ns(target: str | None, output: str | None,
                    extra_ro_paths: Iterable[str] | None = None,
                    root_path: str | None = None,
@@ -935,20 +1050,12 @@ def setup_mount_ns(target: str | None, output: str | None,
         _bind_system_ro_dir(d, root, host_dir, inside, etc_overlay,
                             _etc_has_missing_targets)
 
-    # 5. /dev and /sys: recursive bind from host. A minimal /dev would
-    # be more conservative but real tools (ASAN, glibc, curl) need
-    # /dev/null, /dev/urandom, /dev/tty, /dev/pts etc.; narrowing breaks
-    # in subtle ways. rbind + Landlock narrowing is the practical
-    # compromise.
-    _mount("/dev", f"{root}/dev", None, MS_BIND | MS_REC)
-    # /dev/shm: fresh tmpfs stacked over the rbind so POSIX shared
-    # memory / named semaphores (shm_open, sem_open — Python
-    # multiprocessing's SemLock lives here) work inside the sandbox
-    # WITHOUT exposing the host's shm segments. Same per-sandbox
-    # isolation rationale as /tmp below; mode 1777 matches the
-    # host convention (sticky world-writable scratch).
-    if os.path.isdir("/dev/shm"):
-        _mount("tmpfs", f"{root}/dev/shm", "tmpfs", 0, "mode=1777")
+    # 5. /dev: minimal per-sandbox device set (see _mount_minimal_dev
+    # — the former recursive host bind carried EVERY host node,
+    # including /dev/pts/*, into the sandbox, and the default
+    # read-unrestricted posture let the child read-open the operator's
+    # pty slave). /sys: recursive bind from host.
+    _mount_minimal_dev(root)
     _mount("/sys", f"{root}/sys", None, MS_BIND | MS_REC)
 
     # 6. /proc: bind host /proc. Fresh procfs would require a pid-ns

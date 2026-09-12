@@ -28,6 +28,7 @@ Two groups:
 
 import os
 import re
+import shutil
 import sys as _sys
 from pathlib import Path
 
@@ -170,7 +171,13 @@ def _run_setup(monkeypatch, tmp_path, extra_ro_paths, cwd=None):
     for var in ("TMPDIR", "TEMP", "TMP"):
         monkeypatch.delenv(var, raising=False)
     root = tmp_path / "sbx-root"
-    root.mkdir(exist_ok=True)
+    # Fresh contents per invocation: with _mount stubbed out, the
+    # tmpfs that normally gives setup a pristine root never mounts,
+    # so the /dev stubs and symlinks a previous invocation created
+    # would collide with this one's O_EXCL creates.
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir()
     saved_cwd = os.getcwd()
     try:
         if cwd is not None:

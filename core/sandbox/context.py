@@ -2207,6 +2207,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # per-sandbox private tmpfs, not the host's shm.
             if os.path.isdir("/dev/shm"):
                 writable_paths.append("/dev/shm")
+            # /dev/pts is deliberately NOT granted here: this list is
+            # shared by every lane, and only the mount-ns spawn lane
+            # serves a per-sandbox devpts — on the mountless retries
+            # and the subprocess fallbacks /dev/pts is the HOST's pty
+            # slaves (a write grant there hands sandboxed code the
+            # operator's terminal). run_sandboxed adds the grant
+            # itself, keyed on the lane actually building the mount
+            # tree.
             # When TMPDIR points somewhere custom, ALSO keep /tmp in
             # the baseline: tools fall back to it (gcc's "Cannot
             # create temporary file in /tmp/" path), and in mount-ns

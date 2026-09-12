@@ -1611,17 +1611,32 @@ def run_sandboxed(
         if (writable_paths or allowed_tcp_ports
                 or (readable_paths and restrict_reads)):
             effective_paths = list(writable_paths) if writable_paths else []
+            if (target or output or rootfs) and not skip_mount_ns:
+                # This spawn builds the mount tree (same predicate as
+                # the step-9 setup_mount_ns call), so /dev/pts is the
+                # FRESH per-sandbox devpts instance
+                # (mount_ns._mount_minimal_dev) — grant it write so
+                # openpty()/grantpt can open the multiplexor and slave
+                # O_RDWR. The grant lives HERE, not in the context's
+                # shared writable_paths: on the mountless/skip_mount
+                # retries and the subprocess fallbacks /dev/pts is the
+                # HOST's pty slaves, and a write grant there hands
+                # sandboxed code the operator's terminal (escape-
+                # sequence injection). The rule path is opened
+                # post-pivot; if the devpts mount degraded, it names
+                # the empty stub dir — a no-op grant.
+                effective_paths.append("/dev/pts")
             if rootfs is not None:
                 # Landlock rule paths are opened POST-pivot (the child
                 # applies landlock_fn at step 10, after setup_mount_ns),
                 # where the image rootfs IS "/". The image's own tree
                 # must stay writable for the environment to function —
                 # but a wholesale "/" grant is WRONG in rootfs mode:
-                # /dev and /sys are recursive HOST binds there, so "/"
-                # would hand the child Landlock write access to
-                # same-UID host device nodes (the operator's other
-                # ptys, most damningly — "host dirs are not bound in"
-                # is false for exactly those two). Enumerate the
+                # /sys is a recursive HOST bind there and /dev carries
+                # per-node binds of host devices, so "/" would hand
+                # the child Landlock write access to same-UID host
+                # nodes and sysfs ("host dirs are not bound in" is
+                # false for exactly those two). Enumerate the
                 # image's top-level entries instead, skipping
                 # dev/sys/proc (device writes that tools legitimately
                 # need — /dev/null, /dev/tty — are covered by the
