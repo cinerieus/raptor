@@ -29,6 +29,7 @@ from typing import Any, TYPE_CHECKING
 from core.json import load_json
 
 from ._util import is_valid_identifier, safe_join
+from .run_memo import BoundedMemo
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2478,6 +2479,76 @@ def _extract_path_conditions(
     return relational or []
 
 
+# Whole-database CodeQL results are identical for every hypothesis
+# sharing the same (database, query) pair — the analyze invocation has
+# no notion of the audited function; per-hypothesis filtering happens
+# on the parsed SARIF. Memoize the parsed whole-DB result set so N
+# hypotheses on one DB pay for one CLI/JVM boot per query, not N.
+#
+# Size trade-off: smaller → repeated multi-minute ``database analyze``
+# runs come back as soon as an audit rotates through more (db, query)
+# pairs than fit; larger → more whole-DB result lists (potentially
+# many MB each on alert-dense targets) held for the memo's lifetime.
+#
+# Lifetime: the orchestrator passes a per-RUN memo owned by its
+# OrchestratorConfig (``codeql_memo``, default_factory — exactly like
+# ``sweep_memo``), because the key's correctness argument is
+# run-scoped: the manifest stamp pins the database build, but nothing
+# hashes the DB's row data, and only the run's read-only-target-tree
+# contract bounds it. The module-level instance below serves direct
+# callers and tests only; a process outliving one run must not reuse
+# it across runs, which the orchestrator wiring guarantees for the
+# audit path.
+_CODEQL_MEMO_MAX_ENTRIES = 16
+_codeql_memo: BoundedMemo[list[dict[str, Any]]] = BoundedMemo(
+    _CODEQL_MEMO_MAX_ENTRIES,
+)
+
+
+def _reset_codeql_memo() -> None:
+    """Test hook: forget memoized whole-database CodeQL results."""
+    _codeql_memo.clear()
+
+
+class _UnreadableSarifError(Exception):
+    """Analyze produced SARIF the bounded loader refused (oversize /
+    unparseable). Carried out of the memoized compute so the caller
+    can keep the historical error SweepResult shape."""
+
+
+def _codeql_db_stamp(db_path: Path) -> tuple | None:
+    """Cheap content stamp for a CodeQL database directory.
+
+    ``codeql-database.yml`` at the DB root carries the creation
+    metadata (source root, baseline, creation time) and is rewritten
+    when the database is re-created — its content hash plus stat is a
+    reliable, cheap change witness. Databases without a readable
+    manifest return None and the caller skips memoization entirely:
+    the directory's own mtime is NOT an acceptable fallback (it only
+    changes on direct-child churn, so an in-place re-extraction that
+    rewrites nested files would serve stale cached results).
+    """
+    import hashlib
+
+    manifest = db_path / "codeql-database.yml"
+    try:
+        st = manifest.stat()
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return ("manifest", st.st_size, st.st_mtime_ns, digest)
+
+
+def _codeql_query_stamp(query_path: Path) -> tuple | None:
+    """Content hash of the query file, or None when unreadable."""
+    import hashlib
+
+    try:
+        return ("sha256", hashlib.sha256(query_path.read_bytes()).hexdigest())
+    except OSError:
+        return None
+
+
 def run_codeql_sweep(
     *,
     target_path: Path,
@@ -2487,6 +2558,7 @@ def run_codeql_sweep(
     database_path: str | None = None,
     line_start: int = 0,
     line_end: int = 0,
+    memo: BoundedMemo[list[dict[str, Any]]] | None = None,
 ) -> SweepResult:
     """Run a CodeQL query against a database and classify matches.
 
@@ -2499,6 +2571,10 @@ def run_codeql_sweep(
             to find one under ``target_path``.
         line_start: Function start line (for match filtering).
         line_end: Function end line.
+        memo: Whole-DB result memo. The orchestrator passes its run's
+            ``config.codeql_memo`` so cached results live exactly one
+            run; None falls back to the module-level instance (direct
+            callers, tests via ``_reset_codeql_memo``).
 
     Returns:
         SweepResult with outcome based on whether any matches fall
@@ -2537,37 +2613,63 @@ def run_codeql_sweep(
                 errors=["no CodeQL database found; build one first"],
             )
 
-        import tempfile
+        def _analyze_whole_db() -> list[dict[str, Any]]:
+            import tempfile
 
-        with tempfile.TemporaryDirectory(prefix="codeql-sweep-") as tmp:
-            sarif_out = Path(tmp) / "sweep.sarif"
-            result = analyze(
-                Path(db),
-                [str(qpath)],
-                sarif_out,
-                timeout_seconds=300,
+            with tempfile.TemporaryDirectory(prefix="codeql-sweep-") as tmp:
+                sarif_out = Path(tmp) / "sweep.sarif"
+                result = analyze(
+                    Path(db),
+                    [str(qpath)],
+                    sarif_out,
+                    timeout_seconds=300,
+                )
+                # Canonical bounded SARIF loader (100 MiB cap): the
+                # query runs over an untrusted target, so a hostile
+                # source tree can inflate the result set — a raw
+                # read_text()+loads here buffered the whole artifact
+                # before any size check.
+                from core.sarif.parser import load_sarif
+                sarif = load_sarif(result.sarif_path)
+                if sarif is None:
+                    raise _UnreadableSarifError(str(sarif_out))
+                runs = sarif.get("runs") or [{}]
+                return runs[0].get("results") or []
+
+        # Memo key embeds content stamps for BOTH sides; either side
+        # unreadable → key None → analyze runs uncached. The forced
+        # ``--rerun`` / ``--model-packs`` measurement legs
+        # (run_baseline_and_augmented) call analyze() directly and
+        # never pass through this sweep-layer memo.
+        db_stamp = _codeql_db_stamp(Path(db))
+        query_stamp = _codeql_query_stamp(qpath)
+        memo_key: tuple | None = None
+        if db_stamp is not None and query_stamp is not None:
+            memo_key = (
+                "codeql",
+                str(Path(db).resolve()),
+                db_stamp,
+                str(qpath.resolve()),
+                query_stamp,
             )
-            # Canonical bounded SARIF loader (100 MiB cap): the query
-            # runs over an untrusted target, so a hostile source tree
-            # can inflate the result set — a raw read_text()+loads
-            # here buffered the whole artifact before any size check.
-            from core.sarif.parser import load_sarif
-            sarif = load_sarif(result.sarif_path)
 
-        if sarif is None:
+        _memo = memo if memo is not None else _codeql_memo
+        try:
+            sarif_results, _memo_hit = _memo.get_or_compute(
+                memo_key, _analyze_whole_db,
+            )
+        except _UnreadableSarifError as exc:
             return SweepResult(
                 tool="codeql",
                 file_path=file_path,
                 function_name=function_name,
                 outcome="error",
                 errors=[
-                    f"unreadable or oversize SARIF output: {sarif_out}",
+                    f"unreadable or oversize SARIF output: {exc}",
                 ],
                 rule_id=query_path,
             )
 
-        runs = sarif.get("runs") or [{}]
-        sarif_results = runs[0].get("results") or []
         in_function = []
         for r in sarif_results:
             locs = r.get("locations") or [{}]
@@ -2583,6 +2685,12 @@ def run_codeql_sweep(
                         in_function.append(r)
                 else:
                     in_function.append(r)
+
+        # The memo shares one whole-DB result list across callers —
+        # hand out copies so a consumer mutating its matches cannot
+        # corrupt another hypothesis's view.
+        import copy
+        in_function = [copy.deepcopy(r) for r in in_function]
 
         outcome = "confirmed" if in_function else "refuted"
         return SweepResult(

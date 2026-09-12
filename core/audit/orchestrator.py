@@ -212,7 +212,17 @@ if TYPE_CHECKING:
     from concurrent.futures import Future
     from collections.abc import Callable
 
+    from .run_memo import BoundedMemo
+
 logger = logging.getLogger(__name__)
+
+
+def _default_codeql_memo() -> "BoundedMemo":
+    """Fresh per-run whole-DB CodeQL memo at the sweep layer's cap."""
+    from .run_memo import BoundedMemo as _BoundedMemo
+    from .sweep import _CODEQL_MEMO_MAX_ENTRIES
+
+    return _BoundedMemo(_CODEQL_MEMO_MAX_ENTRIES)
 
 # Single-entry cache for per-run call-graph extraction: three phases
 # (IRIS compositional analysis, the postcondition tier, structural
@@ -777,6 +787,17 @@ class OrchestratorConfig:
     # per run — never share across runs (the run-lifetime bound is
     # part of the key contract).
     sweep_memo: SweepMemo = field(default_factory=SweepMemo, repr=False)
+    # Per-run instances of the coarser backend caches, same lifetime
+    # rationale as sweep_memo: their keys pin what they can hash (DB
+    # manifest, TU content) and rely on the run's read-only-target-
+    # tree contract for the rest (DB row data, #include closure), so
+    # correctness is RUN-scoped — a process-lifetime cache would serve
+    # stale results after an between-runs tree edit. The sweep
+    # functions fall back to module-level instances only for direct
+    # callers/tests.
+    codeql_memo: "BoundedMemo" = field(
+        default_factory=_default_codeql_memo, repr=False,
+    )
     # Tool-chain early exit: once a chain step yields a receipt the
     # dispatching site would accept as promotion-grade (G2's
     # is_tool_evidence class, non-detection-role, unblocked by the
@@ -17162,6 +17183,10 @@ def _run_tool_chain(
                         database_path=_tool_db,
                         line_start=line_start,
                         line_end=_cq_line_end,
+                        # Whole-DB memo scoped to THIS run (test
+                        # stand-in configs without the field fall back
+                        # to the sweep layer's module default).
+                        memo=getattr(config, "codeql_memo", None),
                     ),
                 )
                 if codeql_result.outcome == "confirmed":
