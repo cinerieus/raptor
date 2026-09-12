@@ -1809,14 +1809,25 @@ class TestE2EHomeToolchainSeam(unittest.TestCase):
 
     def test_nowhere_resolvable_tool_keeps_errno_diagnostic(self):
         """A name the CALLER cannot resolve either skips the gate
-        (nothing to diverge from) and fails at exec with the named
-        pid1-shim errno line — not silently."""
+        (nothing to diverge from) and fails LOUDLY at exec — never
+        silently. The failure shape is lane-dependent: the unshare-CLI
+        lane surfaces the named pid1-shim errno line on stderr; the
+        fork spawn backend reports the in-sandbox exec failure through
+        the status pipe, and after the mountless retry meets the same
+        missing binary the call raises the typed category-'X' refusal
+        (sandbox engaged, target never exec'd)."""
+        from core.sandbox.errors import SandboxSetupError
         with TemporaryDirectory() as out:
-            r = sandbox_run(
-                ["seamtool-missing-everywhere", "hi"],
-                block_network=True, target=out, output=out,
-                capture_output=True, text=True, timeout=30,
-            )
+            try:
+                r = sandbox_run(
+                    ["seamtool-missing-everywhere", "hi"],
+                    block_network=True, target=out, output=out,
+                    capture_output=True, text=True, timeout=30,
+                )
+            except SandboxSetupError as e:
+                self.assertEqual(e.setup_category, "X")
+                self.assertIn("exec", str(e))
+                return
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("exec of target failed", r.stderr)
 
