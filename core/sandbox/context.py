@@ -3142,6 +3142,49 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 achievable=_tiers.ContainmentTier.LANDLOCK_ONLY,
                 floor=_floor,
             ))
+
+        # ---- seccomp capability axis (a predicate, never a tier) ----
+        # Mirror of the untrusted entry gate's refuse-or-waive
+        # (_seccomp_axis_arm — one shared text): a direct contract-
+        # carrying run() — the payload-executor shape run(cmd, target,
+        # output, require_fresh_procfs=untrusted_fresh_procfs_
+        # required()) — previously reached the dispatch sites
+        # FILTERLESS on a libseccomp-less host, because the tier
+        # comparison alone cannot see the axis: every tier's contract
+        # INCLUDES the filter, so no lane's declared tier drops below
+        # the floor when only the filter is missing. Deliberately NOT
+        # folded into delivered-tier values: a BARE-collapse at the
+        # dispatch sites would refuse WAIVED hosts too (the entry
+        # gate's waiver accepts filterless), diverging from the
+        # entry-arm semantics this arm exists to mirror. The
+        # _ported_ns_tier BARE-collapse is the sanctioned asymmetry:
+        # it applies only inside the Landlock-absent tolerance mode,
+        # where the mountless lane's own NS_NOMOUNT declaration
+        # promises the filter and understating that one lane's
+        # delivery is safe — here the question is the CALL's
+        # contract, which the waiver may consent, so the axis stays
+        # a refuse-or-waive predicate. Floor BARE (trusted default /
+        # operator disable) keeps today's warn-once degradation.
+        if _floor > _tiers.ContainmentTier.BARE:
+            _seccomp_refusal = _seccomp_axis_arm(
+                # run_untrusted-marked calls already got this exact
+                # per-call warning from the entry gate — warn once
+                # per degraded call, not twice; the refusal branches
+                # below are unreachable for them (the entry gate
+                # raised first), so only the warning needs the dedup.
+                "sandbox run()", warn=not _untrusted_workload)
+            if _seccomp_refusal is not None:
+                raise _note_floor_refusal(_errors.SandboxFloorError(
+                    *_seccomp_refusal,
+                    # No tier's contract is deliverable without the
+                    # filter (LANDLOCK_ONLY is Landlock+seccomp+
+                    # rlimits), so the honest achievable claim is
+                    # BARE — it understates the Landlock/namespace
+                    # layers that still engage; caps may understate
+                    # delivered isolation, never overstate it.
+                    achievable=_tiers.ContainmentTier.BARE,
+                    floor=_floor,
+                ))
         from ._spawn import mount_ns_available as _mount_ns_avail
 
         # ---- Landlock-absent tolerance (the ported ns-only mode) ----
@@ -7068,6 +7111,102 @@ def run_trusted(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return run(cmd, profile="none", **kwargs)
 
 
+def _seccomp_axis_arm(entry: str, *,
+                      warn: bool = True) -> "tuple[str, str] | None":
+    """Refuse-or-waive decision for the seccomp capability axis of the
+    untrusted-execution contract — ONE text, shared by the
+    run_untrusted entry gate (:func:`_require_userns_or_optin`) and
+    run()'s floor-resolution arm, so the two sites cannot drift.
+
+    libseccomp is part of the untrusted-execution contract on Linux,
+    not an optional layer: the AF_UNIX blocklist, the io_uring/
+    keyring/bpf escape-primitive blocks and the argument rules (dgram
+    socketpair, MSG_FASTOPEN) all live in the filter. The axis is a
+    capability PREDICATE, never a tier value (tiers.py doctrine):
+    every tier's delivery includes the filter (LANDLOCK_ONLY is
+    "Landlock+seccomp+rlimits"), so a tier floor never consents its
+    absence — accepting filterless from ``--sandbox-floor landlock``
+    would run BELOW the flag's documented meaning. Only the legacy
+    env var waives this axis, and ONLY while no explicit surface pins
+    a floor: an explicit surface names a tier whose contract includes
+    the filter, so it wins over the env waiver here exactly as it
+    does on the tier chain.
+
+    Returns ``None`` when the call may proceed: libseccomp is
+    available; the platform has no seccomp axis (darwin — the
+    seatbelt tier is the contract there); or the legacy waiver
+    accepts filterless, in which case the per-call warning fires
+    unless ``warn`` is False (run()'s arm passes False for
+    run_untrusted-marked calls, whose entry gate already emitted the
+    same per-call warning — one warning per degraded call, not two).
+    Otherwise returns ``(reason, instructions)`` for the caller to
+    raise in its own refusal type (the entry gate raises
+    SandboxSetupError as always; run()'s floor arm wraps it in
+    SandboxFloorError so the refusal records and maps at the
+    verification seam).
+    """
+    if sys.platform == "darwin":
+        return None
+    if _seccomp.check_seccomp_available():
+        return None
+    _floor_e, _src_e = _explicit_untrusted_floor()
+    if _floor_e is not None:
+        _surface_e = ("--sandbox-floor" if _src_e
+                      == _tiers.FLOOR_SOURCE_FLAG
+                      else "the project sandbox-floor setting")
+        if _floor_e is _tiers.ContainmentTier.BARE:
+            # The "none" edge: not a tier-includes-the-filter
+            # story — never-BARE-by-consent is the reason.
+            _pin_clause = (
+                f"{_surface_e}=none is not a consentable "
+                f"untrusted floor — untrusted work never runs "
+                f"bare by consent; use --sandbox none / "
+                f"--no-sandbox for the operator-explicit "
+                f"sandbox-off."
+            )
+        else:
+            _pin_clause = (
+                f"{_surface_e} pins the containment floor at "
+                f"'{_tiers.tier_label(_floor_e)}', a tier whose "
+                f"contract includes the filter — "
+                f"RAPTOR_ALLOW_DEGRADED_UNTRUSTED does not "
+                f"override an explicit surface."
+            )
+        return (
+            f"{entry}: libseccomp is unavailable or non-functional "
+            f"on this host — the untrusted-execution contract "
+            f"includes the seccomp syscall filter (socket-family "
+            f"blocklist, escape-primitive blocks, send-flag "
+            f"argument rules), which would silently not engage. "
+            f"{_pin_clause}",
+            "install libseccomp (libseccomp2 package); no "
+            "--sandbox-floor tier waives seccomp absence (every "
+            "tier includes the filter).",
+        )
+    if _degraded_untrusted_waiver():
+        if warn:
+            logger.warning(
+                "%s: libseccomp unavailable — running UNTRUSTED code "
+                "WITHOUT a seccomp filter (operator override "
+                "RAPTOR_ALLOW_DEGRADED_UNTRUSTED): socket-family, "
+                "escape-primitive and send-flag argument blocks are "
+                "all inactive for this call.", entry,
+            )
+        return None
+    return (
+        f"{entry}: libseccomp is unavailable or non-functional "
+        f"on this host — the untrusted-execution contract "
+        f"includes the seccomp syscall filter (socket-family "
+        f"blocklist, escape-primitive blocks, send-flag "
+        f"argument rules), which would silently not engage.",
+        "install libseccomp (libseccomp2 package), or set "
+        "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 to explicitly "
+        "accept running untrusted code without a syscall "
+        "filter (no --sandbox-floor tier waives seccomp "
+        "absence — every tier includes the filter).",
+    )
+
+
 def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
     """Fail closed when the untrusted-execution contract cannot hold.
 
@@ -7126,80 +7265,18 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
             "to explicitly accept rlimits-only containment.",
         )
     # libseccomp is part of the untrusted-execution contract on
-    # Linux, not an optional layer: the AF_UNIX blocklist, the
-    # io_uring/keyring/bpf escape-primitive blocks and the argument
-    # rules (dgram socketpair, MSG_FASTOPEN) all live in the filter.
-    # strict fail-closes at profile resolution; the default full
-    # profile silently degraded to FILTERLESS with only a warning —
-    # the exact silent-downgrade shape the userns gate below exists
-    # to refuse. Same explicit operator override governs it.
-    if not _seccomp.check_seccomp_available():
-        # The seccomp filter is part of EVERY tier's delivery
-        # (LANDLOCK_ONLY is "Landlock+seccomp+rlimits"), so a tier
-        # floor never consents its absence — accepting filterless
-        # from `--sandbox-floor landlock` would run BELOW the flag's
-        # documented meaning. Only the legacy env var waives this
-        # axis, and ONLY while no explicit surface pins a floor:
-        # an explicit surface names a tier whose contract includes
-        # the filter, so it wins over the env waiver here exactly as
-        # it does on the tier chain.
-        _floor_e, _src_e = _explicit_untrusted_floor()
-        if _floor_e is not None:
-            from .errors import SandboxSetupError
-            _surface_e = ("--sandbox-floor" if _src_e
-                          == _tiers.FLOOR_SOURCE_FLAG
-                          else "the project sandbox-floor setting")
-            if _floor_e is _tiers.ContainmentTier.BARE:
-                # The "none" edge: not a tier-includes-the-filter
-                # story — never-BARE-by-consent is the reason.
-                _pin_clause = (
-                    f"{_surface_e}=none is not a consentable "
-                    f"untrusted floor — untrusted work never runs "
-                    f"bare by consent; use --sandbox none / "
-                    f"--no-sandbox for the operator-explicit "
-                    f"sandbox-off."
-                )
-            else:
-                _pin_clause = (
-                    f"{_surface_e} pins the containment floor at "
-                    f"'{_tiers.tier_label(_floor_e)}', a tier whose "
-                    f"contract includes the filter — "
-                    f"RAPTOR_ALLOW_DEGRADED_UNTRUSTED does not "
-                    f"override an explicit surface."
-                )
-            raise SandboxSetupError(
-                f"{entry}: libseccomp is unavailable or non-functional "
-                f"on this host — the untrusted-execution contract "
-                f"includes the seccomp syscall filter (socket-family "
-                f"blocklist, escape-primitive blocks, send-flag "
-                f"argument rules), which would silently not engage. "
-                f"{_pin_clause}",
-                "install libseccomp (libseccomp2 package); no "
-                "--sandbox-floor tier waives seccomp absence (every "
-                "tier includes the filter).",
-            )
-        if _degraded_untrusted_waiver():
-            logger.warning(
-                "%s: libseccomp unavailable — running UNTRUSTED code "
-                "WITHOUT a seccomp filter (operator override "
-                "RAPTOR_ALLOW_DEGRADED_UNTRUSTED): socket-family, "
-                "escape-primitive and send-flag argument blocks are "
-                "all inactive for this call.", entry,
-            )
-        else:
-            from .errors import SandboxSetupError
-            raise SandboxSetupError(
-                f"{entry}: libseccomp is unavailable or non-functional "
-                f"on this host — the untrusted-execution contract "
-                f"includes the seccomp syscall filter (socket-family "
-                f"blocklist, escape-primitive blocks, send-flag "
-                f"argument rules), which would silently not engage.",
-                "install libseccomp (libseccomp2 package), or set "
-                "RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 to explicitly "
-                "accept running untrusted code without a syscall "
-                "filter (no --sandbox-floor tier waives seccomp "
-                "absence — every tier includes the filter).",
-            )
+    # Linux, not an optional layer — see _seccomp_axis_arm (shared
+    # with run()'s floor-resolution arm so the direct payload-
+    # executor shape gets the same refuse-or-waive and the message
+    # texts cannot drift). strict fail-closes at profile resolution;
+    # the default full profile silently degraded to FILTERLESS with
+    # only a warning — the exact silent-downgrade shape the userns
+    # gate below exists to refuse. Same explicit operator override
+    # governs it.
+    _seccomp_refusal = _seccomp_axis_arm(entry)
+    if _seccomp_refusal is not None:
+        from .errors import SandboxSetupError
+        raise SandboxSetupError(*_seccomp_refusal)
     if check_net_available():
         return False
     # Namespace loss on a userns-blocked host is acceptable only when

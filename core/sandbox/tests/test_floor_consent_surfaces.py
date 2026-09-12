@@ -726,6 +726,219 @@ class TestSeccompAxis:
 
 
 @pytestmark_linux
+class TestSeccompAxisAtRunFloor:
+    """run()'s floor resolution carries the same seccomp axis
+    predicate as the untrusted entry gate: a DIRECT contract-carrying
+    run() — the payload-executor shape ``run(cmd, target, output,
+    require_fresh_procfs=untrusted_fresh_procfs_required())`` — must
+    not reach a dispatch site filterless on a libseccomp-less host.
+    Same refuse-or-waive as the entry arm: refuse unwaived, warn per
+    call under the env waiver, refuse outright under an explicit
+    floor pin (no tier waives seccomp absence)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_seccomp(self, monkeypatch):
+        """Simulate a host whose ONLY missing capability is
+        libseccomp: pin the namespace/Landlock probes capable so the
+        seccomp axis is isolated identically on every feature-matrix
+        lane (a no-userns/no-landlock lane would otherwise refuse at
+        construction for the network axis before the arm under test
+        is reached); stub the spawn so the proceed-shaped cases never
+        depend on real lane delivery."""
+        from core.sandbox import _spawn as _spawn_mod
+        from core.sandbox import context as _ctx
+        monkeypatch.setattr(_ctx._seccomp, "check_seccomp_available",
+                            lambda: False)
+        monkeypatch.setattr(_ctx, "check_net_available", lambda: True)
+        monkeypatch.setattr(_ctx, "check_mount_available",
+                            lambda: True)
+        monkeypatch.setattr(_ctx, "check_landlock_available",
+                            lambda: True)
+        monkeypatch.setattr(_ctx, "_get_landlock_abi", lambda: 4)
+        monkeypatch.setattr(_spawn_mod, "mount_ns_available",
+                            lambda: True)
+        monkeypatch.setattr(_spawn_mod, "run_sandboxed", _ok_spawn)
+        monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
+                           raising=False)
+
+    def _executor_shape(self, tmp_path, out, **overrides):
+        """The three payload executors' call shape (dark_verify /
+        exploit_verify: default profile; under_mitigations adds
+        profile='strict', exercised separately below)."""
+        from core.sandbox import context as _ctx
+        kwargs = dict(
+            block_network=True,
+            target=str(tmp_path), output=str(out),
+            require_fresh_procfs=_ctx.untrusted_fresh_procfs_required(),
+            capture_output=True, text=True, timeout=60,
+        )
+        kwargs.update(overrides)
+        return _ctx.run(["true"], **kwargs)
+
+    @pytest.mark.parametrize("shape_overrides", [
+        {},                        # exploit_verify / under_mitigations base
+        {"restrict_reads": True},  # dark_verify native execution
+    ])
+    def test_executor_shapes_refuse_unwaived(self, tmp_path,
+                                             shape_overrides):
+        out = tmp_path / "out"
+        out.mkdir()
+        with pytest.raises(SandboxFloorError) as excinfo:
+            self._executor_shape(tmp_path, out, **shape_overrides)
+        e = excinfo.value
+        assert "libseccomp" in str(e)
+        assert e.floor is _tiers.untrusted_default_floor()
+        assert e.achievable is ContainmentTier.BARE
+        assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in (e.instructions or "")
+        # The refusal recorded run-dir evidence (commit contract: the
+        # new arm records like every other floor refusal).
+        from core.sandbox import summary as _summary
+        result = _summary.summarize_and_write(out)
+        assert result is not None
+        assert result["total_floor_refusals"] >= 1
+        assert result["floor_refusals"][0]["achievable"] == "none"
+
+    def test_strict_executor_shape_refuses_at_construction(
+            self, tmp_path):
+        """under_mitigations passes profile='strict'; strict's
+        construction gate refuses the filterless host before run()
+        is ever reached (pre-existing, preserved)."""
+        from core.sandbox.errors import SandboxSetupError
+        out = tmp_path / "out"
+        out.mkdir()
+        with pytest.raises(SandboxSetupError) as excinfo:
+            self._executor_shape(tmp_path, out, profile="strict")
+        assert "libseccomp" in str(excinfo.value)
+
+    def test_literal_relaxed_kwarg_still_refuses_unwaived(
+            self, tmp_path):
+        """require_fresh_procfs=False without the waiver is still an
+        untrusted-CLASS call (floor 'landlock', source default) — the
+        filter is part of that tier's contract too, and nobody
+        consented its absence."""
+        out = tmp_path / "out"
+        out.mkdir()
+        with pytest.raises(SandboxFloorError) as excinfo:
+            self._executor_shape(tmp_path, out,
+                                 require_fresh_procfs=False)
+        assert excinfo.value.floor is ContainmentTier.LANDLOCK_ONLY
+
+    def test_waived_runs_filterless_with_per_call_warning(
+            self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+        out = tmp_path / "out"
+        out.mkdir()
+        with caplog.at_level(logging.WARNING,
+                             logger="core.sandbox.context"):
+            try:
+                r1 = self._executor_shape(tmp_path, out)
+                r2 = self._executor_shape(tmp_path, out)
+            except BaseException as e:  # noqa: BLE001 — host capability gate
+                pytest.skip(f"sandbox lane unavailable: {e}")
+        assert r1.returncode == 0 and r2.returncode == 0
+        warns = [r for r in caplog.records
+                 if "running UNTRUSTED code WITHOUT a seccomp filter"
+                 in r.getMessage()]
+        # Per CALL, deliberately not warn_once.
+        assert len(warns) == 2, caplog.text
+
+    @pytest.mark.parametrize("surface", ["flag", "project"])
+    def test_explicit_pin_refuses_even_with_waiver(
+            self, tmp_path, monkeypatch, surface):
+        monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+        if surface == "flag":
+            state._cli_sandbox_floor = "landlock"
+        else:
+            state._project_sandbox_floor = "landlock"
+        out = tmp_path / "out"
+        out.mkdir()
+        with pytest.raises(SandboxFloorError) as excinfo:
+            self._executor_shape(tmp_path, out)
+        text = str(excinfo.value) + (excinfo.value.instructions or "")
+        assert "does not override" in text
+        assert "no --sandbox-floor tier waives" in text
+
+    def test_run_untrusted_waived_warns_once_per_call(
+            self, tmp_path, monkeypatch, caplog):
+        """The entry gate already warns per degraded call; run()'s
+        mirrored arm must not double it for run_untrusted-marked
+        work — one warning per call, from the entry gate."""
+        from core.sandbox import context as _ctx
+        monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+        out = tmp_path / "out"
+        out.mkdir()
+        with caplog.at_level(logging.WARNING,
+                             logger="core.sandbox.context"):
+            try:
+                r = _ctx.run_untrusted(["true"], target=str(tmp_path),
+                                       output=str(out), timeout=60)
+            except BaseException as e:  # noqa: BLE001 — host capability gate
+                pytest.skip(f"sandbox lane unavailable: {e}")
+        assert r.returncode == 0
+        warns = [rec for rec in caplog.records
+                 if "running UNTRUSTED code WITHOUT a seccomp filter"
+                 in rec.getMessage()]
+        assert len(warns) == 1, caplog.text
+        assert warns[0].getMessage().startswith("run_untrusted:")
+
+    def test_trusted_call_keeps_the_warn_once_degradation(
+            self, tmp_path, caplog):
+        """Floor BARE (plain trusted run()) is out of the arm's
+        reach: today's once-per-process filterless degradation
+        stays — the contract change is scoped to untrusted-class
+        calls."""
+        from core.sandbox import context as _ctx
+        out = tmp_path / "out"
+        out.mkdir()
+        with caplog.at_level(logging.WARNING,
+                             logger="core.sandbox.context"):
+            try:
+                r = _ctx.run(["true"], target=str(tmp_path),
+                             output=str(out), timeout=60,
+                             capture_output=True, text=True)
+            except BaseException as e:  # noqa: BLE001 — host capability gate
+                pytest.skip(f"sandbox lane unavailable: {e}")
+        assert r.returncode == 0
+        assert not [rec for rec in caplog.records
+                    if "running UNTRUSTED code WITHOUT a seccomp "
+                       "filter" in rec.getMessage()]
+
+
+@pytestmark_linux
+class TestSeccompAxisCapableHostParity:
+    """Byte-parity guard: on a host WITH libseccomp the new arm is
+    inert — no refusal, no warning, no evidence record."""
+
+    def test_executor_shape_untouched(self, tmp_path, caplog,
+                                      monkeypatch):
+        from core.sandbox import context as _ctx
+        from core.sandbox import seccomp as _seccomp_mod
+        from core.sandbox import summary as _summary
+        if not _seccomp_mod.check_seccomp_available():
+            pytest.skip("libseccomp required for the parity probe")
+        monkeypatch.delenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED",
+                           raising=False)
+        out = tmp_path / "out"
+        out.mkdir()
+        with caplog.at_level(logging.WARNING,
+                             logger="core.sandbox.context"):
+            try:
+                r = _ctx.run(
+                    ["true"], block_network=True,
+                    target=str(tmp_path), output=str(out),
+                    require_fresh_procfs=(
+                        _ctx.untrusted_fresh_procfs_required()),
+                    capture_output=True, text=True, timeout=60)
+            except BaseException as e:  # noqa: BLE001 — host capability gate
+                pytest.skip(f"sandbox lane unavailable: {e}")
+        assert r.returncode == 0
+        assert "libseccomp" not in caplog.text
+        result = _summary.summarize_and_write(out)
+        assert result is None or result.get(
+            "total_floor_refusals", 0) == 0
+
+
+@pytestmark_linux
 class TestConstructionAcceptancePinNote:
     """The construction-time Landlock-enforceability refusal follows
     the honesty rule: when an explicit surface pins the floor above
