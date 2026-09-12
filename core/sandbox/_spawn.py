@@ -212,7 +212,11 @@ def _write_setup_status(fd: int, category: bytes, reason: str = "") -> None:
              looking CompletedProcess carrying the setup child's
              wait status. The parser maps missing confirmation to the
              synthetic category '!' (typed refusal in the parent,
-             never a result).
+             never a result — with one parent-side exemption: a
+             signal death after the live pid was delivered to an
+             exec_pid_callback is the caller's own documented kill
+             channel, kept as a CompletedProcess; see the
+             classification block above the result construction).
     ``reason`` is a short diagnostic. The whole payload is one ``os.write``
     well under PIPE_BUF (4096) so it lands atomically. Runs in a dying
     child after fork — must not raise and must not touch the Python logger
@@ -1520,6 +1524,12 @@ def run_sandboxed(
         # child that dies before the fork closes its copies and the
         # parent reads EOF, degrading to "no callback".
         pid_r = pid_w = None
+        # True once the live grandchild pid has been handed to the
+        # exec_pid_callback — from that point the caller owns a kill
+        # channel to the child ("SIGKILL is fine" is the documented
+        # contract), which the no-confirmation classifier below must
+        # treat as caller-initiated, not involuntary.
+        _exec_pid_delivered = False
         if exec_pid_callback is not None:
             pid_r, pid_w = os.pipe()
             _parent_fds.update({pid_r, pid_w})
@@ -3426,6 +3436,10 @@ def run_sandboxed(
                     pass
                 _parent_fds.discard(pid_r)
             if _exec_pid is not None and _exec_pid > 0:
+                # Delivered = the caller holds a kill channel from here
+                # on. Set BEFORE invoking: a callback that kills the
+                # child and then raises has still killed it.
+                _exec_pid_delivered = True
                 try:
                     exec_pid_callback(_exec_pid)
                 except Exception:
@@ -3654,6 +3668,29 @@ def run_sandboxed(
     # without reaching any reporting site (SIGKILL/OOM), and the wait status
     # below belongs to the setup child, not the target. Unspoofable:
     # status_w is close-on-exec, gone before the target runs.
+    #
+    # Caller-initiated-kill exemption: once the live grandchild pid was
+    # DELIVERED to an exec_pid_callback, the documented contract is that
+    # the callback may terminate the child at any point ("SIGKILL is
+    # fine; the normal reap flow handles the rest") — and the delivery
+    # deliberately happens while setup may still be in flight ("the
+    # callback may be invoked slightly before the target's execve
+    # completes"). A SIGNAL death with no exec confirmation after that
+    # delivery is therefore the caller's own kill exercising its
+    # documented channel, not an involuntary external death: keep the
+    # caller-visible CompletedProcess contract (rc=-N, the pre-'G'
+    # behaviour) instead of the '!' refusal. Keyed on the delivery flag
+    # — parent-owned state — never on timing. Residual (documented): a
+    # genuinely external SIGKILL landing in that window on a
+    # callback-bearing run is indistinguishable from the caller's kill
+    # and reads as one; scoped to runs that opted into the observation
+    # hook, whose callers own termination for the run by contract. A
+    # pre-exec death by NORMAL exit (rc >= 0) stays '!' even with the
+    # flag: nothing exits cleanly between fork and exec without writing
+    # a byte, so that shape is never the callback's kill.
+    if (setup_status is not None and setup_status[0] == "!"
+            and _exec_pid_delivered and returncode < 0):
+        setup_status = None
     stdout_out = stderr_out = None
     if capture_output:
         stdout_out = stdout_buf.decode("utf-8", errors="replace") if text else stdout_buf

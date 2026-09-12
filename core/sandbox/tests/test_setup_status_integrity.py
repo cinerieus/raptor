@@ -355,3 +355,57 @@ def test_involuntary_child_death_raises_typed_error(tmp_path, monkeypatch):
             f"involuntary spawn-child death came back as a genuine "
             f"result: rc={r.returncode}")
     pytest.skip("spawn lane not taken on this host")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "linux", reason="namespace sandbox")
+def test_callback_kill_before_exec_is_a_result_not_a_refusal(
+        tmp_path, monkeypatch):
+    """Live: a SIGKILL sent by the caller's own exec_pid_callback that
+    lands BEFORE the exec confirmation is caller-initiated termination
+    — the documented callback contract ("SIGKILL is fine") — and must
+    come back as the pre-existing CompletedProcess shape (rc=-9),
+    never the involuntary-death '!' refusal. The pre-exec landing is
+    made deterministic by stalling the 'G' confirmation write in the
+    fork-inherited child, so the callback's kill always wins the race.
+    Two-direction twin of test_involuntary_child_death_raises_typed_
+    error: same signal, no callback there → still typed."""
+    import signal as _signal
+    import time as _time
+
+    from core.sandbox import _spawn as _spawn_mod
+    from core.sandbox import context as _ctx
+
+    real_write = _spawn_mod._write_setup_status
+
+    def stall_confirmation(fd, category, reason=""):
+        if category == b"G":
+            _time.sleep(1.0)
+        real_write(fd, category, reason)
+
+    monkeypatch.setattr(_spawn_mod, "_write_setup_status",
+                        stall_confirmation)
+    killed = {}
+
+    def kill_it(pid):
+        killed["pid"] = pid
+        os.kill(pid, _signal.SIGKILL)
+
+    try:
+        r = _ctx.run(["/bin/sleep", "30"], target=str(tmp_path),
+                     output=str(tmp_path), timeout=30,
+                     capture_output=True, text=True,
+                     exec_pid_callback=kill_it)
+    except SandboxSetupError as e:
+        pytest.fail(
+            f"caller-initiated callback kill came back as a refusal: "
+            f"{e} (setup_category={e.setup_category!r})")
+    except (pytest.skip.Exception, pytest.fail.Exception):
+        raise
+    except Exception as e:  # noqa: BLE001 — host can't reach the lane
+        pytest.skip(f"spawn lane unavailable: {e}")
+    if not killed:
+        pytest.skip("exec pid never delivered on this host shape")
+    assert r.returncode == -_signal.SIGKILL, (
+        f"expected the caller-visible rc=-9 contract, got "
+        f"rc={r.returncode}")
