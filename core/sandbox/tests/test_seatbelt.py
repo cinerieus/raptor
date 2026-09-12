@@ -614,9 +614,17 @@ def test_full_profile_sysctl_read_allowlist_deny():
     for name in seatbelt.MACOS_SYSCTL_READ_NAME_ALLOWLIST:
         assert f'(sysctl-name "{name}")' in p
     # The credential/fingerprint names must never be allowlisted.
-    for banned in ("kern.proc", "kern.procargs", "kern.hostname",
+    # (kern.hostname is NOT in this set: Darwin's uname(3) reads it
+    # together with kern.ostype/osrelease/version and hw.machine and
+    # fails entirely if any one is denied — census evidence from a
+    # live macOS run; the allowlist carries the trade-off comment.)
+    for banned in ("kern.proc.", "kern.procargs",
                    "kern.bootsessionuuid"):
-        assert f'"{banned}"' not in p, banned
+        assert f'"{banned}' not in p, banned
+    # Exact-name form too: the prefix checks above use a trailing
+    # dot / open quote, which an exact "kern.proc" entry would evade.
+    assert '(sysctl-name "kern.proc")' not in p
+    assert '(sysctl-name "kern.hostname")' in p
     # sysctl-WRITE denial breaks Apple's linker + ensurepip — the
     # hardening must stay read-side only.
     assert "sysctl-write" not in p

@@ -1490,7 +1490,7 @@
     "note": "proxy event-record field names (schema keys), not a name vocabulary"
   },
   "core/sandbox/seatbelt.py::MACOS_SYSCTL_READ_NAME_ALLOWLIST": {
-    "count": 10,
+    "count": 11,
     "kind": "literal",
     "note": "sandbox-profile sysctl-read allowlist (kernel sysctl names the hardened seatbelt profile still permits), a security policy constant like the mach-services allowlist, not a learned name vocabulary"
   },

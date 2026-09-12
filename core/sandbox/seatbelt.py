@@ -130,8 +130,7 @@ MACOS_STRICT_MACH_SERVICES = MACOS_BASE_MACH_SERVICES
 # kern.procargs* (KERN_PROCARGS2 — reads the argv AND, for most
 # non-Apple targets, the ENVIRONMENT of any same-UID host process:
 # a same-UID credential-exfiltration channel, confirmed reachable on
-# current macOS), kern.hostname + kern.bootsessionuuid (host
-# fingerprint).
+# current macOS), kern.bootsessionuuid (host fingerprint).
 #
 # An unexpectedly-needed sysctl fails LOUD, not silent: the kernel
 # logs `deny(1) sysctl-read <name>` with the exact sysctl name to the
@@ -156,6 +155,17 @@ MACOS_SYSCTL_READ_NAME_ALLOWLIST = (
     "sysctl.proc_cputype",
     "kern.safeboot",
     "user.posix2_version",
+    # Darwin's uname(3) reads kern.ostype/osrelease/version,
+    # kern.hostname AND hw.machine in one pass and fails ENTIRELY if
+    # any one is denied — with kern.hostname absent, every
+    # os.uname()/platform caller inside the hardened sandbox raised
+    # PermissionError (census evidence from a live macOS run), which
+    # breaks python's platform module and common build tools.
+    # Trade-off accepted honestly: hostname visibility is a
+    # fingerprint tell we allow to keep uname(3) working;
+    # kern.bootsessionuuid and kern.proc*/kern.procargs* stay denied
+    # — those are the real fingerprint/credential items.
+    "kern.hostname",
 )
 
 # POSIX shm names the hardened profiles may still OPEN READ-ONLY:
