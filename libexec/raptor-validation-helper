@@ -2067,7 +2067,24 @@ def _run_witness_execution(workdir, target, data, dynamic=None):
     def _llm_call(prompt, system):
         return client.generate(prompt, system_prompt=system or None).content
 
-    stats = run_witness_stage(data, target, llm_call=_llm_call)
+    # ``except ()`` matches nothing: without core.sandbox the executor
+    # fails closed and a containment-floor refusal cannot occur.
+    try:
+        from core.sandbox import SandboxFloorError
+        _floor_errors = (SandboxFloorError,)
+    except ImportError:
+        _floor_errors = ()
+    try:
+        stats = run_witness_stage(data, target, llm_call=_llm_call)
+    except _floor_errors:
+        # Record-then-raise: the stage stamped the structured
+        # unverifiable-environment record on the refused finding —
+        # persist the findings (including any witness verdicts
+        # executed earlier in the stage) before the typed error fails
+        # the run loudly. Other exception types keep their
+        # pre-existing flight path (no save), unchanged.
+        _save_findings(workdir, data)
+        raise
     _save_findings(workdir, data)
     print(
         f"  Witness execution: {stats['executed']} executed of "
