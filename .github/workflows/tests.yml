@@ -28,8 +28,9 @@ env:
   VENV_PATH: .venv
   # CI-only hang net: dump every worker's Python stack if any single
   # test runs >120s, then let it continue (the dump is the signal, not
-  # a failure). The slowest legit default-tier test is a few seconds —
-  # slow/integration tests are gated out of these runs — so 120s only
+  # a failure). The slowest legit default-tier test is a few seconds,
+  # and the one slow/integration invocation here (the sandbox job's
+  # second step) completes in ~90s serial END TO END — so 120s only
   # fires on a genuine hang, surfacing the stuck call in ~2 min instead
   # of waiting out the job timeout. Set via PYTEST_ADDOPTS (not
   # pytest.ini) so it covers every tier here but NOT local `pytest`,
@@ -682,6 +683,41 @@ jobs:
         env:
           SANDBOX_FILES: ${{ needs.changes.outputs.sandbox_files }}
 
+      # Second invocation: the sandbox/exploit-feasibility slow +
+      # integration tier. The root pytest.ini addopts deselect these
+      # markers, so before this step the tier's only CI execution was
+      # nightly.yml — a PR could merge a sandbox regression that sat
+      # invisible until (and unless) the next nightly was triaged.
+      # Budget: 185 tests (22 slow + 163 integration across 22 files),
+      # ~90s serial measured all-green — well inside this job's 30-min
+      # timeout, so it rides here rather than earning a separate job
+      # (and, like the job itself, also runs on force_full events:
+      # merge queue, the twice-weekly cron, dispatch).
+      #
+      # The exploit-feasibility job carries a mirrored step gated on
+      # its own filter, covering exploit-feasibility-only PRs that do
+      # not fire the sandbox gate.
+      #
+      # Fixed directories, NOT $SANDBOX_FILES: this is a regression
+      # safety net over the whole heavyweight surface, not an
+      # import-scoped tier — file-list narrowing could drop exactly the
+      # test that would have caught the regression. Not routed through
+      # _tier.yml: both its paths hardcode RAPTOR_MAX_TEST_SECONDS=10
+      # (which fails every slow-marked test by design) and its image
+      # path runs in the slim deps container that cannot host the
+      # namespace/mount work these tests do.
+      - name: Run sandbox slow/integration tier
+        env:
+          # Blank out the workflow-level 10s per-test guard for this
+          # step only — slow-marked tests legitimately exceed it, same
+          # rationale as nightly.yml not setting it. Empty string
+          # disables (root conftest treats unset and empty alike).
+          RAPTOR_MAX_TEST_SECONDS: ""
+        run: |
+          source $VENV_PATH/bin/activate
+          python -m pytest -m "slow or integration" \
+            core/sandbox packages/exploit_feasibility
+
   # macOS sandbox tier: runs the same core/sandbox/tests on a real Darwin
   # host so the darwin_only enforcement tests (sandbox-exec write-blocking,
   # network-blocking, audit JSONL, Seatbelt profile enforcement) actually
@@ -844,6 +880,22 @@ jobs:
           source $VENV_PATH/bin/activate
           set -f
           python -m pytest $EXPLOIT_FILES
+
+      # Second invocation, mirroring the sandbox job's slow/integration
+      # step for THIS package's gate: an exploit-feasibility-only PR
+      # does not fire the sandbox gate, so without this step the
+      # package's slow/integration-marked tests (15 tests, ~30s serial
+      # measured all-green) would still run only in nightly.yml on such
+      # PRs. When a PR fires both gates the package subset runs in both
+      # jobs — ~30s of overlap, taken deliberately over a coverage hole.
+      # Same guard rationale as the sandbox step: blank the 10s per-test
+      # guard, slow-marked tests legitimately exceed it.
+      - name: Run exploit_feasibility slow/integration tier
+        env:
+          RAPTOR_MAX_TEST_SECONDS: ""
+        run: |
+          source $VENV_PATH/bin/activate
+          python -m pytest -m "slow or integration" packages/exploit_feasibility
 
   # source_intel tier: Coccinelle-driven memory-corruption evidence.
   # The real-spatch E2E (test_e2e_real_spatch_* etc.) are

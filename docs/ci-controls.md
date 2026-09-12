@@ -18,6 +18,7 @@ This page is split into:
 | Python lint gate | Ruff | Changed Python files in a PR |
 | Full-tree Python lint audit | Ruff | Entire repository tree |
 | Fast Python test suite | Pytest | `core/`, `packages/`, split into subsystem tiers |
+| Sandbox slow/integration tier | Pytest | `slow`/`integration`-marked tests under `core/sandbox` and `packages/exploit_feasibility`, on sandbox-gated PRs (package-scoped mirror on exploit-feasibility-gated PRs) |
 | Prompt-envelope audit | Pytest | Registered prompt construction paths |
 | Code scanning | GitHub CodeQL Advanced | Python, C/C++, GitHub Actions |
 | Slash-command metadata lint | In-tree Python checker | `.claude/commands/*.md` dispatch metadata |
@@ -38,6 +39,7 @@ This page is split into:
 - **Python lint gate** — [`lint.yml`](../.github/workflows/lint.yml) on `pull_request` and `merge_group`. Rules `F401`, `F811`, `F821`, `F841`; Python 3.10 target (config in `pyproject.toml`). Locally: `ruff check <changed .py files>`.
 - **Full-tree Python lint audit** — [`lint.yml`](../.github/workflows/lint.yml) on `push: main`, weekly cron, manual run. Same rule set as the PR gate. Locally: `ruff check .`.
 - **Fast Python test suite** — [`tests.yml`](../.github/workflows/tests.yml) on PRs, pushes, merge queue; tiers computed by [`test_scope.py`](../.github/scripts/test_scope.py). Default excludes `slow` and `integration` (markers in `pytest.ini`); `RAPTOR_MAX_TEST_SECONDS=10` per-test wall-clock guard. Locally: `python3 -m pytest core packages`.
+- **Sandbox slow/integration tier** — [`tests.yml`](../.github/workflows/tests.yml), second step of the sandbox job on sandbox-gated PRs, with a package-scoped mirror step in the exploit-feasibility job for PRs that fire only that gate. Any CI-equivalent local gate run must include it: `python3 -m pytest -m "slow or integration" core/sandbox packages/exploit_feasibility` (~90s serial).
 - **Prompt-envelope audit** — [`tests.yml`](../.github/workflows/tests.yml), `python-prompt-audit` job. Narrow AST-based audit. Locally: `python3 -m pytest core/security/tests/test_prompt_envelope_audit.py -q`.
 - **Code scanning** — [`codeql.yml`](../.github/workflows/codeql.yml) on PRs, pushes, merge queue, weekly cron. Languages `python`, `c-cpp`, `actions`; path exclusions in [`codeql-config.yml`](../.github/codeql/codeql-config.yml); import-graph scope narrowing via [`codeql_scope.py`](../.github/scripts/codeql_scope.py) for PRs. Local CodeQL requires the CLI and packs — use the GitHub workflow.
 - **Slash-command metadata lint** — [`lint.yml`](../.github/workflows/lint.yml) on every lint run. Validates `dispatch:` targets and exclusion-list drift. Locally: `python3 .github/scripts/check_command_metadata.py`.

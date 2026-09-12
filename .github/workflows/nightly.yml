@@ -1,9 +1,15 @@
 name: Nightly (slow + integration)
 
 # The `slow` and `integration` markers are deselected by default in
-# pytest.ini (`addopts = -m "not integration and not slow"`), so these
-# tests run NOWHERE in the per-PR / per-push test matrix. This workflow
-# is the only place they execute in CI.
+# pytest.ini (`addopts = -m "not integration and not slow"`), so most
+# of these tests run NOWHERE in the per-PR / per-push test matrix and
+# this workflow is their only CI execution. One carve-out: the
+# core/sandbox + packages/exploit_feasibility slow/integration subset
+# ALSO runs in tests.yml on gated PRs — the sandbox job carries the
+# combined tier, the exploit-feasibility job a package-scoped mirror
+# for PRs that fire only its own filter (a sandbox regression once sat
+# in this nightly-only window for days) — this workflow remains the
+# full-repo, unfiltered pass over both markers.
 #
 #   * slow        — perf baselines + sandbox-setup-heavy resolver tests
 #                   (deterministic; a failure is a real regression).
