@@ -64,10 +64,15 @@ scratch directory. Explicit non-shared writable paths are retained. Calls with
 `restrict_reads=False` retain the historical writable baseline, including
 host-shared temporary paths when the bind tree is absent. Untrusted execution
 refuses this lesser filesystem tier unless the operator sets
-`RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1`. The
-mountless backend refuses every untrusted run on Landlock ABI below 3 because
-those kernels cannot block `truncate()` outside the write allowlist. It also
-refuses read-restricted trusted runs on those kernels.
+`RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1` — enforced by the containment-floor
+contract (`core/sandbox/tiers.py`): every execution lane carries a declared
+containment tier, every dispatch site asserts `delivered >= floor` before the
+command runs, and a violation raises a typed `SandboxFloorError` chained to
+the demoting backend failure. On Landlock ABI below 3 the mountless backend
+is not achievable for untrusted or read-restricted work (those kernels cannot
+block `truncate()` outside the write allowlist); an unwaived untrusted run is
+then refused at its floor, and a waived or trusted read-restricted run
+continues down the demotion ladder to a lane its floor admits.
 
 **Critical fallback property** — `mount namespace` engagement requires
 unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns=0`).

@@ -106,6 +106,56 @@ of Landlock/seccomp-only containment (see
 
 ---
 
+## Containment floor
+
+The sandbox enforces untrusted-execution requirements through a single
+two-sided contract instead of per-lane checks. Execution lanes form a
+total order of **containment tiers** per platform:
+
+| Tier | Lane | Delivers |
+|---|---|---|
+| `mount-ns` | fork spawn backend | pivot_root bind tree, full namespace set, fresh procfs, Landlock, seccomp |
+| `mountless-ns` | fork spawn backend, no bind tree | full namespace set, fresh procfs, Landlock, seccomp; host paths visible by name |
+| `ns-only` | unshare-CLI subprocess | user/PID/IPC(/net) namespaces, Landlock, seccomp; host procfs visible |
+| `landlock` | plain subprocess | Landlock, seccomp, rlimits; host namespaces |
+| `none` | plain subprocess | rlimits only |
+| `seatbelt` | macOS `sandbox-exec` | SBPL write/read scoping, network denial, process-info denial (macOS's top tier; never compared to Linux tiers) |
+
+Each call resolves a **floor** once at entry: untrusted work
+(`run_untrusted*` and every caller passing the `require_fresh_procfs`
+contract) floors at `mount-ns` on Linux and `seatbelt` on macOS;
+`RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1` lowers the untrusted floor to
+`landlock` (its frozen meaning — it never reaches `none` on Linux);
+trusted calls have no floor (`none`) and keep their existing
+enforceability refusals; the operator's explicit `--sandbox none` /
+`--no-sandbox` / `disabled=True` remains globally authoritative
+(floor `none`). Nothing consents untrusted work to a bare run
+implicitly.
+
+Enforcement is two-sided: an entry-time check refuses
+statically-knowable shapes up front with the full remedy text, and a
+hard runtime assertion at **every dispatch site** compares the lane's
+declared tier against the floor immediately before the command
+executes. A demotion that would cross the floor converts into a typed
+`SandboxFloorError` (a `SandboxSetupError` subtype carrying
+`floor`/`achievable`/`setup_category`) chained to the original backend
+failure — so a future demotion lane added without any thought for the
+contract fails closed instead of silently running attacker-derived
+code below the floor.
+
+Every result stamps the posture: `sandbox_info["containment_tier"]`
+(the tier the call actually ran at — per-call posture reductions such
+as `skip_pid_ns`, which keeps the host procfs on both spawn lanes, cap
+the stamp accordingly), `containment_floor`, and `floor_source`
+(`default` / `env` / `operator-disable`); tracked runs merge the
+weakest tier per run directory into `sandbox-summary.json`'s posture
+record. When the waiver lowers the floor, a one-line banner names the
+consent source, and every waived call that lands on a
+host-procfs-visible lane (`ns-only` or below) warns individually; the
+mountless fallback keeps its existing once-per-process notice.
+
+---
+
 ## Profiles
 
 Profiles bundle layer settings into a single name for CLI use:
@@ -162,10 +212,14 @@ Calls with
 `restrict_reads=False` retain their historical writable baseline, which means
 host `/tmp` and `/dev/shm` are writable when the bind tree is absent.
 Untrusted runs therefore
-require `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1`; read-restricted runs also refuse
-the fallback on Landlock ABI below 3, where `truncate()` is not controlled.
-Every untrusted run refuses that backend on ABI below 3, even when the caller
-explicitly disabled read restriction.
+require `RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1`. On Landlock ABI below 3,
+where `truncate()` outside the write allowlist is not controlled, the
+mountless backend is not achievable for untrusted or read-restricted
+work at all: an unwaived untrusted run is refused at its containment
+floor, and a waived (or trusted read-restricted) run continues down the
+demotion ladder to a lane its floor admits — a lane whose weaker,
+documented contract the consent covers — instead of retrying a
+mountless lane whose write policy the kernel cannot enforce.
 
 Declaring a directory via `tool_paths` is also how `$HOME`-resident
 toolchains stay runnable: the sandboxed child's environment scrub

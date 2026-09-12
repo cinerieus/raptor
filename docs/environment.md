@@ -126,6 +126,18 @@ UNRESTRICTED network for those runs, and the warning says so (the
 narrower per-run escapes are a profile without the network block,
 e.g. `--sandbox target_run`, or `degraded_net_deny=False`).
 
+Its meaning is frozen as a containment-floor mapping: **"untrusted
+floor := `landlock`"** (see the containment-floor section of
+[sandbox.md](sandbox.md)). The waiver accepts namespace loss and
+host-procfs visibility for untrusted work but never lowers it to a
+bare run on Linux, never affects trusted, strict, rootfs, or persona
+behaviour, and never grows new semantics — future consent surfaces
+ship as explicit flags/settings. Floor refusals are the typed
+`SandboxFloorError` (carrying the required floor and the achievable
+tier); the per-run posture records `containment_tier`,
+`containment_floor`, and `floor_source` so a waived run is always
+identifiable after the fact.
+
 Distinct from `RAPTOR_ALLOW_UNSANDBOXED_TOOLS`, which waives a
 *missing sandbox module* at the tool-runner import seam — this one
 waives a missing *namespace tier* inside an otherwise-working
