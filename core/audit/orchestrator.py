@@ -7880,6 +7880,7 @@ def _run_audit_body(
                 result, config, checklist,
                 joern_server=joern_server,
                 start_time=start_time,
+                max_workers=resolved_workers,
             )
         except Exception:
             logger.warning(
@@ -22137,6 +22138,7 @@ def _adversarial_refute_pass(
     *,
     joern_server=None,
     start_time: float | None = None,
+    max_workers: int = 1,
 ) -> None:
     """Post-loop pass: genuinely attack finding/suspicious hypotheses.
 
@@ -22161,6 +22163,13 @@ def _adversarial_refute_pass(
     prompt); multi-model runs prefer a refuter model different from the
     producer. Refuter failures are no-ops — an errored refutation must
     never demote anything.
+
+    Refutations are independent per outcome (each writes only its own
+    outcome slot; shared counters update under the result lock), so
+    with ``max_workers > 1`` they fan out across threads. A budget or
+    SIGTERM trip stops further dispatch — calls already in flight
+    finish and their verdicts are folded. Single-worker and
+    single-item runs keep the plain serial loop.
     """
     from .adversarial_refute import (
         VERDICT_NEEDS_EVIDENCE,
@@ -22187,7 +22196,7 @@ def _adversarial_refute_pass(
     from core.llm.client import AuthFailureTracker
     auth_tracker = AuthFailureTracker("adversarial-refute")
 
-    dispatched = 0
+    candidates: list[tuple[int, ReviewOutcome, str]] = []
     for i, outcome in enumerate(result.outcomes):
         if outcome.status not in ("finding", "suspicious"):
             continue
@@ -22199,15 +22208,34 @@ def _adversarial_refute_pass(
         hypothesis = (outcome.hypothesis or "").strip()
         if not hypothesis:
             continue
-        if dispatched >= _MAX_ADVERSARIAL_REFUTATIONS:
-            logger.info(
-                "adversarial refutation cap reached (%d) — remaining "
-                "positive outcomes keep their verdicts",
-                _MAX_ADVERSARIAL_REFUTATIONS,
-            )
-            break
-        if start_time is not None and _check_budget(config, start_time, result):
-            break
+        candidates.append((i, outcome, hypothesis))
+
+    if len(candidates) > _MAX_ADVERSARIAL_REFUTATIONS:
+        logger.info(
+            "adversarial refutation cap reached (%d) — remaining "
+            "positive outcomes keep their verdicts",
+            _MAX_ADVERSARIAL_REFUTATIONS,
+        )
+        candidates = candidates[:_MAX_ADVERSARIAL_REFUTATIONS]
+
+    # Budget/SIGTERM stop, sticky across workers: once set, no further
+    # refutations dispatch; calls already in flight finish and their
+    # verdicts are folded (the money is spent either way).
+    stop = _threading.Event()
+    # Auth-abort bookkeeping — recorded exactly once even when several
+    # workers observe the tripped tracker at the same time.
+    abort_state: dict[str, bool] = {}
+    abort_lock = _threading.Lock()
+
+    def _refute_one(item: tuple[int, ReviewOutcome, str]) -> None:
+        i, outcome, hypothesis = item
+        if stop.is_set() or auth_tracker.tripped:
+            return
+        if start_time is not None and _check_budget(
+            config, start_time, result,
+        ):
+            stop.set()
+            return
 
         gap = _find_gap_in_checklist(
             checklist or {}, outcome.file, outcome.function,
@@ -22222,7 +22250,6 @@ def _adversarial_refute_pass(
         refuter_model = pick_refuter_model(
             config.models, outcome.model or "",
         )
-        dispatched += 1
         ref = run_refutation(
             llm_client,
             file=outcome.file,
@@ -22242,12 +22269,15 @@ def _adversarial_refute_pass(
                 # is refusing every call. Abort the pass loudly; a
                 # silently no-op'd adversarial pass ships findings
                 # unchallenged while claiming they were attacked.
-                try:
-                    auth_tracker.raise_if_tripped()
-                except Exception as exc:  # noqa: BLE001 — typed abort from the tracker
-                    _record_phase_abort(config, result, exc)
-                return
-            continue
+                with abort_lock:
+                    if not abort_state:
+                        try:
+                            auth_tracker.raise_if_tripped()
+                        except Exception as exc:  # noqa: BLE001 — typed abort from the tracker
+                            _record_phase_abort(config, result, exc)
+                        abort_state["aborted"] = True
+                stop.set()
+            return
 
         result.cost_tracker.record_call(
             "adversarial", cost_usd=ref.cost_usd,
@@ -22276,12 +22306,13 @@ def _adversarial_refute_pass(
         }
 
         if ref.verdict == VERDICT_STANDS:
-            result.adversarial_stands += 1
+            with result._lock:
+                result.adversarial_stands += 1
             _increment_tier_dict(
                 result.tier_counters, "adversarial_refute", "inconclusive",
             )
             append_audit_log(config.out_dir, log_entry)
-            continue
+            return
 
         if ref.verdict == VERDICT_NEEDS_EVIDENCE:
             # Route to dark verification — the dark pass runs after
@@ -22291,7 +22322,7 @@ def _adversarial_refute_pass(
                 result.tier_counters, "adversarial_refute", "skipped",
             )
             append_audit_log(config.out_dir, log_entry)
-            continue
+            return
 
         # ── verdict == refuted ─────────────────────────────────────
         # Named mechanical evidence: give the tools the last word.
@@ -22337,7 +22368,8 @@ def _adversarial_refute_pass(
                         outcome.review_result["evidence_tool"] = tool
                     outcome.review_result["adversarial_review"][
                         "overturned_by"] = tool
-                    result.adversarial_stands += 1
+                    with result._lock:
+                        result.adversarial_stands += 1
                     _increment_tier_dict(
                         result.tier_counters, "adversarial_refute",
                         "confirmed",
@@ -22351,7 +22383,7 @@ def _adversarial_refute_pass(
                         outcome.file, outcome.function, tool,
                     )
         if overturned:
-            continue
+            return
 
         # Demote one level, never silently below a tool receipt.
         reason = (
@@ -22362,10 +22394,11 @@ def _adversarial_refute_pass(
         if outcome.status == "finding":
             demoted = _demote_outcome(outcome, reason)
             demoted.review_result = outcome.review_result
-            result.outcomes[i] = demoted
-            result.findings -= 1
-            result.suspicious += 1
-            result.adversarial_refuted += 1
+            with result._lock:
+                result.outcomes[i] = demoted
+                result.findings -= 1
+                result.suspicious += 1
+                result.adversarial_refuted += 1
             log_entry["status"] = "suspicious"
         elif tool_backed:
             # suspicious + mechanical receipt: record the refutation,
@@ -22390,10 +22423,11 @@ def _adversarial_refute_pass(
             cleaned.tools_dispatched = outcome.tools_dispatched
             cleaned.tools_errored = outcome.tools_errored
             cleaned.tools_skipped = outcome.tools_skipped
-            result.outcomes[i] = cleaned
-            result.suspicious -= 1
-            result.clean += 1
-            result.adversarial_refuted += 1
+            with result._lock:
+                result.outcomes[i] = cleaned
+                result.suspicious -= 1
+                result.clean += 1
+                result.adversarial_refuted += 1
             log_entry["status"] = "clean"
 
         _increment_tier_dict(
@@ -22406,6 +22440,42 @@ def _adversarial_refute_pass(
             log_entry["prior_status"], log_entry["status"],
             (ref.defeating_mechanism or ref.counter_argument)[:120],
         )
+
+    workers = max(1, max_workers)
+    if joern_server is not None:
+        # Refuted-verdict routing can dispatch a per-item tool chain
+        # through the Joern lane — same single-JVM cap as the sweep.
+        workers = min(workers, _JOERN_PASS_MAX_WORKERS)
+
+    if workers <= 1 or len(candidates) <= 1:
+        for item in candidates:
+            _refute_one(item)
+            if stop.is_set() or abort_state:
+                break
+    else:
+        from core.llm.concurrency import run_parallel
+
+        item_errors: list[tuple[int, Exception]] = []
+
+        def _on_error(
+            item: tuple[int, ReviewOutcome, str], exc: Exception,
+        ) -> None:
+            item_errors.append((item[0], exc))
+
+        run_parallel(
+            candidates, _refute_one,
+            max_workers=workers,
+            label="adversarial-refute",
+            on_error=_on_error,
+        )
+        if item_errors:
+            # Serial parity: an unexpected per-item failure aborts the
+            # pass (the call site logs it and keeps every verdict).
+            item_errors.sort(key=lambda t: t[0])
+            raise item_errors[0][1]
+
+    if abort_state:
+        return
 
     # Completed without an auth abort (the abort path returns early):
     # supersede any stale sidecar record from a prior segment.

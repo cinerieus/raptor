@@ -23,6 +23,7 @@ money, all "true" for different ledgers):
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
@@ -84,6 +85,13 @@ class PhaseCostLedger:
     # Authoritative end-of-run LLM-client ledger (None until injected
     # via set_total_spend — e.g. runs without a budget client).
     _total_spend_usd: float | None = field(default=None, repr=False)
+    # Calls are recorded from parallel review workers and the parallel
+    # post-loop passes; the += accumulations below silently lose money
+    # from the ledger without exclusion. Increment-sized critical
+    # sections keep contention negligible at the worker cap.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False,
+    )
 
     _KNOWN_PHASES = (
         "triage",
@@ -134,15 +142,16 @@ class PhaseCostLedger:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
     ) -> None:
-        """Record a single call within a phase."""
-        pc = self._ensure_phase(phase)
-        pc.calls += 1
-        pc.cost_usd += cost_usd
-        pc.tokens_in += tokens_in
-        pc.tokens_out += tokens_out
-        pc.wall_time_s += wall_time_s
-        pc.cache_read_tokens += cache_read_tokens
-        pc.cache_write_tokens += cache_write_tokens
+        """Record a single call within a phase.  Thread-safe."""
+        with self._lock:
+            pc = self._ensure_phase(phase)
+            pc.calls += 1
+            pc.cost_usd += cost_usd
+            pc.tokens_in += tokens_in
+            pc.tokens_out += tokens_out
+            pc.wall_time_s += wall_time_s
+            pc.cache_read_tokens += cache_read_tokens
+            pc.cache_write_tokens += cache_write_tokens
 
     def record_failed_attempt(
         self,
@@ -158,12 +167,13 @@ class PhaseCostLedger:
         cost — record them here so the ledgers reconcile.
         ``count_call=False`` is the end-of-run reconciliation path:
         it books residual unattributed spend as failed-attempt cost
-        without inventing a call count for it.
+        without inventing a call count for it.  Thread-safe.
         """
-        pc = self._ensure_phase(phase)
-        if count_call:
-            pc.failed_calls += 1
-        pc.failed_attempts_cost_usd += cost_usd
+        with self._lock:
+            pc = self._ensure_phase(phase)
+            if count_call:
+                pc.failed_calls += 1
+            pc.failed_attempts_cost_usd += cost_usd
 
     def set_total_spend(self, spend_usd: float) -> None:
         """Inject the authoritative end-of-run LLM-client ledger.
