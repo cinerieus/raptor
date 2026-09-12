@@ -7751,6 +7751,7 @@ def _run_audit_body(
             result, config, sarif_cache, checklist,
             joern_server=joern_server,
             mechanical_findings=mechanical_findings,
+            max_workers=resolved_workers,
         )
         logger.debug("exited _promote_suspicious")
 
@@ -11851,28 +11852,35 @@ def _mark_unsupported_unresolvable(
     unresolvable — they must not be studied, retried, or reported as
     resolved-clean."""
     try:
-        from core.concepts.reading_list import ReadingList
+        from core.concepts.reading_list import (
+            READING_LIST_WRITE_LOCK,
+            ReadingList,
+        )
 
         rl_path = out_dir / "reading-list.json"
-        rl = ReadingList.load(rl_path)
-        changed = False
-        for req in reqs:
-            suffix = Path(req.source_file or "").suffix or "?"
-            reason = (
-                f"study loop has no resolver for '{suffix}' sources"
-            )
-            for item in rl.items:
-                if (
-                    item.question == req.question
-                    and not item.resolved
-                    and not item.unresolvable
-                ):
-                    item.mark_unresolvable(reason)
-                    changed = True
-                    _warn_critical_unresolvable(req, reason)
-                    break
-        if changed:
-            rl.save(rl_path)
+        # Load-modify-save cycle: hold the shared writer lock end to
+        # end so concurrent queuers (premise questions, audit_bridge)
+        # cannot be overwritten by this save.
+        with READING_LIST_WRITE_LOCK:
+            rl = ReadingList.load(rl_path)
+            changed = False
+            for req in reqs:
+                suffix = Path(req.source_file or "").suffix or "?"
+                reason = (
+                    f"study loop has no resolver for '{suffix}' sources"
+                )
+                for item in rl.items:
+                    if (
+                        item.question == req.question
+                        and not item.resolved
+                        and not item.unresolvable
+                    ):
+                        item.mark_unresolvable(reason)
+                        changed = True
+                        _warn_critical_unresolvable(req, reason)
+                        break
+            if changed:
+                rl.save(rl_path)
     except Exception:
         logger.debug(
             "study-consumer: unsupported-language marking failed",
@@ -12643,7 +12651,10 @@ def _mark_batch_reading_list(
         ))
 
     if changed:
-        rl.save(rl_path)
+        # Merge-save under the shared writer lock: items queued by
+        # other writers while this instance processed answers must
+        # survive its save.
+        rl.save_merged(rl_path)
     if ledger:
         try:
             append_answers(out_dir, ledger)
@@ -20196,6 +20207,353 @@ def _synth_receipt_promotion_block_reason(
     return ""
 
 
+# Cap for passes whose per-item work consults the Joern query server
+# (sink-guard veto, joern tool-chain steps): the server is a single
+# JVM pipeline, so workers past 2 mostly queue inside it and raise the
+# odds of a queue-induced query timeout — which costs a full server
+# restart — while 2 still overlaps one query with another item's
+# subprocess/tool work.
+_JOERN_PASS_MAX_WORKERS = 2
+
+
+def _promote_suspicious_one(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+    i: int,
+    outcome: ReviewOutcome,
+    *,
+    sarif_cache: SarifCache | None = None,
+    checklist: dict[str, Any] | None = None,
+    joern_server=None,
+    mechanical_findings: dict[str, list[dict[str, Any]]] | None = None,
+    synthesis_queue: list[tuple[int, ReviewOutcome, str, str, str]] | None = None,
+) -> None:
+    """Sweep one suspicious outcome (see :func:`_promote_suspicious`).
+
+    Safe to run concurrently for distinct *i*: the body writes only its
+    own ``result.outcomes[i]`` slot and its own outcome object, and the
+    shared verdict counters are updated under ``result._lock``. When
+    *synthesis_queue* is provided, chain-less hypotheses are queued as
+    ``(i, outcome, hypothesis, cwe, source)`` instead of synthesized
+    inline: on-demand synthesis is LLM-backed and capped per run, so
+    the cap must be consumed in item order, not completion order.
+    """
+    if outcome.body.startswith(
+        (
+            "[gate violation:",
+            "[sink-unreachability:",
+            "[guarded-sink:",
+            "[smt-infeasible:",
+            "[entry-unreachability:",
+            "[self-contradiction:",
+        )
+    ):
+        logger.debug(
+            "sweep skipped %s:%s — mechanical gate demotion is authoritative",
+            outcome.file,
+            outcome.function,
+        )
+        return
+
+    review = outcome.review_result or {}
+    hypothesis = review.get("hypothesis") or outcome.hypothesis or ""
+    if not hypothesis:
+        return
+
+    refuting_counter = _has_refuting_counter(outcome)
+
+    # Premise binding for the primary hypothesis, same rule as the
+    # secondary sweep below: a function-local confirm cannot
+    # adjudicate a counter that rests on a cross-function premise
+    # — it re-proves the lexical shape the reviewer already saw
+    # and weighed. Blocked promotions stay suspicious and park the
+    # premise on the reading list.
+    premise_h = _primary_hypothesis_entry(outcome, hypothesis)
+
+    gap = _find_gap_in_checklist(checklist or {}, outcome.file, outcome.function)
+    line_end = gap.get("line_end") if gap else None
+
+    source = _read_raw_source(
+        config.target_path,
+        outcome.file,
+        outcome.line,
+        line_end,
+    )
+
+    cwe = _effective_cwe(outcome, result.tier_counters)
+
+    if refuting_counter:
+        if _hypothesis_to_tool_chain(hypothesis, outcome.file, cwe=cwe):
+            logger.debug(
+                "sweep skipped %s:%s — LLM counter-hypothesis present",
+                outcome.file,
+                outcome.function,
+            )
+            return
+        # Empty-dispatch family: no static channel exists that
+        # could adjudicate this hypothesis OR its counter, so the
+        # only possible mechanical evidence is a synthesized
+        # checker (full dual controls + guarded-sink gate apply
+        # inside). Route the family to on-demand synthesis instead
+        # of letting it die unverified.
+        synth_hyp = _synthesis_hypothesis_for_cwe(outcome, cwe, hypothesis)
+        if synthesis_queue is not None:
+            synthesis_queue.append((i, outcome, synth_hyp, cwe, source))
+        else:
+            _synthesize_unmapped_suspicious(
+                result, config, i, outcome,
+                synth_hyp,
+                cwe, source,
+                joern_server=joern_server,
+            )
+        return
+
+    mech_tool = _correlated_mech_detector_tool(
+        outcome, hypothesis, cwe, mechanical_findings,
+    )
+    if mech_tool:
+        _gblk = _guard_blocks_promotion(
+            outcome.function, joern_server, result.tier_counters)
+        if _gblk:
+            logger.info(
+                "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
+                outcome.file,
+                outcome.function,
+                mech_tool,
+                _gblk,
+            )
+        elif _premise_blocks_confirm(premise_h, [mech_tool]):
+            _note_premise_blocked_validation(
+                outcome, premise_h, [mech_tool],
+                config, result.tier_counters,
+                lane="sweep promotion", tier="primary_sweep",
+            )
+        else:
+            with result._lock:
+                result.outcomes[i] = _promote_outcome(outcome, mech_tool)
+                result.sweep_promoted += 1
+                result.suspicious -= 1
+                result.findings += 1
+            logger.info(
+                "sweep promoted %s:%s via %s (prep-phase detector hit)",
+                outcome.file,
+                outcome.function,
+                mech_tool,
+            )
+            return
+
+    pf = run_prefilter(
+        target_path=config.target_path,
+        file_path=outcome.file,
+        function_name=outcome.function,
+        source=source,
+        line_start=outcome.line,
+        project_sinks=config.project_sinks,
+    )
+    if pf.hits:
+        if line_end:
+            pf.hits = [
+                h
+                for h in pf.hits
+                if not h.line or outcome.line <= h.line <= line_end
+            ]
+        # Promotion needs evidence in the hypothesis's family; an
+        # unrelated pattern hit stays context and falls through to
+        # the hypothesis-specific tool chain.
+        correlated = [
+            h for h in pf.hits
+            if evidence_matches_hypothesis(
+                family_for_rule(h.rule_id), hypothesis, cwe,
+            )
+        ]
+        if correlated:
+            tool = f"prefilter:{correlated[0].rule_id}"
+            # Same sink-guard veto as every other promotion lane
+            # (mech-detector above, critique, secondary sweep).
+            _pf_gblk = _guard_blocks_promotion(
+                outcome.function, joern_server, result.tier_counters)
+            if _pf_gblk:
+                logger.info(
+                    "sweep promotion blocked %s:%s via %s — "
+                    "sink-guard veto: %s",
+                    outcome.file,
+                    outcome.function,
+                    tool,
+                    _pf_gblk,
+                )
+            elif _premise_blocks_confirm(premise_h, [tool]):
+                _note_premise_blocked_validation(
+                    outcome, premise_h, [tool],
+                    config, result.tier_counters,
+                    lane="sweep promotion", tier="primary_sweep",
+                )
+            else:
+                with result._lock:
+                    result.outcomes[i] = _promote_outcome(outcome, tool)
+                    result.sweep_promoted += 1
+                    result.suspicious -= 1
+                    result.findings += 1
+                logger.info(
+                    "sweep promoted %s:%s via %s",
+                    outcome.file,
+                    outcome.function,
+                    tool,
+                )
+                return
+        if pf.hits and not correlated:
+            _record_uncorrelated_hits(outcome, pf.hits)
+            logger.info(
+                "sweep promotion withheld %s:%s — prefilter hits (%s) "
+                "uncorrelated with hypothesis",
+                outcome.file,
+                outcome.function,
+                ",".join(h.rule_id for h in pf.hits[:3]),
+            )
+
+    chain = _hypothesis_to_tool_chain(hypothesis, outcome.file, cwe=cwe)
+    if not chain:
+        # No CWE dispatch entry and no cheap channel binds this
+        # hypothesis — the static dispatch table has nothing to
+        # test it with. On-demand Mode-2 synthesis generates a
+        # one-off, negatively-controlled rule instead of letting
+        # the hypothesis die untested.
+        synth_hyp = _synthesis_hypothesis_for_cwe(outcome, cwe, hypothesis)
+        if synthesis_queue is not None:
+            synthesis_queue.append((i, outcome, synth_hyp, cwe, source))
+        else:
+            _synthesize_unmapped_suspicious(
+                result, config, i, outcome,
+                synth_hyp,
+                cwe, source,
+                joern_server=joern_server,
+            )
+        return
+    confirmed = _run_tool_chain(
+        chain,
+        config=config,
+        file_path=outcome.file,
+        function_name=outcome.function,
+        source=source,
+        hypothesis=hypothesis,
+        line_start=outcome.line,
+        sarif_cache=sarif_cache,
+        tier_counters=result.tier_counters,
+        joern_server=joern_server,
+        cwe=cwe,
+        # Exit only on a receipt THIS site would promote on alone:
+        # promotion-grade, not synth-excluded (an excluded synth
+        # receipt is dropped below and other channels must still
+        # get their turn), not premise-blocked.
+        early_exit_check=lambda c: (
+            _promotion_grade_receipt(c)
+            and not _synth_receipt_promotion_block_reason(
+                c, outcome, cwe, config,
+            )
+            and not _premise_blocks_confirm(premise_h, [c])
+        ),
+    )
+
+    if confirmed:
+        _synth_blocked = {
+            t: reason for t in confirmed
+            if (reason := _synth_receipt_promotion_block_reason(
+                t, outcome, cwe, config,
+            ))
+        }
+        if _synth_blocked:
+            for _t, _reason in _synth_blocked.items():
+                logger.info(
+                    "sweep promotion: synth receipt %s excluded for "
+                    "%s:%s — %s",
+                    _t, outcome.file, outcome.function, _reason,
+                )
+            confirmed = [t for t in confirmed if t not in _synth_blocked]
+            if not confirmed:
+                _increment_tier_dict(
+                    result.tier_counters, "adapter_aggregation",
+                    "inconclusive",
+                )
+                return
+        if _premise_blocks_confirm(premise_h, confirmed):
+            _note_premise_blocked_validation(
+                outcome, premise_h, list(confirmed),
+                config, result.tier_counters,
+                lane="sweep promotion", tier="primary_sweep",
+            )
+            return
+        high_prec = [
+            t for t in confirmed
+            if not _is_detection_only(t)
+        ]
+        if not high_prec:
+            # Bayesian multi-channel aggregation: independent
+            # detection-role channels agreeing on the hypothesis
+            # can jointly cross the promote threshold even though
+            # no single receipt is perfect.
+            agg_channels, post_mean = _aggregate_channel_confirmations(
+                confirmed,
+            )
+            if agg_channels and not _guard_blocks_promotion(
+                    outcome.function, joern_server,
+                    result.tier_counters):
+                tool = "+".join(confirmed)
+                promoted = _promote_outcome(outcome, tool)
+                _record_aggregated_promotion(
+                    promoted, agg_channels, post_mean, confirmed,
+                )
+                with result._lock:
+                    result.outcomes[i] = promoted
+                    result.sweep_promoted += 1
+                    result.aggregation_promoted += 1
+                    result.suspicious -= 1
+                    result.findings += 1
+                _increment_tier_dict(
+                    result.tier_counters, "adapter_aggregation",
+                    "confirmed",
+                )
+                logger.info(
+                    "sweep promoted %s:%s via aggregated channels %s "
+                    "(posterior %.2f > %.2f)",
+                    outcome.file, outcome.function,
+                    "+".join(agg_channels), post_mean,
+                    _AGGREGATION_CONFIRM_THRESHOLD,
+                )
+                return
+            _increment_tier_dict(
+                result.tier_counters, "adapter_aggregation",
+                "inconclusive",
+            )
+            logger.info(
+                "sweep promotion blocked %s:%s — only detection-role "
+                "rules (%s)",
+                outcome.file, outcome.function, "+".join(confirmed),
+            )
+            return
+        _gblk = _guard_blocks_promotion(
+            outcome.function, joern_server, result.tier_counters)
+        if _gblk:
+            logger.info(
+                "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
+                outcome.file,
+                outcome.function,
+                "+".join(confirmed),
+                _gblk,
+            )
+            return
+        tool = "+".join(high_prec)
+        with result._lock:
+            result.outcomes[i] = _promote_outcome(outcome, tool)
+            result.sweep_promoted += 1
+            result.suspicious -= 1
+            result.findings += 1
+        logger.info(
+            "sweep promoted %s:%s via %s",
+            outcome.file,
+            outcome.function,
+            tool,
+        )
+
+
 def _promote_suspicious(
     result: OrchestratorResult,
     config: OrchestratorConfig,
@@ -20203,6 +20561,7 @@ def _promote_suspicious(
     checklist: dict[str, Any] | None = None,
     joern_server=None,
     mechanical_findings: dict[str, list[dict[str, Any]]] | None = None,
+    max_workers: int = 1,
 ) -> None:
     """Post-loop pass: try sweep tools on suspicious items with hypotheses.
 
@@ -20210,319 +20569,87 @@ def _promote_suspicious(
     Uses the tool chain with fallback — if the first-choice tool is
     unavailable or errors, the next tool in the chain is tried.
     Mutates result.outcomes in place and adjusts counters.
-    No LLM calls — purely mechanical.
+    No LLM calls in the sweep itself — purely mechanical (deferred
+    on-demand synthesis is the one LLM-backed step and runs serially).
 
     Skips promotion when the LLM provided a specific counter-hypothesis
     explaining why the function should stay suspicious — syntactic tools
     cannot refute architectural constraints like threading models or
     caller-side bounds checks.
+
+    Items are independent (each writes only its own outcome slot), so
+    with ``max_workers > 1`` the per-item tool chains fan out across
+    threads; the on-demand synthesis step is collected and applied in
+    item order afterwards so its per-run cap binds deterministically.
     """
-    for i, outcome in enumerate(result.outcomes):
-        if outcome.status != "suspicious":
-            continue
+    candidates = [
+        (i, o) for i, o in enumerate(result.outcomes)
+        if o.status == "suspicious"
+    ]
+    if not candidates:
+        return
 
-        if outcome.body.startswith(
-            (
-                "[gate violation:",
-                "[sink-unreachability:",
-                "[guarded-sink:",
-                "[smt-infeasible:",
-                "[entry-unreachability:",
-                "[self-contradiction:",
-            )
-        ):
-            logger.debug(
-                "sweep skipped %s:%s — mechanical gate demotion is authoritative",
-                outcome.file,
-                outcome.function,
-            )
-            continue
+    workers = max(1, max_workers)
+    if joern_server is not None:
+        workers = min(workers, _JOERN_PASS_MAX_WORKERS)
 
-        review = outcome.review_result or {}
-        hypothesis = review.get("hypothesis") or outcome.hypothesis or ""
-        if not hypothesis:
-            continue
-
-        refuting_counter = _has_refuting_counter(outcome)
-
-        # Premise binding for the primary hypothesis, same rule as the
-        # secondary sweep below: a function-local confirm cannot
-        # adjudicate a counter that rests on a cross-function premise
-        # — it re-proves the lexical shape the reviewer already saw
-        # and weighed. Blocked promotions stay suspicious and park the
-        # premise on the reading list.
-        premise_h = _primary_hypothesis_entry(outcome, hypothesis)
-
-        gap = _find_gap_in_checklist(checklist or {}, outcome.file, outcome.function)
-        line_end = gap.get("line_end") if gap else None
-
-        source = _read_raw_source(
-            config.target_path,
-            outcome.file,
-            outcome.line,
-            line_end,
-        )
-
-        cwe = _effective_cwe(outcome, result.tier_counters)
-
-        if refuting_counter:
-            if _hypothesis_to_tool_chain(hypothesis, outcome.file, cwe=cwe):
-                logger.debug(
-                    "sweep skipped %s:%s — LLM counter-hypothesis present",
-                    outcome.file,
-                    outcome.function,
-                )
-                continue
-            # Empty-dispatch family: no static channel exists that
-            # could adjudicate this hypothesis OR its counter, so the
-            # only possible mechanical evidence is a synthesized
-            # checker (full dual controls + guarded-sink gate apply
-            # inside). Route the family to on-demand synthesis instead
-            # of letting it die unverified.
-            _synthesize_unmapped_suspicious(
+    if workers <= 1 or len(candidates) <= 1:
+        for i, outcome in candidates:
+            _promote_suspicious_one(
                 result, config, i, outcome,
-                _synthesis_hypothesis_for_cwe(outcome, cwe, hypothesis),
-                cwe, source,
+                sarif_cache=sarif_cache,
+                checklist=checklist,
                 joern_server=joern_server,
+                mechanical_findings=mechanical_findings,
             )
-            continue
+        return
 
-        mech_tool = _correlated_mech_detector_tool(
-            outcome, hypothesis, cwe, mechanical_findings,
-        )
-        if mech_tool:
-            _gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
-            if _gblk:
-                logger.info(
-                    "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
-                    outcome.file,
-                    outcome.function,
-                    mech_tool,
-                    _gblk,
-                )
-            elif _premise_blocks_confirm(premise_h, [mech_tool]):
-                _note_premise_blocked_validation(
-                    outcome, premise_h, [mech_tool],
-                    config, result.tier_counters,
-                    lane="sweep promotion", tier="primary_sweep",
-                )
-            else:
-                result.outcomes[i] = _promote_outcome(outcome, mech_tool)
-                result.sweep_promoted += 1
-                result.suspicious -= 1
-                result.findings += 1
-                logger.info(
-                    "sweep promoted %s:%s via %s (prep-phase detector hit)",
-                    outcome.file,
-                    outcome.function,
-                    mech_tool,
-                )
-                continue
+    synthesis_queue: list[tuple[int, ReviewOutcome, str, str, str]] = []
 
-        pf = run_prefilter(
-            target_path=config.target_path,
-            file_path=outcome.file,
-            function_name=outcome.function,
-            source=source,
-            line_start=outcome.line,
-            project_sinks=config.project_sinks,
-        )
-        if pf.hits:
-            if line_end:
-                pf.hits = [
-                    h
-                    for h in pf.hits
-                    if not h.line or outcome.line <= h.line <= line_end
-                ]
-            # Promotion needs evidence in the hypothesis's family; an
-            # unrelated pattern hit stays context and falls through to
-            # the hypothesis-specific tool chain.
-            correlated = [
-                h for h in pf.hits
-                if evidence_matches_hypothesis(
-                    family_for_rule(h.rule_id), hypothesis, cwe,
-                )
-            ]
-            if correlated:
-                tool = f"prefilter:{correlated[0].rule_id}"
-                # Same sink-guard veto as every other promotion lane
-                # (mech-detector above, critique, secondary sweep).
-                _pf_gblk = _guard_blocks_promotion(
-                    outcome.function, joern_server, result.tier_counters)
-                if _pf_gblk:
-                    logger.info(
-                        "sweep promotion blocked %s:%s via %s — "
-                        "sink-guard veto: %s",
-                        outcome.file,
-                        outcome.function,
-                        tool,
-                        _pf_gblk,
-                    )
-                elif _premise_blocks_confirm(premise_h, [tool]):
-                    _note_premise_blocked_validation(
-                        outcome, premise_h, [tool],
-                        config, result.tier_counters,
-                        lane="sweep promotion", tier="primary_sweep",
-                    )
-                else:
-                    result.outcomes[i] = _promote_outcome(outcome, tool)
-                    result.sweep_promoted += 1
-                    result.suspicious -= 1
-                    result.findings += 1
-                    logger.info(
-                        "sweep promoted %s:%s via %s",
-                        outcome.file,
-                        outcome.function,
-                        tool,
-                    )
-                    continue
-            if pf.hits and not correlated:
-                _record_uncorrelated_hits(outcome, pf.hits)
-                logger.info(
-                    "sweep promotion withheld %s:%s — prefilter hits (%s) "
-                    "uncorrelated with hypothesis",
-                    outcome.file,
-                    outcome.function,
-                    ",".join(h.rule_id for h in pf.hits[:3]),
-                )
-
-        chain = _hypothesis_to_tool_chain(hypothesis, outcome.file, cwe=cwe)
-        if not chain:
-            # No CWE dispatch entry and no cheap channel binds this
-            # hypothesis — the static dispatch table has nothing to
-            # test it with. On-demand Mode-2 synthesis generates a
-            # one-off, negatively-controlled rule instead of letting
-            # the hypothesis die untested.
-            _synthesize_unmapped_suspicious(
-                result, config, i, outcome,
-                _synthesis_hypothesis_for_cwe(outcome, cwe, hypothesis),
-                cwe, source,
-                joern_server=joern_server,
-            )
-            continue
-        confirmed = _run_tool_chain(
-            chain,
-            config=config,
-            file_path=outcome.file,
-            function_name=outcome.function,
-            source=source,
-            hypothesis=hypothesis,
-            line_start=outcome.line,
+    def _one(item: tuple[int, ReviewOutcome]) -> None:
+        i, outcome = item
+        _promote_suspicious_one(
+            result, config, i, outcome,
             sarif_cache=sarif_cache,
-            tier_counters=result.tier_counters,
+            checklist=checklist,
             joern_server=joern_server,
-            cwe=cwe,
-            # Exit only on a receipt THIS site would promote on alone:
-            # promotion-grade, not synth-excluded (an excluded synth
-            # receipt is dropped below and other channels must still
-            # get their turn), not premise-blocked.
-            early_exit_check=lambda c: (
-                _promotion_grade_receipt(c)
-                and not _synth_receipt_promotion_block_reason(
-                    c, outcome, cwe, config,
-                )
-                and not _premise_blocks_confirm(premise_h, [c])
-            ),
+            mechanical_findings=mechanical_findings,
+            synthesis_queue=synthesis_queue,
         )
 
-        if confirmed:
-            _synth_blocked = {
-                t: reason for t in confirmed
-                if (reason := _synth_receipt_promotion_block_reason(
-                    t, outcome, cwe, config,
-                ))
-            }
-            if _synth_blocked:
-                for _t, _reason in _synth_blocked.items():
-                    logger.info(
-                        "sweep promotion: synth receipt %s excluded for "
-                        "%s:%s — %s",
-                        _t, outcome.file, outcome.function, _reason,
-                    )
-                confirmed = [t for t in confirmed if t not in _synth_blocked]
-                if not confirmed:
-                    _increment_tier_dict(
-                        result.tier_counters, "adapter_aggregation",
-                        "inconclusive",
-                    )
-                    continue
-            if _premise_blocks_confirm(premise_h, confirmed):
-                _note_premise_blocked_validation(
-                    outcome, premise_h, list(confirmed),
-                    config, result.tier_counters,
-                    lane="sweep promotion", tier="primary_sweep",
-                )
-                continue
-            high_prec = [
-                t for t in confirmed
-                if not _is_detection_only(t)
-            ]
-            if not high_prec:
-                # Bayesian multi-channel aggregation: independent
-                # detection-role channels agreeing on the hypothesis
-                # can jointly cross the promote threshold even though
-                # no single receipt is perfect.
-                agg_channels, post_mean = _aggregate_channel_confirmations(
-                    confirmed,
-                )
-                if agg_channels and not _guard_blocks_promotion(
-                        outcome.function, joern_server,
-                        result.tier_counters):
-                    tool = "+".join(confirmed)
-                    promoted = _promote_outcome(outcome, tool)
-                    _record_aggregated_promotion(
-                        promoted, agg_channels, post_mean, confirmed,
-                    )
-                    result.outcomes[i] = promoted
-                    result.sweep_promoted += 1
-                    result.aggregation_promoted += 1
-                    result.suspicious -= 1
-                    result.findings += 1
-                    _increment_tier_dict(
-                        result.tier_counters, "adapter_aggregation",
-                        "confirmed",
-                    )
-                    logger.info(
-                        "sweep promoted %s:%s via aggregated channels %s "
-                        "(posterior %.2f > %.2f)",
-                        outcome.file, outcome.function,
-                        "+".join(agg_channels), post_mean,
-                        _AGGREGATION_CONFIRM_THRESHOLD,
-                    )
-                    continue
-                _increment_tier_dict(
-                    result.tier_counters, "adapter_aggregation",
-                    "inconclusive",
-                )
-                logger.info(
-                    "sweep promotion blocked %s:%s — only detection-role "
-                    "rules (%s)",
-                    outcome.file, outcome.function, "+".join(confirmed),
-                )
-                continue
-            _gblk = _guard_blocks_promotion(
-                outcome.function, joern_server, result.tier_counters)
-            if _gblk:
-                logger.info(
-                    "sweep promotion blocked %s:%s via %s — sink-guard veto: %s",
-                    outcome.file,
-                    outcome.function,
-                    "+".join(confirmed),
-                    _gblk,
-                )
-                continue
-            tool = "+".join(high_prec)
-            result.outcomes[i] = _promote_outcome(outcome, tool)
-            result.sweep_promoted += 1
-            result.suspicious -= 1
-            result.findings += 1
-            logger.info(
-                "sweep promoted %s:%s via %s",
-                outcome.file,
-                outcome.function,
-                tool,
-            )
+    from core.llm.concurrency import run_parallel
+
+    item_errors: list[tuple[int, Exception]] = []
+
+    def _on_error(item: tuple[int, ReviewOutcome], exc: Exception) -> None:
+        item_errors.append((item[0], exc))
+
+    logger.info(
+        "sweep promotion: %d suspicious outcomes (workers=%d)",
+        len(candidates), workers,
+    )
+    run_parallel(
+        candidates, _one,
+        max_workers=workers,
+        label="sweep-promote",
+        on_error=_on_error,
+    )
+    if item_errors:
+        # An unexpected per-item failure aborts the pass instead of
+        # silently dropping the item from the sweep — same abort
+        # posture as the serial loop, but conservatively COARSER on
+        # synthesis: the whole deferred synthesis queue is skipped,
+        # including items collected before the failure, whereas the
+        # serial loop would already have synthesized inline for the
+        # items it got through before raising.
+        item_errors.sort(key=lambda t: t[0])
+        raise item_errors[0][1]
+    for i, outcome, synth_hyp, cwe, source in sorted(
+            synthesis_queue, key=lambda t: t[0]):
+        _synthesize_unmapped_suspicious(
+            result, config, i, outcome, synth_hyp, cwe, source,
+            joern_server=joern_server,
+        )
 
 
 def _record_synthesis_refusal(
@@ -21316,6 +21443,15 @@ def _premise_blocks_confirm(
     return not any(_tool_sees_cross_function(t) for t in confirmed)
 
 
+# Reading-list updates are load-modify-save cycles on one JSON file
+# with writers all over the process (premise questions from parallel
+# review/post-loop passes, audit_bridge queueing, the study
+# consumer). ALL of them serialize on the shared lock owned by
+# core.concepts.reading_list — a writer-local lock here only covered
+# this module's premise-question writers and did nothing against the
+# other writers' concurrent cycles.
+
+
 def _queue_premise_study_question(
     config: OrchestratorConfig,
     outcome: ReviewOutcome,
@@ -21328,29 +21464,34 @@ def _queue_premise_study_question(
     try:
         import uuid
 
-        from core.concepts.reading_list import ReadingList, ReadingListItem
+        from core.concepts.reading_list import (
+            READING_LIST_WRITE_LOCK,
+            ReadingList,
+            ReadingListItem,
+        )
 
         counter = (h.get("counter") or "").strip()
         if not counter or config.out_dir is None:
             return
         rl_path = config.out_dir / "reading-list.json"
-        rl = ReadingList.load(rl_path)
         question = (
             f"Does this hold: {counter[:400]} "
             f"(refutation premise for {outcome.function})?"
         )
-        if any(it.question == question for it in rl.items):
-            return
-        rl.queue(ReadingListItem(
-            id=f"premise-{uuid.uuid4().hex[:12]}",
-            question=question,
-            source_command="/audit",
-            source_file=outcome.file,
-            source_function=outcome.function,
-            priority="high",
-            context=(h.get("mechanism") or "")[:200],
-        ))
-        rl.save(rl_path)
+        with READING_LIST_WRITE_LOCK:
+            rl = ReadingList.load(rl_path)
+            if any(it.question == question for it in rl.items):
+                return
+            rl.queue(ReadingListItem(
+                id=f"premise-{uuid.uuid4().hex[:12]}",
+                question=question,
+                source_command="/audit",
+                source_file=outcome.file,
+                source_function=outcome.function,
+                priority="high",
+                context=(h.get("mechanism") or "")[:200],
+            ))
+            rl.save(rl_path)
     except Exception:
         logger.debug("premise study-question queueing failed", exc_info=True)
 

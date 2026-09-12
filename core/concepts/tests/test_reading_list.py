@@ -392,3 +392,69 @@ class TestMultiConsumer:
 
         loaded = ReadingList.load(p)
         assert len(loaded.pending()) == 0
+
+
+# ------------------------------------------------------------------
+# Shared writer lock + merge-save
+# ------------------------------------------------------------------
+
+class TestSharedWriterLock:
+    """Every load-modify-save of one reading-list.json must serialize
+    on READING_LIST_WRITE_LOCK — a per-instance lock does nothing for
+    two writers holding separate instances of the same file."""
+
+    def test_save_merged_folds_in_concurrent_items(
+        self, tmp_path: Path,
+    ) -> None:
+        p = tmp_path / "reading-list.json"
+        mine = ReadingList.load(p)
+        mine.queue(_item("rl-mine", question="q-mine"))
+        # Another writer persisted while this instance was live: a
+        # plain save() would overwrite its item.
+        other = ReadingList.load(p)
+        other.queue(_item("rl-other", question="q-other"))
+        other.save(p)
+
+        mine.save_merged(p)
+        loaded = ReadingList.load(p)
+        assert {i.id for i in loaded.items} == {"rl-mine", "rl-other"}
+
+    def test_save_merged_own_mutations_win_for_known_ids(
+        self, tmp_path: Path,
+    ) -> None:
+        p = tmp_path / "reading-list.json"
+        seed = ReadingList.load(p)
+        seed.queue(_item("rl-x", question="q-x"))
+        seed.save(p)
+
+        mine = ReadingList.load(p)
+        mine.resolve("rl-x", "concept-1")
+        # A concurrent writer re-saved the still-unresolved rl-x plus
+        # its own new item after this instance loaded.
+        other = ReadingList.load(p)
+        other.queue(_item("rl-y", question="q-y"))
+        other.save(p)
+
+        mine.save_merged(p)
+        by_id = {i.id: i for i in ReadingList.load(p).items}
+        assert by_id["rl-x"].resolved
+        assert "rl-y" in by_id
+
+    def test_save_merged_runs_under_the_shared_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from core.concepts import reading_list as rl_mod
+
+        p = tmp_path / "reading-list.json"
+        held: list[bool] = []
+        real_save = ReadingList.save
+
+        def checking_save(self, path=None):
+            held.append(rl_mod.READING_LIST_WRITE_LOCK.locked())
+            return real_save(self, path)
+
+        monkeypatch.setattr(ReadingList, "save", checking_save)
+        rl = ReadingList.load(p)
+        rl.queue(_item("rl-l", question="q-l"))
+        rl.save_merged(p)
+        assert held == [True]

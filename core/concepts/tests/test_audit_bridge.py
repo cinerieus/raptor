@@ -567,6 +567,43 @@ class TestQueueReadingListItem:
             (tmp_path / "reading-list.json").read_text(encoding="utf-8"))
         assert data["items"][0]["priority"] == "critical"
 
+    def test_queue_writes_under_the_shared_lock(self, tmp_path, monkeypatch):
+        """The load-modify-save cycle must hold the reading-list
+        module's shared writer lock — a queue racing another
+        in-process writer's cycle silently drops items."""
+        from core.concepts import reading_list as rl_mod
+
+        held: list[bool] = []
+        real_save = rl_mod.ReadingList.save
+
+        def checking_save(self, path=None):
+            held.append(rl_mod.READING_LIST_WRITE_LOCK.locked())
+            return real_save(self, path)
+
+        monkeypatch.setattr(rl_mod.ReadingList, "save", checking_save)
+        assert queue_reading_list_item(tmp_path, question="locked?")
+        assert held == [True]
+
+    def test_concurrent_queuers_drop_nothing(self, tmp_path):
+        import threading
+
+        def queue_one(i: int) -> None:
+            queue_reading_list_item(tmp_path, question=f"q{i}")
+
+        threads = [
+            threading.Thread(target=queue_one, args=(i,))
+            for i in range(16)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        data = json.loads(
+            (tmp_path / "reading-list.json").read_text(encoding="utf-8"))
+        assert {i["question"] for i in data["items"]} == {
+            f"q{i}" for i in range(16)
+        }
+
 
 class TestInferRepoPath:
     def test_from_study_list_in_out_dir(self, tmp_path):

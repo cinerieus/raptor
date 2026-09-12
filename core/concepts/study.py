@@ -3898,7 +3898,10 @@ def run_study(
 
     pending = reading_list.pending()
     if pending:
-        reading_list.save(rl_path)
+        # Merge-save: this instance was loaded at pass start; a plain
+        # save would overwrite items other writers queued while the
+        # study ran.
+        reading_list.save_merged(rl_path)
         if on_progress:
             on_progress(
                 "reading_list",

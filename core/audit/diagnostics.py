@@ -7,6 +7,7 @@ and function-source reading.  No orchestrator state mutation.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, TYPE_CHECKING
 from pathlib import Path
 
@@ -64,6 +65,14 @@ def read_function_source(
     return text
 
 
+# Tier counters are incremented from parallel review workers and the
+# parallel post-loop passes; the read-modify-write below silently loses
+# increments without exclusion. One process-wide lock is enough — the
+# increments are tiny, so contention stays negligible even at the
+# 32-worker cap.
+_TIER_COUNTER_LOCK = threading.Lock()
+
+
 def increment_tier_dict(
     tier_counters: dict[str, Any],
     tier: str,
@@ -74,11 +83,12 @@ def increment_tier_dict(
 
     ``value`` accepts floats for the wall-clock fields
     (``wall_time_s`` / ``cpg_build_s``); count fields keep passing
-    ints.
+    ints.  Thread-safe.
     """
     if tier in tier_counters:
-        current = getattr(tier_counters[tier], field, 0)
-        setattr(tier_counters[tier], field, current + value)
+        with _TIER_COUNTER_LOCK:
+            current = getattr(tier_counters[tier], field, 0)
+            setattr(tier_counters[tier], field, current + value)
 
 
 def increment_tier(

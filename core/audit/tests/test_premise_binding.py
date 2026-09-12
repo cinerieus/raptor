@@ -496,3 +496,35 @@ class TestPromoteSuspiciousPremiseGate:
             self._suspicious("local"), tmp_path, monkeypatch,
         )
         assert result.outcomes[0].status == "finding"
+
+
+class TestPremiseQuestionWriterLock:
+    def test_premise_question_writes_under_the_shared_lock(
+        self, tmp_path, monkeypatch,
+    ):
+        """The premise-question writer is one of several in-process
+        reading-list writers (audit_bridge queueing, the study
+        consumer); its load-modify-save must hold the SHARED lock
+        owned by core.concepts.reading_list — a writer-local lock
+        cannot serialize against the other writers' cycles."""
+        from types import SimpleNamespace
+
+        from core.concepts import reading_list as rl_mod
+
+        held: list[bool] = []
+        real_save = rl_mod.ReadingList.save
+
+        def checking_save(self, path=None):
+            held.append(rl_mod.READING_LIST_WRITE_LOCK.locked())
+            return real_save(self, path)
+
+        monkeypatch.setattr(rl_mod.ReadingList, "save", checking_save)
+        config = SimpleNamespace(out_dir=Path(tmp_path))
+        outcome = SimpleNamespace(file="a.c", function="f")
+        orch._queue_premise_study_question(
+            config, outcome,
+            {"counter": "the caller validates the level", "mechanism": "m"},
+        )
+        assert held == [True]
+        rl = json.loads((tmp_path / "reading-list.json").read_text())
+        assert len(rl["items"]) == 1

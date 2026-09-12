@@ -23,6 +23,20 @@ from pathlib import Path
 
 from core.json import save_json
 
+# In-process writer lock for the reading list's load-modify-save
+# cycle. The file has MANY concurrent in-process writers (premise
+# study questions from parallel review/post-loop passes,
+# audit_bridge.queue_reading_list_item, the study consumer's
+# unresolvable marking and final save) and each is a read-modify-write
+# of the whole JSON file — unserialized, they silently drop each
+# other's items. Every writer must hold this lock across its whole
+# load→mutate→save cycle (the per-instance ``ReadingList._lock`` only
+# serializes mutations of ONE loaded instance, which does nothing for
+# two writers holding separate instances of the same file).
+# In-process only: the file belongs to one run's out_dir, and one
+# process owns a run; cross-process exclusion is out of scope.
+READING_LIST_WRITE_LOCK = threading.Lock()
+
 # ------------------------------------------------------------------
 # Priority
 # ------------------------------------------------------------------
@@ -168,6 +182,30 @@ class ReadingList:
             raise ValueError(msg)
         save_json(p, {"items": [asdict(i) for i in self.items]})
         self._path = p
+
+    def save_merged(self, path: Path | None = None) -> None:
+        """Save under ``READING_LIST_WRITE_LOCK``, folding in items
+        other writers persisted since this instance was loaded.
+
+        For long-lived instances (the study consumer holds one across
+        a whole study pass) a plain :meth:`save` would overwrite items
+        queued concurrently by other writers. Under the lock, re-load
+        the disk state and append any item whose id this instance has
+        not seen; this instance's own mutations (resolutions,
+        unresolvable marks) win for ids it knows.
+        """
+        with READING_LIST_WRITE_LOCK:
+            p = path or self._path
+            if p is None:
+                msg = "no path specified"
+                raise ValueError(msg)
+            disk = ReadingList.load(p)
+            with self._lock:
+                known = {i.id for i in self.items}
+                self.items.extend(
+                    i for i in disk.items if i.id not in known
+                )
+            self.save(p)
 
     @classmethod
     def load(cls, path: Path) -> ReadingList:

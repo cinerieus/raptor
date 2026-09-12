@@ -946,10 +946,13 @@ def queue_reading_list_item(
 
     Returns True if the item was queued (or already exists).
     """
-    from .reading_list import ReadingList, ReadingListItem
+    from .reading_list import (
+        READING_LIST_WRITE_LOCK,
+        ReadingList,
+        ReadingListItem,
+    )
 
     rl_path = out_dir / "reading-list.json"
-    rl = ReadingList.load(rl_path)
 
     item_id = f"audit-{source_file}:{source_function}:{question[:30]}"
     item_id = re.sub(r"[^a-zA-Z0-9_\-:.]", "_", item_id)
@@ -965,10 +968,15 @@ def queue_reading_list_item(
         context=context,
     )
 
-    rl.queue(item)
-    try:
-        rl.save(rl_path)
-        return True
-    except OSError as exc:
-        logger.debug("failed to save reading list: %s", exc)
-        return False
+    # Load-modify-save cycle: hold the shared writer lock end to end
+    # so concurrent writers (premise questions, the study consumer)
+    # cannot drop this item or lose theirs to this save.
+    with READING_LIST_WRITE_LOCK:
+        rl = ReadingList.load(rl_path)
+        rl.queue(item)
+        try:
+            rl.save(rl_path)
+            return True
+        except OSError as exc:
+            logger.debug("failed to save reading list: %s", exc)
+            return False
