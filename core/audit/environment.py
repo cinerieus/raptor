@@ -23,16 +23,33 @@ Two mechanisms share this module:
   bounded backoff, and the run either resumes (probe recovered —
   window reset) or concludes through the same stop rails as above.
 
-Scope: the guard's pause/probe machinery is driven ONLY by the main
+Scope: the guard's pause/probe machinery is driven by the main
 executor pass's pre-dispatch tick (both executor paths, including the
-serial glance-batch flush). The study consumer, deepen, error-retry,
-trivial-batch, and edge passes do not tick — they observe the guard
-solely through ``_check_budget``, so they STOP dispatching once a
-conclusion is reached but are never paused mid-pass; in particular
-the study consumer keeps dispatching during a main-pass pause,
-bounded by that pause's own conclusion. :func:`make_dispatch_gate`
-and :func:`make_executor_on_tick` are the adapters those passes use
-to adopt the tick at their own dispatch points.
+serial glance-batch flush) AND, via :func:`make_dispatch_gate` /
+:func:`make_executor_on_tick`, by the LLM-dispatching passes outside
+it: the trivial-batch pass, the re-review family (deepen,
+disagreement, iterative, joern-enriched, study-enriched), error
+retry, callee-contract propagation, the live-sink re-queue, the
+flow-trace review, concept-discovery rule compilation, the Phase 2
+security classification and chain evaluation, the edge-obligation
+review, dark verification, adversarial refutation, and the
+synthesis-second-pass / bypass executor runs. Each gates at its
+per-item dispatch point: a pause defers that pass's NEW dispatches
+(in-flight items finish and are harvested, as on the main pass) and
+a conclusion stops the pass with the same terminal booking budget
+exhaustion gets (``terminated_by="environment"`` plus the fault
+reason — either through the ``_check_budget`` rails or through the
+shared booking chokepoint they call). Sites that carry no result to
+book against (edge review runs during prep; concept discovery takes
+none) stop on the conclusion flag; the unconditional terminal sweep
+at the end of the run body guarantees the booking even when every
+later rails-polling pass is conditionally skipped.
+The study consumer thread still observes the guard only through
+``_check_budget`` (stops on conclusion, never paused mid-batch). The
+suspicious-promotion sweep is deliberately NOT gated: it dispatches
+no LLM calls — its per-item work is local mechanical tooling whose
+failures never feed the breaker — and it carries no per-item budget
+poll to mirror.
 
 Every bounded pause/probe wait is additionally clamped to the run
 deadline (when one is set) minus a drain margin, so a pause entered
@@ -508,15 +525,21 @@ def preflight_environment(
 class EnvironmentGuard:
     """Run-scoped environment sentinel driven from the executor tick.
 
-    ``tick()`` is called from the MAIN executor pass before every
-    dispatch (both executor paths, including the serial glance-batch
-    flush) on the dispatch loop's own thread, so blocking inside it
-    IS the pause mechanism: no new main-pass task is dispatched while
-    a tick is waiting, and in-flight reviews keep running on their
-    worker threads and are harvested when the tick returns. The other
-    dispatching passes (study consumer, deepen, error retry, trivial
-    batches, edges) do not tick — they stop only once the guard has
-    CONCLUDED, via ``_check_budget`` (see the module docstring).
+    ``tick()`` is called before every dispatch: by the MAIN executor
+    pass (both executor paths, including the serial glance-batch
+    flush) on the dispatch loop's own thread, and by the passes
+    outside it through :func:`make_dispatch_gate` at their per-item
+    dispatch points (see the module docstring for the full surface
+    list). Blocking inside the tick IS the pause mechanism: the
+    calling thread dispatches nothing while its tick waits, and
+    in-flight reviews keep running on their worker threads and are
+    harvested when the tick returns. Fan-out passes tick from several
+    worker threads concurrently — each pausing worker waits out the
+    pressure independently and no lock is held across a pause. The
+    per-interval rate limit applies only while HEALTHY: during an
+    active pause every concurrent ticker gates (joining the wait on
+    the resume floor), and any thread's conclusion releases the other
+    waiters promptly.
 
     When a pause exceeds its bounded wait — or would run past the run
     deadline minus the drain margin — the guard *concludes*: it never

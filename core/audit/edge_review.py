@@ -478,9 +478,31 @@ def run_edge_pass(
         with reserve_lock:
             inflight[0] -= 1
 
+    # Environment gate at the same per-edge dispatch point as the
+    # budget reserve: the tick pauses the worker on resource pressure
+    # (in-flight edge reviews finish and fold) and a conclusion stops
+    # the pass — concluded edges join the budget-skip lane, staying
+    # obligation gaps with an explicit count. This pass runs during
+    # prep, before an AuditResult exists, so the conclusion is not
+    # booked here — the main pass's rails poll right after books it.
+    from core.audit.environment import make_dispatch_gate
+    _env_gate = make_dispatch_gate(config)
+
     def _review_one(item: tuple[int, dict[str, Any]]) -> dict[str, Any]:
         """Review one tier-1 edge; returns summary deltas."""
         i, rec = item
+        # Sticky stop first: once the pass is stopped (reserve trip or
+        # an earlier environment conclusion) later items must not pay
+        # a fresh gate tick — a pause there could hold each remaining
+        # item for the full poll cadence on an already-stopped pass.
+        with reserve_lock:
+            already_stopped = stopped[0]
+        if already_stopped:
+            return {"skipped_budget": 1}
+        if _env_gate is not None and _env_gate():
+            with reserve_lock:
+                stopped[0] = True  # sticky, like the reserve trip
+            return {"skipped_budget": 1}
         if not _try_reserve():
             return {"skipped_budget": 1}
         try:

@@ -92,6 +92,10 @@ from .exploit_feedback import (
     load_feedback_state,
 )
 from .findings import write_findings
+from .environment import (
+    make_dispatch_gate as _make_dispatch_gate,
+    make_executor_on_tick as _make_executor_on_tick,
+)
 from .gaps import (
     compute_gaps,
     gap_for_site,
@@ -7305,6 +7309,11 @@ def _run_audit_body(
             wait,
         )
 
+        # Environment gate at the same worker-entry point as the rail
+        # check: the tick pauses batch dispatch on resource pressure
+        # and a conclusion surfaces through the rails poll after it.
+        _env_gate = _make_dispatch_gate(config)
+
         def _review_batch(batch):
             # Pre-execution rail check: every batch is submitted to the
             # pool up front, so a QUEUED batch must re-check the budget
@@ -7312,6 +7321,8 @@ def _run_audit_body(
             # batches: after the rails tripped, the pool kept executing
             # the entire pre-submitted backlog (observed live: many
             # hours of post-exhaustion reviews on one run).
+            if _env_gate is not None:
+                _env_gate()
             if _check_budget(config, start_time, result):
                 return None, batch
             return _review_items(
@@ -7509,6 +7520,9 @@ def _run_audit_body(
                 on_progress=on_progress,
                 collector=collector,
                 budget_check=lambda: _check_budget(config, start_time, result),
+                # Environment tick per dispatch — the executor's own
+                # post-tick budget_check re-check handles a conclusion.
+                on_tick=_make_executor_on_tick(config),
             )
     except Exception as exc:
         logger.warning(
@@ -7763,8 +7777,22 @@ def _run_audit_body(
                     )
                     ls_prepared.append((len(ls_prepared), target_gap, prior, ctx))
 
+                # Environment gate at worker entry: this pass
+                # pre-submits every future and its only stop check
+                # runs at harvest (cancellation cannot stop an item a
+                # worker already picked up), so without the gate a
+                # pause/conclusion never stops new live-sink
+                # dispatches. Same seam as the re-review driver.
+                _ls_env_gate = _make_dispatch_gate(config)
+
                 def _do_ls_review(item):
                     idx, _gap, _prior, ctx = item
+                    if _ls_env_gate is not None:
+                        _ls_env_gate()
+                        if _check_budget(config, start_time, result):
+                            # Never dispatched — dropped like a
+                            # cancelled future (idx, None, None).
+                            return (idx, None, None)
                     try:
                         outcome = review_fn(ctx, config)
                         return (idx, outcome, None)
@@ -7774,6 +7802,8 @@ def _run_audit_body(
                 if effective_ls_workers <= 1:
                     ls_raw = []
                     for item in ls_prepared:
+                        if _ls_env_gate is not None:
+                            _ls_env_gate()
                         if _check_budget(config, start_time, result):
                             break
                         ls_raw.append(_do_ls_review(item))
@@ -7799,6 +7829,8 @@ def _run_audit_body(
 
                 for idx, outcome, exc in sorted(ls_raw, key=lambda r: r[0]):
                     _, target_gap, prior, _ctx = ls_prepared[idx]
+                    if outcome is None and exc is None:
+                        continue  # gate-skipped — never dispatched
                     if exc is not None:
                         logger.warning(
                             "live-sink re-review failed for %s:%s: %s",
@@ -8448,6 +8480,9 @@ def _run_audit_body(
                 on_progress=on_progress,
                 collector=collector,
                 budget_check=lambda: _check_budget(config, start_time, result),
+                # Environment tick per dispatch — the executor's own
+                # post-tick budget_check re-check handles a conclusion.
+                on_tick=_make_executor_on_tick(config),
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -8520,6 +8555,17 @@ def _run_audit_body(
     # --- Phase 2: security impact classification (bug_first mode) ---
     if config.mode.has_security_phase:
         _run_phase2(result, config)
+
+    # --- Terminal environment-stop sweep ---
+    # The passes behind the flag-stop gates (edge review during prep,
+    # concept discovery) rely on a LATER rails poll to book their
+    # conclusion, but every later pass is conditional (candidates
+    # present, mode flags, opt-ins) — the compound short-circuits can
+    # skip every remaining _check_budget on a sparse run, shipping the
+    # fault as terminated_by="complete" (exit 0, lifecycle clean, no
+    # resume hint). One unconditional booking here closes that for
+    # every current AND later-added pass.
+    _environment_stop_booked(config, result)
 
     result.total_duration_s = time.monotonic() - start_time
 
@@ -9191,10 +9237,29 @@ def _run_concept_discovery(
     from core.concepts.model import Invariant
     from packages.checker_synthesis.languages import fallback_engine
 
+    # Environment gate per compilation dispatch (each is an LLM call,
+    # sometimes two with the engine fallback). This pass carries no
+    # result to book against — conclusion-flagged; the next rails
+    # poll (every later post-loop pass) books the stop.
+    _env_gate = _make_dispatch_gate(config)
+
     compiled_count = 0
     for entry in new_entries:
+        if _env_gate is not None and _env_gate():
+            logger.info(
+                "concept discovery stopped — environment guard "
+                "concluded (%d/%d invariants compiled; the rest stay "
+                "uncompiled model entries)",
+                compiled_count, len(new_entries),
+            )
+            break
         inv = Invariant(
             id=entry["id"],
+            # Discovered invariants are self-named: the id doubles as
+            # the concept binding. Omitting the (required) field
+            # TypeError'd the loop at its first entry — swallowed by
+            # the caller's broad handler, so no rule ever compiled.
+            concept=entry.get("concept") or entry["id"],
             statement=entry["statement"],
             negation=entry["negation"],
             description=entry.get("description", ""),
@@ -11173,7 +11238,15 @@ def _retry_error_outcomes(
     if not error_outcomes:
         return result
 
+    # Environment gate before each retry dispatch: the tick pauses on
+    # resource pressure and the rails poll right after it observes a
+    # conclusion — retrying error outcomes into the very environment
+    # that errored them is the pass this gate exists for.
+    _env_gate = _make_dispatch_gate(config)
+
     for outcome in error_outcomes:
+        if _env_gate is not None:
+            _env_gate()
         if _check_budget(config, start_time, result):
             break
 
@@ -11473,6 +11546,31 @@ def _persist_spend_floor(
         logger.debug("spend floor persist failed", exc_info=True)
 
 
+def _environment_stop_booked(
+    config: OrchestratorConfig,
+    result: OrchestratorResult,
+) -> bool:
+    """True when the run's environment guard has concluded, BOOKING
+    the terminal fields as it reports.
+
+    The single chokepoint for the environment stop: ``_check_budget``
+    routes its environment arm here, and every conclusion-flagged
+    dispatch gate uses it as its post-tick stop check. A conclusion
+    detected at a gate must never leave ``terminated_by ==
+    "complete"`` — the run would report success, the lifecycle would
+    close clean, and the resume hint would never print (dark
+    verification and Phase 2 run after the last full rails poll, so
+    nothing downstream would re-book it).
+    """
+    guard = getattr(config, "environment_guard_state", None)
+    if guard is None or not guard.concluded:
+        return False
+    result.terminated_by = "environment"
+    if not result.environment_fault:
+        result.environment_fault = guard.conclude_reason
+    return True
+
+
 def _check_budget(
     config: OrchestratorConfig,
     start_time: float,
@@ -11505,11 +11603,7 @@ def _check_budget(
     # retry, trivial batches) stops dispatching into a faulted
     # environment, and the run concludes through the normal
     # drain/report path with a resume hint.
-    _guard = getattr(config, "environment_guard_state", None)
-    if _guard is not None and _guard.concluded:
-        result.terminated_by = "environment"
-        if not result.environment_fault:
-            result.environment_fault = _guard.conclude_reason
+    if _environment_stop_booked(config, result):
         return True
     if (
         not skip_max_seconds
@@ -19203,12 +19297,16 @@ def _deepen_suspicious(
         except Exception as exc:  # noqa: BLE001
             return (idx, None, exc)
 
+    def _stop_rails() -> bool:
+        return _check_budget(config, start_time, result)
+
     raw_results = _collect_reviews_until_budget(
         prepared,
         _do_review,
-        lambda: _check_budget(config, start_time, result),
+        _stop_rails,
         effective_workers,
         phase_label="deepen",
+        dispatch_gate=_make_dispatch_gate(config, stop_check=_stop_rails),
     )
 
     # --- Process results (always in main thread) ---
@@ -19460,12 +19558,16 @@ def _re_review_disagreements(
         except Exception as exc:  # noqa: BLE001
             return (idx, None, exc)
 
+    def _stop_rails() -> bool:
+        return _check_budget(config, start_time, result)
+
     raw_results = _collect_reviews_until_budget(
         prepared,
         _do_review,
-        lambda: _check_budget(config, start_time, result),
+        _stop_rails,
         effective_workers,
         phase_label="disagreement re-review",
+        dispatch_gate=_make_dispatch_gate(config, stop_check=_stop_rails),
     )
 
     re_reviewed = 0
@@ -19693,12 +19795,18 @@ def _iterative_re_review(
             except Exception as review_exc:  # noqa: BLE001
                 return (idx, None, review_exc)
 
+        def _stop_rails() -> bool:
+            return _check_budget(config, start_time, result)
+
         raw_results = _collect_reviews_until_budget(
             prepared,
             _do_review,
-            lambda: _check_budget(config, start_time, result),
+            _stop_rails,
             effective_workers,
             phase_label="iterative re-review",
+            dispatch_gate=_make_dispatch_gate(
+                config, stop_check=_stop_rails,
+            ),
         )
 
         # --- Process results in main thread ---
@@ -19954,12 +20062,23 @@ def _run_phase2(result, config) -> None:
     )
     _p2_client = _P2Client(pinned_model=_p2_model) if _p2_model else _P2Client()
 
+    # Environment gate for both phase loops (classification and chain
+    # evaluation dispatch one LLM call per item). This phase runs
+    # after the last full rails poll, so the gate carries the booking
+    # stop check: a conclusion here must book the environment stop —
+    # nothing downstream would re-book it.
+    _env_gate = _make_dispatch_gate(
+        config,
+        stop_check=lambda: _environment_stop_booked(config, result),
+    )
+
     classifications = {}
     try:
         from .security_classifier import classify_security_impact
         classifications = classify_security_impact(
             result.outcomes, config.out_dir, _p2_client,
             model_name=_p2_model,
+            should_stop=_env_gate,
         )
         if classifications:
             logger.info(
@@ -19983,6 +20102,7 @@ def _run_phase2(result, config) -> None:
             )
             chains = evaluate_chains(
                 candidates, _p2_client, model_name=_p2_model,
+                should_stop=_env_gate,
             )
             if chains:
                 chains_path = config.out_dir / "bug-chains.json"
@@ -22406,10 +22526,24 @@ def _adversarial_refute_pass(
     # workers observe the tripped tracker at the same time.
     abort_state: dict[str, bool] = {}
     abort_lock = _threading.Lock()
+    # Environment gate at the same per-item dispatch point as the
+    # budget poll below: the tick may pause the worker (in-flight
+    # refutations finish; nothing new starts) and a conclusion stops
+    # the pass WITH the terminal booking budget exhaustion gets —
+    # the rails poll below is conditional on start_time, so without
+    # the booking stop check a conclusion here on a start_time-less
+    # call would leave terminated_by="complete" over a faulted run.
+    _env_gate = _make_dispatch_gate(
+        config,
+        stop_check=lambda: _environment_stop_booked(config, result),
+    )
 
     def _refute_one(item: tuple[int, ReviewOutcome, str]) -> None:
         i, outcome, hypothesis = item
         if stop.is_set() or auth_tracker.tripped:
+            return
+        if _env_gate is not None and _env_gate():
+            stop.set()
             return
         if start_time is not None and _check_budget(
             config, start_time, result,
@@ -24339,8 +24473,19 @@ def _review_flow_traces(
         f"{o.file}:{o.function}" for o in result.outcomes if o.status == "clean"
     }
 
+    # Environment gate per trace dispatch: the rails poll below is
+    # conditional on start_time, so the gate carries the booking stop
+    # check — a conclusion detected here must book the environment
+    # stop, not leave the run reporting complete.
+    _env_gate = _make_dispatch_gate(
+        config,
+        stop_check=lambda: _environment_stop_booked(config, result),
+    )
+
     traces_reviewed = 0
     for trace_file in trace_files[:10]:
+        if _env_gate is not None and _env_gate():
+            break
         if start_time and _check_budget(config, start_time, result):
             break
 
@@ -25111,12 +25256,16 @@ def _re_review_joern_enriched(
         except Exception as exc:  # noqa: BLE001
             return (idx, None, exc)
 
+    def _stop_rails() -> bool:
+        return _check_budget(config, start_time, result)
+
     raw_results = _collect_reviews_until_budget(
         prepared,
         _do_review,
-        lambda: _check_budget(config, start_time, result),
+        _stop_rails,
         effective_workers,
         phase_label="joern re-review",
+        dispatch_gate=_make_dispatch_gate(config, stop_check=_stop_rails),
     )
 
     # --- Process results in main thread ---
@@ -25316,11 +25465,18 @@ def _callee_contract_requeue(
         ctx["force_review"] = True
         prepared.append((len(prepared), gap, caller_outcome, ctx))
 
+    # Environment gate shares the per-item dispatch points with the
+    # rails polls below: tick (pause/probe) first, then the rails —
+    # a conclusion surfaces through _check_budget.
+    _env_gate = _make_dispatch_gate(config)
+
     def _do_review(item):
         idx, _gap, _prior, ctx = item
         # Poll the budget/SIGTERM rails before EACH dispatch — this
         # pass runs after the main loop, exactly where a budget-
         # stopped run would otherwise overrun the drain margin.
+        if _env_gate is not None:
+            _env_gate()
         if _check_budget(config, start_time, result):
             return (idx, None, None)
         try:
@@ -25332,6 +25488,8 @@ def _callee_contract_requeue(
     if effective_workers <= 1:
         raw_results = []
         for item in prepared:
+            if _env_gate is not None:
+                _env_gate()
             if _check_budget(config, start_time, result):
                 break
             raw_results.append(_do_review(item))
@@ -25529,12 +25687,16 @@ def _re_review_study_enriched(
         except Exception as exc:  # noqa: BLE001
             return (idx, None, exc)
 
+    def _stop_rails() -> bool:
+        return _check_budget(config, start_time, result)
+
     raw_results = _collect_reviews_until_budget(
         prepared,
         _do_review,
-        lambda: _check_budget(config, start_time, result),
+        _stop_rails,
         effective_workers,
         phase_label="study re-review",
+        dispatch_gate=_make_dispatch_gate(config, stop_check=_stop_rails),
     )
 
     # --- Process results in main thread ---
@@ -26027,6 +26189,20 @@ def _run_dark_verification(
 
     records: list[dict[str, Any]] = []
     workers = max(1, max_workers)
+    # Environment gate at the same per-probe dispatch point as the
+    # budget poll: a pause defers the next witness (in-flight probes
+    # finish, verdicts still fold) and a conclusion stops the pass
+    # WITH the terminal booking budget exhaustion gets — this pass
+    # runs after the last full rails poll, so an unbooked conclusion
+    # here would ship terminated_by="complete" (exit 0, lifecycle
+    # complete, no resume hint) over a faulted run. The rails poll
+    # below stays conditional on start_time (library callers pass
+    # none and keep the unpolled budget behaviour); the environment
+    # stop must not be, hence the booking stop check on the gate.
+    _env_gate = _make_dispatch_gate(
+        config,
+        stop_check=lambda: _environment_stop_booked(config, result),
+    )
 
     def _record_floor_refusal(
         outcome: ReviewOutcome, refusal: _FloorRefusal,
@@ -26062,12 +26238,14 @@ def _run_dark_verification(
             # SIGTERM drain nor max_seconds could stop it — budget
             # exhaustion just made every remaining iteration a failed
             # LLM call.
-            if start_time is not None and _check_budget(
-                config, start_time, result,
+            if (_env_gate is not None and _env_gate()) or (
+                start_time is not None and _check_budget(
+                    config, start_time, result,
+                )
             ):
                 logger.info(
-                    "dark verification stopped — budget/deadline exhausted "
-                    "(%d/%d outcomes verified)",
+                    "dark verification stopped — budget/deadline/"
+                    "environment exhausted (%d/%d outcomes verified)",
                     len(records), len(dark_outcomes),
                 )
                 break
@@ -26086,6 +26264,9 @@ def _run_dark_verification(
             # starts; probes already in flight finish and their
             # verdicts are still applied below.
             if stop.is_set():
+                return None
+            if _env_gate is not None and _env_gate():
+                stop.set()
                 return None
             if start_time is not None and _check_budget(
                 config, start_time, result,
@@ -26128,8 +26309,8 @@ def _run_dark_verification(
             records.append(_apply(outcome, verify_result))
         if stop.is_set():
             logger.info(
-                "dark verification stopped — budget/deadline exhausted "
-                "(%d/%d outcomes verified)",
+                "dark verification stopped — budget/deadline/"
+                "environment exhausted (%d/%d outcomes verified)",
                 len(records), len(dark_outcomes),
             )
 
