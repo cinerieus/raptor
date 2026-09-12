@@ -120,6 +120,44 @@ MACOS_BASE_MACH_SERVICES = (
 # profile.)
 MACOS_STRICT_MACH_SERVICES = MACOS_BASE_MACH_SERVICES
 
+# sysctl-read allowlist for the hardened profiles, WebKit-seeded
+# (Apple's WebProcess profile uses the same deny-with-sysctl-name-
+# allowlist pattern). Covers hardware identity (hw.*, machdep.cpu.*),
+# OS version (kern.os*, kern.version) and the handful of kern/user
+# names libSystem and common runtimes consult at startup.
+#
+# Deliberately ABSENT: kern.proc.* (full host process table) and
+# kern.procargs* (KERN_PROCARGS2 — reads the argv AND, for most
+# non-Apple targets, the ENVIRONMENT of any same-UID host process:
+# a same-UID credential-exfiltration channel, confirmed reachable on
+# current macOS), kern.hostname + kern.bootsessionuuid (host
+# fingerprint).
+#
+# An unexpectedly-needed sysctl fails LOUD, not silent: the kernel
+# logs `deny(1) sysctl-read <name>` with the exact sysctl name to the
+# unified log (visible via `log show`, and captured as a denial
+# record when the run uses audit mode), so extending this list is a
+# census read, never guesswork. sysctl-WRITE is deliberately NOT
+# denied — that breaks Apple's linker and ensurepip (probe-battery
+# evidence); non-root DAC bounds writes in practice.
+MACOS_SYSCTL_READ_PREFIX_ALLOWLIST = (
+    "hw.",
+    "machdep.cpu.",
+    "kern.os",
+)
+MACOS_SYSCTL_READ_NAME_ALLOWLIST = (
+    "kern.version",
+    "kern.argmax",
+    "kern.secure_kernel",
+    "kern.usrstack64",
+    "kern.tcsm_available",
+    "kern.tcsm_enable",
+    "kern.maxfilesperproc",
+    "sysctl.proc_cputype",
+    "kern.safeboot",
+    "user.posix2_version",
+)
+
 # POSIX shm names the hardened profiles may still OPEN READ-ONLY:
 # libSystem's preference fast-path reads cfprefs shared memory
 # (WebKit precedent — Apple scopes WebProcess shm the same way).
@@ -264,6 +302,7 @@ def build_profile(*,
           * (deny signal (target others))
           * (deny nvram*)
           * mach-lookup allowlist-deny (MACOS_BASE_MACH_SERVICES)
+          * sysctl-read allowlist-deny (MACOS_SYSCTL_READ_*)
           * POSIX-shm read/write + SysV IPC denies
           * (deny distributed-notification-post)
           * (deny appleevent-send)
@@ -556,6 +595,7 @@ def build_profile(*,
             parts.append("(allow signal (with report))")
             parts.append("(allow nvram* (with report))")
             parts.append("(allow mach-lookup (with report))")
+            parts.append("(allow sysctl-read (with report))")
             parts.append("(allow ipc-posix-shm* (with report))")
             parts.append("(allow ipc-sysv* (with report))")
             parts.append(
@@ -606,6 +646,22 @@ def build_profile(*,
             parts.append(
                 f"(deny mach-lookup (require-not (require-any "
                 f"{_mach_names})))"
+            )
+            # sysctl-read allowlist-deny: closes KERN_PROCARGS2 (the
+            # same-UID argv/environment credential channel) and
+            # kern.proc.* host process-table reads while keeping the
+            # hardware/OS-identity names runtimes actually consult.
+            # A denied sysctl surfaces its NAME in the kernel's
+            # violation log — see the allowlist commentary above.
+            _sysctl_clauses = " ".join(
+                [f"(sysctl-name-prefix {_quote_sbpl(p)})"
+                 for p in MACOS_SYSCTL_READ_PREFIX_ALLOWLIST]
+                + [f"(sysctl-name {_quote_sbpl(n)})"
+                   for n in MACOS_SYSCTL_READ_NAME_ALLOWLIST]
+            )
+            parts.append(
+                f"(deny sysctl-read (require-not (require-any "
+                f"{_sysctl_clauses})))"
             )
             # POSIX/SysV shared memory is NOT mediated by file-write*
             # (shm_open of another same-UID process's segment succeeds

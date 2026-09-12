@@ -601,6 +601,27 @@ def test_mach_allowlist_excludes_capability_daemons():
         assert f'(global-name "{kept}")' in p
 
 
+def test_full_profile_sysctl_read_allowlist_deny():
+    """sysctl-read allowlist-deny: KERN_PROCARGS2 reads the argv AND
+    (for most non-Apple targets) the environment of any same-UID host
+    process — a credential-exfiltration channel, confirmed reachable
+    on current macOS. The deny closes it while the allowlist keeps
+    the hardware/OS-identity names runtimes consult at startup."""
+    p = seatbelt.build_profile(seccomp_profile="full")
+    assert "(deny sysctl-read (require-not (require-any" in p
+    for prefix in seatbelt.MACOS_SYSCTL_READ_PREFIX_ALLOWLIST:
+        assert f'(sysctl-name-prefix "{prefix}")' in p
+    for name in seatbelt.MACOS_SYSCTL_READ_NAME_ALLOWLIST:
+        assert f'(sysctl-name "{name}")' in p
+    # The credential/fingerprint names must never be allowlisted.
+    for banned in ("kern.proc", "kern.procargs", "kern.hostname",
+                   "kern.bootsessionuuid"):
+        assert f'"{banned}"' not in p, banned
+    # sysctl-WRITE denial breaks Apple's linker + ensurepip — the
+    # hardening must stay read-side only.
+    assert "sysctl-write" not in p
+
+
 def test_full_profile_ipc_shm_denies():
     """POSIX shm is not mediated by file-write* — shm_open of another
     same-UID process's segment succeeded under every write-isolated
@@ -639,7 +660,7 @@ def test_hardening_absent_from_permissive_profiles():
         p = seatbelt.build_profile(**kwargs)
         for fragment in (
             "process-info", "iokit-open", "(deny signal", "nvram",
-            "mach-lookup", "ipc-posix-shm", "ipc-sysv",
+            "mach-lookup", "sysctl-read", "ipc-posix-shm", "ipc-sysv",
             "distributed-notification-post", "appleevent-send",
             "user-preference-write",
         ):
@@ -654,14 +675,14 @@ def test_hardening_audit_duals_report_every_denied_family():
                                output="/tmp/x")
     for family in (
         "process-info*", "iokit-open", "signal", "nvram*",
-        "mach-lookup", "ipc-posix-shm*", "ipc-sysv*",
+        "mach-lookup", "sysctl-read", "ipc-posix-shm*", "ipc-sysv*",
         "distributed-notification-post", "appleevent-send",
         "user-preference-write",
     ):
         assert f"(allow {family} (with report))" in p, family
     for fragment in (
         "(deny process-info", "(deny iokit-open", "(deny signal",
-        "(deny nvram", "(deny mach-lookup",
+        "(deny nvram", "(deny mach-lookup", "(deny sysctl-read",
         "(deny ipc-", "(deny distributed-notification-post",
         "(deny appleevent-send", "(deny user-preference-write",
     ):
@@ -685,6 +706,7 @@ def test_untrusted_default_shape_carries_full_hardening():
         "(deny signal (target others))",
         "(deny nvram*)",
         "(deny mach-lookup (require-not (require-any",
+        "(deny sysctl-read (require-not (require-any",
         "(deny ipc-posix-shm-write*)",
         "(deny ipc-sysv*)",
         "(deny distributed-notification-post)",
