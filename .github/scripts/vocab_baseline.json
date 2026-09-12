@@ -2235,6 +2235,16 @@
     "count": 15,
     "kind": "literal"
   },
+  "packages/llm_analysis/investigation.py::build_investigation_graph": {
+    "count": 15,
+    "kind": "literal",
+    "note": "evidence-pack artifact field names consumed by the attack-chain analysis pipeline, a fixed serialization schema rather than target name vocabulary"
+  },
+  "packages/llm_analysis/investigation.py::invariant_candidates_from_context_map": {
+    "count": 13,
+    "kind": "literal",
+    "note": "synthetic finding field names used to hand architecture-map invariants into the existing analysis pipeline, a fixed record schema rather than target name vocabulary"
+  },
   "packages/llm_analysis/orchestrator.py::orchestrate": {
     "count": 34,
     "kind": "literal"
@@ -2258,6 +2268,11 @@
   "packages/llm_analysis/prompts/schemas.py::FINDING_RESULT_SCHEMA": {
     "count": 20,
     "kind": "literal"
+  },
+  "packages/llm_analysis/tasks.py::get_schema": {
+    "count": 11,
+    "kind": "literal",
+    "note": "structured exploit-chain review response fields validated by ChainReviewTask, a fixed model-output schema rather than target name vocabulary"
   },
   "packages/sca/__init__.py::SCA_ALLOWED_HOSTS": {
     "count": 21,
