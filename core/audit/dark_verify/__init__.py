@@ -57,6 +57,7 @@ from ._harness import (
 from ._execute import (
     _classify_output,
     execute_witness,
+    floor_refusal_result,
     validate_spec,
 )
 from ._prompts import (
@@ -71,6 +72,7 @@ __all__ = [
     "build_witness_prompt",
     "execute_witness",
     "file_to_import_path",
+    "floor_refusal_result",
     "generate_c_harness",
     "generate_go_harness",
     "generate_java_harness",

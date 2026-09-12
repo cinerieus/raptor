@@ -24846,9 +24846,24 @@ def _run_dark_verification(
     if llm_client is None:
         return
 
+    from core.witness.sandbox_outcome import (
+        refusal_detail,
+        refusal_summary_line,
+    )
+
+    # ``except ()`` matches nothing: on a core.sandbox-less install the
+    # executors already fail closed (verdict="error", no execution) and
+    # a floor refusal cannot occur, so the arm simply never fires.
+    try:
+        from core.sandbox import SandboxFloorError
+        _floor_errors: tuple[type[BaseException], ...] = (SandboxFloorError,)
+    except ImportError:
+        _floor_errors = ()
+
     from .dark_verify import (
         build_witness_prompt,
         execute_witness,
+        floor_refusal_result,
         language_for_file,
         parse_witness_response,
     )
@@ -24941,9 +24956,37 @@ def _run_dark_verification(
         # The run dir keeps sandbox --audit evidence for the witness's
         # compile/run steps persistent — without it the tracer writes
         # into the step's throwaway scratch dir, swept on completion.
-        verify_result = execute_witness(
-            spec, config.target_path, audit_run_dir=config.out_dir,
-        )
+        try:
+            verify_result = execute_witness(
+                spec, config.target_path, audit_run_dir=config.out_dir,
+            )
+        except _floor_errors as exc:
+            # Record-then-raise: the containment floor could not be
+            # met, so the witness never executed — an environment
+            # verdict, not a hypothesis verdict (the outcome's status
+            # is left untouched). The refusal is host-deterministic
+            # (every later witness would refuse identically), so
+            # record the structured unverifiable-environment verdict
+            # on THIS finding, persist what the pass has, and
+            # re-raise: a misconfigured host fails the run loudly
+            # once instead of minting N benign-looking "error" rows.
+            # Only the typed floor subtype is mapped — any other
+            # SandboxSetupError keeps its BaseException flight path.
+            refusal = floor_refusal_result(spec, lang, exc)
+            records.append({
+                "file": outcome.file,
+                "function": outcome.function,
+                "status": outcome.status,
+                "evidence_tool": outcome.evidence_tool,
+                "verdict": refusal.verdict,
+                "match_detail": refusal.match_detail,
+            })
+            save_json(config.out_dir / "dark-verify-results.json", records)
+            logger.error(
+                "dark verification refused: %s",
+                refusal_summary_line(refusal_detail(exc) or {}),
+            )
+            raise
 
         prior = outcome.status
         if verify_result.verdict == "confirmed":

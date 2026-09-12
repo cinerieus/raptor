@@ -880,6 +880,39 @@ def _sandbox_refusal_result(
     )
 
 
+def floor_refusal_result(
+    spec: DarkWitnessSpec, language: str, exc: BaseException,
+) -> DarkVerifyResult:
+    """Error-shaped verdict for a containment-floor refusal.
+
+    The verification-seam mapping for ``SandboxFloorError``: the
+    sandbox refused to execute the witness at the tier the untrusted
+    contract requires, so the environment — not the hypothesis — is
+    the story. Vocabulary deliberately unchanged (``verdict="error"``,
+    no new enum value); the structured payload rides ``match_detail``
+    and ``oracle_reliability="unavailable"`` keeps the classifier's
+    authority honest. Raises ``TypeError`` when ``exc`` is not a
+    floor refusal — callers must only map the typed subtype
+    (record-then-raise: they re-raise ``exc`` after recording this).
+    """
+    from core.witness.sandbox_outcome import refusal_detail
+
+    detail = refusal_detail(exc)
+    if detail is None:
+        msg = f"not a containment-floor refusal: {type(exc).__name__}"
+        raise TypeError(msg)
+    remedies = detail["remedies"] or str(exc)
+    return DarkVerifyResult(
+        finding_key=spec.finding_key, verdict="error", language=language,
+        match_detail=(
+            f"{detail['status']}: containment floor {detail['floor']} "
+            f"required, {detail['achievable']} achievable — "
+            f"witness never executed; remedies: {remedies}"
+        ),
+        oracle_reliability="unavailable",
+    )
+
+
 _SYSTEM_TOOLCHAIN_PREFIXES = ("/usr/", "/lib/", "/lib64/", "/etc/", "/bin/", "/sbin/")
 
 
