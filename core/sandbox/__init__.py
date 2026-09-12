@@ -630,7 +630,11 @@ from .context import (
     sandbox,
     spawn_backend_available,
 )
-from .errors import SANDBOX_ENGAGE_EXIT_CODE, SandboxSetupError
+from .errors import (
+    SANDBOX_ENGAGE_EXIT_CODE,
+    SandboxFloorError,
+    SandboxSetupError,
+)
 from .landlock import _get_landlock_abi, check_landlock_available
 from .mount import _build_mount_script
 from .observe import _BLOCKED_PATTERNS, _check_blocked, _interpret_result, _path_within
@@ -651,6 +655,7 @@ from .probes import (
 from .profiles import _SANDBOX_KWARGS, DEFAULT_PROFILE, PROFILES
 from .python_paths import python_runtime_tool_paths
 from .seccomp import check_seccomp_available
+from .tiers import ContainmentTier
 
 _cache_lock = _state._cache_lock
 
@@ -690,8 +695,12 @@ __all__ = [
     "_SANDBOX_KWARGS",
     "ConnectTarget",
     "ObserveProfile",
+    # Containment-floor refusal (typed subtype with achievable/floor)
+    "SandboxFloorError",
     # Engagement-failure signal (fail-loud, never silently degrade)
     "SandboxSetupError",
+    # Containment-tier lattice (the floor contract's vocabulary)
+    "ContainmentTier",
     "_build_mount_script",
     "_cache_lock",
     "_check_blocked",

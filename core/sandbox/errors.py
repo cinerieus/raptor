@@ -7,6 +7,11 @@ without pulling in the sandbox machinery or risking a circular import.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation-only; no runtime import (tiers imports us)
+    from .tiers import ContainmentTier
+
 # Process exit code a RAPTOR CLI uses to signal "sandbox isolation could
 # not engage" across a process boundary. BaseException propagation only
 # works in-process; when a parent (e.g. /agentic, /scan) spawns scanner.py
@@ -88,3 +93,37 @@ class SandboxSetupError(BaseException):
         if instructions:
             msg = f"{reason}\n  → {instructions}"
         super().__init__(msg)
+
+
+class SandboxFloorError(SandboxSetupError):
+    """Containment floor could not be met — the target never executed.
+
+    Raised by the floor contract (``core/sandbox/tiers.py``) when the
+    tier a call requires (its *floor*) exceeds the tier the selected
+    lane delivers: at the entry-time check for statically-knowable
+    shapes, and at the hard pre-exec dispatch assertion for every
+    demotion route. Chained (``raise ... from``) to the original
+    backend failure when a demotion carried one, so the environmental
+    cause stays diagnosable.
+
+    Subclass, not fields-on-parent: existing ``except``/``isinstance``
+    sites and the ``SANDBOX_ENGAGE_EXIT_CODE`` cross-process convention
+    keep working unchanged; only code that NAMES the subtype gets the
+    structured fields. BaseException semantics are inherited — the
+    "never masquerade as 0 findings" guarantee is untouched.
+
+    ``achievable`` carries the tier the refused lane would have
+    delivered; ``floor`` carries the required tier. Both are
+    :class:`~core.sandbox.tiers.ContainmentTier` values (annotation
+    only — this module stays dependency-free; ``tiers.py`` imports us,
+    never the reverse at runtime).
+    """
+
+    def __init__(self, reason: str, instructions: str = "", *,
+                 achievable: "ContainmentTier",
+                 floor: "ContainmentTier",
+                 setup_category: str | None = None) -> None:
+        super().__init__(reason, instructions,
+                         setup_category=setup_category)
+        self.achievable = achievable
+        self.floor = floor
