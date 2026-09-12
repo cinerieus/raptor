@@ -163,6 +163,29 @@ _STUDY_LANGS_TEXT = (
     "C/C++, Python, Go, Java, JavaScript/TypeScript, and Rust"
 )
 
+# Claim shape for the folded spec-inference response field — mirrors
+# the standalone spec class's prompt contract (spec_inference):
+# anchors are verified verbatim against the function source, and
+# unanchored claims are demoted to the hint tier.
+_SPEC_CLAIM_ITEM = {
+    "type": "object",
+    "properties": {
+        "claim": {
+            "type": "string",
+            "description": "The contract condition, one sentence.",
+        },
+        "anchor": {
+            "type": "string",
+            "description": (
+                "Short snippet copied VERBATIM from the function "
+                "source that grounds the claim (code only, no "
+                "line-number gutter)."
+            ),
+        },
+    },
+    "required": ["claim"],
+}
+
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
@@ -483,6 +506,41 @@ REVIEW_SCHEMA = {
                         "docstring, test_assertions, annotation, "
                         "caller_usage, parameter_type."
                     ),
+                },
+            },
+        },
+        "inferred_spec": {
+            "type": "object",
+            "description": (
+                "ONLY when the prompt contains a 'Specification "
+                "inference' section: the behavioural contract you "
+                "inferred for this function while reviewing. Omit "
+                "entirely otherwise. Every claim carries an anchor "
+                "copied verbatim from the source — unanchored claims "
+                "are demoted to unverified hints."
+            ),
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": (
+                        "One sentence: what this function should do."
+                    ),
+                },
+                "preconditions": {
+                    "type": "array",
+                    "items": _SPEC_CLAIM_ITEM,
+                },
+                "postconditions": {
+                    "type": "array",
+                    "items": _SPEC_CLAIM_ITEM,
+                },
+                "invariants": {
+                    "type": "array",
+                    "items": _SPEC_CLAIM_ITEM,
+                },
+                "negative_specs": {
+                    "type": "array",
+                    "items": _SPEC_CLAIM_ITEM,
                 },
             },
         },

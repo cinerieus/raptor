@@ -2161,23 +2161,13 @@ def review_one_function(
             or gap.get("priority_score", 0) >= 0.7
         )
         if is_high_value and gap_with_source.get("source"):
-            try:
-                from .spec_inference import infer_spec_with_llm_sync
-
-                llm_spec = infer_spec_with_llm_sync(
-                    gap_with_source,
-                    mechanical_spec=ctx.get("inferred_spec"),
-                    client=getattr(config, "llm_budget_client", None),
-                )
-                if llm_spec and llm_spec.intent:
-                    ctx["inferred_spec"] = llm_spec
-            except Exception:
-                logger.debug(
-                    "llm spec_inference failed for %s:%s",
-                    gap.get("file"),
-                    gap.get("name"),
-                    exc_info=True,
-                )
+            # Folded spec inference: the contract-inference task rides
+            # the main review call (a spec_infer prompt section plus
+            # the response's inferred_spec field) instead of a
+            # separate serial LLM round-trip per high-value function.
+            # Same qualification gate as the standalone call this
+            # replaces; the merge-back happens right after the review.
+            ctx["spec_infer_request"] = True
 
     if typestate_models and ctx.get("source"):
         try:
@@ -2595,6 +2585,43 @@ def review_one_function(
         cache_write_tokens=getattr(outcome, "cache_write_tokens", 0),
         wall_time_s=time.monotonic() - review_start,
     )
+
+    # ── Folded spec inference: merge the response's contract ─────────
+    # Continuation calls (clean-check, refinement) rebuild their
+    # prompts from ctx, so the merged spec reaches them exactly as the
+    # standalone spec call's output used to.
+    if ctx.get("spec_infer_request"):
+        _spec_payload = (outcome.review_result or {}).get("inferred_spec")
+        if _spec_payload:
+            try:
+                from .spec_inference import folded_spec_from_review
+
+                _folded_spec = folded_spec_from_review(
+                    _spec_payload,
+                    ctx.get("inferred_spec"),
+                    function_name=gap.get("name", ""),
+                    file_path=gap.get("file", ""),
+                    # Anchor-grounding corpus = ctx["source"], the
+                    # EXACT slice the review prompt rendered (fenced
+                    # at priority 0, never shed or truncated —
+                    # format_context_for_prompt). gap["source"] can
+                    # differ from it (pre-defence text, binary
+                    # decompilation), so it is only the fallback when
+                    # no prompt rendering exists.
+                    source=(
+                        ctx.get("source")
+                        or gap_with_source.get("source", "")
+                    ),
+                )
+                if _folded_spec is not None and _folded_spec.intent:
+                    ctx["inferred_spec"] = _folded_spec
+            except Exception:
+                logger.debug(
+                    "folded spec merge failed for %s:%s",
+                    gap.get("file"),
+                    gap.get("name"),
+                    exc_info=True,
+                )
 
     # ── Post-review: structural prefilter override ────────────────────
     if (

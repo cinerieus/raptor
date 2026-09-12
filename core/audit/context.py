@@ -1001,6 +1001,17 @@ def format_context_for_prompt(
             spec_priority = 0 if has_mechanical else 1
             sections.append(PromptSection("inferred_spec", "\n" + spec_text, spec_priority))
 
+    if ctx.get("spec_infer_request"):
+        # Folded spec inference: the contract-inference task rides the
+        # review call for functions whose mechanical spec lacks intent
+        # (the response's inferred_spec field carries the result).
+        from .spec_inference import format_spec_infer_instruction
+        sections.append(PromptSection(
+            "spec_infer",
+            "\n" + format_spec_infer_instruction(ctx.get("inferred_spec")),
+            1,
+        ))
+
     if ctx.get("precondition_verifications"):
         from .spec_inference import format_precondition_verification
         pv_text = format_precondition_verification(ctx["precondition_verifications"])

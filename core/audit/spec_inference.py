@@ -949,6 +949,21 @@ def infer_spec_with_llm_sync(
     if not data:
         return spec
 
+    return merge_spec_response_data(
+        spec, data, source[:_SPEC_SOURCE_MAX_CHARS],
+    )
+
+
+def merge_spec_response_data(
+    spec: InferredSpec,
+    data: dict[str, Any],
+    source: str,
+) -> InferredSpec:
+    """Merge a parsed LLM spec payload into *spec* with source-grounding.
+
+    *source* must be the exact source slice the model was shown —
+    anchors are verified verbatim against it.
+    """
     if data.get("intent") and not spec.intent:
         # Intent is one sentence of descriptive prose consumed as
         # context only (same pass-through as _ground_summary's state
@@ -961,7 +976,7 @@ def infer_spec_with_llm_sync(
     # Source-grounding: only claims whose verbatim anchor verifies
     # against the exact source slice the model was shown enter the
     # spec lists; the rest are demoted to the hint tier (llm_hints).
-    norm_source = _normalise_anchor(source[:_SPEC_SOURCE_MAX_CHARS])
+    norm_source = _normalise_anchor(source)
     hint_count = 0
     for field_name, target in (
         ("preconditions", spec.preconditions),
@@ -983,7 +998,7 @@ def infer_spec_with_llm_sync(
     if hint_count:
         logger.debug(
             "spec_inference: %d unanchored claim(s) for %s:%s demoted "
-            "to hint tier", hint_count, file_path, function_name,
+            "to hint tier", hint_count, spec.file, spec.function,
         )
 
     if not any(s.signal == "llm_inference" for s in spec.sources):
@@ -992,6 +1007,113 @@ def infer_spec_with_llm_sync(
         ))
 
     return spec
+
+
+def _iter_spec_payload_texts(payload: dict[str, Any]):
+    """Yield every free-text string in a folded spec payload."""
+    yield str(payload.get("intent", "") or "")
+    for field_name in (
+        "preconditions", "postconditions", "invariants", "negative_specs",
+    ):
+        items = payload.get(field_name) or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict):
+                yield str(item.get("claim", "") or "")
+                yield str(item.get("anchor", "") or "")
+            else:
+                yield str(item)
+
+
+def folded_spec_from_review(
+    payload: Any,
+    mechanical_spec: InferredSpec | None,
+    *,
+    function_name: str,
+    file_path: str,
+    source: str,
+) -> InferredSpec | None:
+    """Build an :class:`InferredSpec` from the review response's folded
+    ``inferred_spec`` field.
+
+    Applies the same floors as the standalone path: strict
+    unknown-field rejection, envelope-echo discard, and verbatim
+    anchor grounding. *source* must be the exact slice the review
+    prompt rendered (``ctx["source"]`` — the line-numbered view); a
+    gutter-free single-line anchor still verifies against it as a
+    whitespace-normalised substring, while anchors spanning line
+    boundaries fail against the interleaved numbers and demote to
+    hints — conservative, never authority-granting. Returns None when
+    the payload is unusable.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return None
+    unknown = sorted(k for k in payload if k not in _SPEC_RESPONSE_KEYS)
+    if unknown:
+        logger.debug(
+            "folded spec payload rejected — unknown fields %s", unknown,
+        )
+        return None
+    if any("<untrusted-" in t for t in _iter_spec_payload_texts(payload)):
+        logger.warning(
+            "folded spec for %s:%s discarded — envelope structure "
+            "echoed in output (possible injection contamination)",
+            file_path, function_name,
+        )
+        return None
+    spec = mechanical_spec or InferredSpec(
+        function=function_name, file=file_path,
+    )
+    return merge_spec_response_data(spec, payload, source)
+
+
+def format_spec_infer_instruction(
+    mechanical_spec: InferredSpec | None = None,
+) -> str:
+    """Render the folded spec-inference instruction as a prompt section.
+
+    Injected into the review prompt for functions that previously got
+    a standalone spec-inference call (high-value, mechanical spec
+    without intent) — the review call carries the contract-inference
+    task and returns the result in the ``inferred_spec`` response
+    field.
+    """
+    lines = [
+        "### Specification inference",
+        "",
+        ("No behavioural contract could be derived mechanically for "
+         "this function. While reviewing, infer what it SHOULD do — "
+         "its contract with callers — and return it in the "
+         "`inferred_spec` response field: `intent` (one sentence) plus "
+         "`preconditions` / `postconditions` / `invariants` / "
+         "`negative_specs`."),
+        "",
+        ('Every claim MUST carry an "anchor": a short snippet copied '
+         "VERBATIM from the function source above (code only — do not "
+         "include the line-number gutter). Keep each anchor on a "
+         "SINGLE source line — the verifier cannot match a snippet "
+         "that spans lines. Anchors are verified mechanically against "
+         "the source; a claim whose anchor does not appear is demoted "
+         "to an unverified hint. Do not paraphrase anchors."),
+        "",
+        ("Focus on the safety-relevant parts of the contract: bounds "
+         "on sizes, null-safety, authentication requirements, "
+         "sanitization guarantees, resource lifecycle, crypto "
+         'properties. Omit trivial specs (e.g. "returns a value").'),
+    ]
+    if mechanical_spec is not None and (
+        mechanical_spec.preconditions
+        or mechanical_spec.postconditions
+        or mechanical_spec.invariants
+        or mechanical_spec.negative_specs
+    ):
+        lines.extend([
+            "",
+            ("A partial mechanically-derived specification appears "
+             "above — extend it rather than restating it."),
+        ])
+    return "\n".join(lines)
 
 
 def find_peer_functions(
