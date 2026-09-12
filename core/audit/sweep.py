@@ -2646,6 +2646,16 @@ def _extract_path_conditions(
 # runs come back as soon as an audit rotates through more (db, query)
 # pairs than fit; larger → more whole-DB result lists (potentially
 # many MB each on alert-dense targets) held for the memo's lifetime.
+# The floor is set by the warm-up (:func:`warm_codeql_memo`): a
+# multi-database run pre-fills one entry per (db, dispatchable query),
+# and the CWE dispatch menu spans ~19 query IDs across three language
+# packs — a 16-entry cap evicted warm-up entries before their
+# per-hypothesis lookups arrived, re-buying the analyze the warm-up
+# already paid for. 32 = the full menu plus ad-hoc per-run headroom.
+# Memory shape under warm-up: each database's pass parks its ENTIRE
+# per-rule slice set in the memo at once, so a multi-DB run holds
+# every database's slices simultaneously (bounded by this cap times
+# the largest whole-DB result list).
 #
 # Lifetime: the orchestrator passes a per-RUN memo owned by its
 # OrchestratorConfig (``codeql_memo``, default_factory — exactly like
@@ -2656,7 +2666,7 @@ def _extract_path_conditions(
 # callers and tests only; a process outliving one run must not reuse
 # it across runs, which the orchestrator wiring guarantees for the
 # audit path.
-_CODEQL_MEMO_MAX_ENTRIES = 16
+_CODEQL_MEMO_MAX_ENTRIES = 32
 _codeql_memo: BoundedMemo[list[dict[str, Any]]] = BoundedMemo(
     _CODEQL_MEMO_MAX_ENTRIES,
 )
@@ -2704,6 +2714,48 @@ def _codeql_query_stamp(query_path: Path) -> tuple | None:
         return ("sha256", hashlib.sha256(query_path.read_bytes()).hexdigest())
     except OSError:
         return None
+
+
+# codeql's IMB disk cache takes an EXCLUSIVE lock on the database:
+# two concurrent ``database analyze`` invocations against one DB fail
+# hard (OverlappingFileLockException, exit 2). Every in-process
+# analyze — the sweep's per-query path and the warm-up's whole-run
+# pass — must serialize per database, or a mid-loop dispatch that
+# misses the memo while the warm-up holds the DB turns into a tool
+# ERROR (losing the CodeQL channel exactly when the warm-up runs).
+# Per-process only: cross-process collisions are outside this run's
+# control, as before.
+_codeql_db_locks: dict[str, threading.Lock] = {}
+_codeql_db_locks_guard = threading.Lock()
+
+
+def _codeql_db_lock_for(db_path: str | Path) -> threading.Lock:
+    """The per-database analyze mutex (process-wide, keyed by resolved
+    path so every spelling of one DB shares a lock)."""
+    key = str(Path(db_path).resolve())
+    with _codeql_db_locks_guard:
+        return _codeql_db_locks.setdefault(key, threading.Lock())
+
+
+def _codeql_memo_key(db: Path, qpath: Path) -> tuple | None:
+    """Whole-DB memo key for one (database, query) pair, or None.
+
+    Single constructor shared by :func:`run_codeql_sweep` (lookup) and
+    :func:`warm_codeql_memo` (pre-fill) — the warm-up only pays off if
+    both sides build byte-identical keys. Either side unreadable →
+    None → the caller runs uncached.
+    """
+    db_stamp = _codeql_db_stamp(db)
+    query_stamp = _codeql_query_stamp(qpath)
+    if db_stamp is None or query_stamp is None:
+        return None
+    return (
+        "codeql",
+        str(db.resolve()),
+        db_stamp,
+        str(qpath.resolve()),
+        query_stamp,
+    )
 
 
 def run_codeql_sweep(
@@ -2773,42 +2825,49 @@ def run_codeql_sweep(
         def _analyze_whole_db() -> list[dict[str, Any]]:
             import tempfile
 
-            with tempfile.TemporaryDirectory(prefix="codeql-sweep-") as tmp:
-                sarif_out = Path(tmp) / "sweep.sarif"
-                result = analyze(
-                    Path(db),
-                    [str(qpath)],
-                    sarif_out,
-                    timeout_seconds=300,
-                )
-                # Canonical bounded SARIF loader (100 MiB cap): the
-                # query runs over an untrusted target, so a hostile
-                # source tree can inflate the result set — a raw
-                # read_text()+loads here buffered the whole artifact
-                # before any size check.
-                from core.sarif.parser import load_sarif
-                sarif = load_sarif(result.sarif_path)
-                if sarif is None:
-                    raise _UnreadableSarifError(str(sarif_out))
-                runs = sarif.get("runs") or [{}]
-                return runs[0].get("results") or []
+            with _codeql_db_lock_for(db):
+                # The warm-up may have pre-filled this key while we
+                # waited for the DB (its analyze holds the exclusive
+                # IMB lock). touch=False: get_or_compute re-stores
+                # this return as its own (identical) value and books
+                # the miss — a touching peek would double-count the
+                # same serve as hit AND miss.
+                _waited_value, _found = _memo.peek(memo_key, touch=False)
+                if _found:
+                    return _waited_value  # type: ignore[return-value]
+                with tempfile.TemporaryDirectory(
+                    prefix="codeql-sweep-",
+                ) as tmp:
+                    sarif_out = Path(tmp) / "sweep.sarif"
+                    result = analyze(
+                        Path(db),
+                        [str(qpath)],
+                        sarif_out,
+                        timeout_seconds=300,
+                    )
+                    return _load_whole_db_results(result, sarif_out)
+
+        def _load_whole_db_results(
+            result, sarif_out: Path,
+        ) -> list[dict[str, Any]]:
+            # Canonical bounded SARIF loader (100 MiB cap): the
+            # query runs over an untrusted target, so a hostile
+            # source tree can inflate the result set — a raw
+            # read_text()+loads here buffered the whole artifact
+            # before any size check.
+            from core.sarif.parser import load_sarif
+            sarif = load_sarif(result.sarif_path)
+            if sarif is None:
+                raise _UnreadableSarifError(str(sarif_out))
+            runs = sarif.get("runs") or [{}]
+            return runs[0].get("results") or []
 
         # Memo key embeds content stamps for BOTH sides; either side
         # unreadable → key None → analyze runs uncached. The forced
         # ``--rerun`` / ``--model-packs`` measurement legs
         # (run_baseline_and_augmented) call analyze() directly and
         # never pass through this sweep-layer memo.
-        db_stamp = _codeql_db_stamp(Path(db))
-        query_stamp = _codeql_query_stamp(qpath)
-        memo_key: tuple | None = None
-        if db_stamp is not None and query_stamp is not None:
-            memo_key = (
-                "codeql",
-                str(Path(db).resolve()),
-                db_stamp,
-                str(qpath.resolve()),
-                query_stamp,
-            )
+        memo_key = _codeql_memo_key(Path(db), qpath)
 
         _memo = memo if memo is not None else _codeql_memo
         try:
@@ -2874,6 +2933,210 @@ def run_codeql_sweep(
             outcome="error",
             errors=[str(exc)],
         )
+
+
+_CODEQL_QUERY_ID_RE = _re.compile(r"@id\s+(\S+)")
+
+
+def _codeql_query_id(qpath: Path) -> str | None:
+    """The query's declared ``@id`` (header metadata), or None.
+
+    SARIF results reference their producing query by rule ID, so a
+    query file without a parseable ``@id`` cannot have its slice of a
+    multi-query SARIF attributed back to it.
+    """
+    try:
+        text = qpath.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    m = _CODEQL_QUERY_ID_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _sandboxed_codeql_runner(tool_paths: list[str]):
+    """Build a subprocess.run-shaped adapter routing a background
+    codeql invocation through ``core.sandbox`` — network deny, safe
+    env, resource limits, and namespace-supervised reaping, the same
+    containment class the query_runner's codeql invocations use. A
+    bare ``subprocess.run`` on the warm-up thread would leave an
+    unsupervised JVM outside every deny/reap layer (orphaned for up
+    to its timeout at interpreter exit).
+
+    ``tool_paths`` (the resolved codeql install dir) is load-bearing:
+    the sandbox's child-env scrub drops home-rooted PATH entries, so
+    a bare ``codeql`` argv[0] from a home install resolves in the
+    caller environment but NOT inside the sandbox — setup refuses and
+    the warm-up silently no-ops (the query_runner's
+    ``_sandbox_tool_paths`` precedent)."""
+
+    def _runner(cmd: list[str], **kwargs: Any):
+        from core.sandbox import run as sandbox_run
+
+        # The sandbox applies get_safe_env() itself; forwarding
+        # analyze()'s env would fight its sanitisation.
+        kwargs.pop("env", None)
+        return sandbox_run(
+            cmd, block_network=True, caller_label="codeql-warmup",
+            tool_paths=tool_paths, **kwargs,
+        )
+
+    return _runner
+
+
+def warm_codeql_memo(
+    database_path: str,
+    query_paths: list[str],
+    memo: BoundedMemo[list[dict[str, Any]]] | None = None,
+    *,
+    timeout_seconds: int = 600,
+) -> dict[str, int] | None:
+    """One whole-run ``database analyze`` pre-filling the per-query memo.
+
+    ``analyze()`` accepts a query list but the sweep path only ever
+    passes one — N dispatchable queries therefore pay N CLI/JVM boots
+    over the run. This runs them all in ONE invocation up front and
+    splits the combined SARIF per rule into the exact per-(db, query)
+    memo entries :func:`run_codeql_sweep` looks up, so mid-loop
+    dispatches hit instead of re-analyzing.
+
+    Safety rules (a wrong pre-filled entry would serve a wrong verdict):
+
+    * Keys are built by the same :func:`_codeql_memo_key` constructor
+      the lookup side uses; stamps are taken BEFORE the analyze so a
+      database rewritten mid-warm-up produces a dead key (lookup miss →
+      fresh compute), never a stale serve.
+    * Queries whose ``@id`` cannot be parsed (or that share an ``@id``
+      with another query — ambiguous attribution) are dropped from the
+      warm-up entirely.
+    * Results whose rule ID matches no included query ("orphans") make
+      every EMPTY slice untrustworthy — the orphan could belong to the
+      query whose slice would read as a clean refutation — so orphans
+      suppress empty-slice pre-fill; matched slices stay safe to store.
+    * Pre-fill goes through ``memo.get_or_compute``, so a mid-loop
+      dispatch that already computed (or is computing) a key wins and
+      the warm-up's slice is discarded — never a double-store.
+
+    Returns ``{"queries": n, "prefilled": k, "orphan_rules": m}`` or
+    None when nothing could be warmed. Best-effort by contract: the
+    caller runs this on a background thread and every failure must
+    degrade to the pre-existing per-query path.
+    """
+    from core.dataflow.codeql_augmented_run import analyze
+
+    db = Path(database_path)
+    entries: list[tuple[Path, tuple, str]] = []  # (qpath, key, rule_id)
+    ids_seen: dict[str, int] = {}
+    for raw in query_paths:
+        qpath = Path(raw)
+        if not qpath.is_file():
+            continue
+        key = _codeql_memo_key(db, qpath)
+        rule_id = _codeql_query_id(qpath)
+        if key is None or rule_id is None:
+            continue
+        ids_seen[rule_id] = ids_seen.get(rule_id, 0) + 1
+        entries.append((qpath, key, rule_id))
+    entries = [e for e in entries if ids_seen[e[2]] == 1]
+    if not entries:
+        return None
+
+    _memo = memo if memo is not None else _codeql_memo
+    if all(
+        _memo.peek(key, touch=False)[1] for _q, key, _rid in entries
+    ):
+        # Every menu slice is already memoized (resumed segment,
+        # second warm-up call) — a whole-DB analyze would buy nothing.
+        return {
+            "queries": len(entries), "prefilled": 0, "orphan_rules": 0,
+            "skipped_memoized": True,
+        }
+
+    # Absolute CLI path, resolved in the CALLER environment: inside
+    # the sandbox the scrubbed child env has no home-rooted PATH
+    # entries, so a bare "codeql" from the standard home install is
+    # unresolvable there and sandbox setup refuses. Loud degrade — a
+    # debug-level no-op left the warm-up permanently vacuous on such
+    # hosts with nothing an operator would ever see.
+    import shutil
+
+    _cli = shutil.which("codeql")
+    if not _cli:
+        logger.warning(
+            "codeql warm-up: codeql CLI not found on PATH — warm-up "
+            "skipped (per-query dispatches degrade the same way)",
+        )
+        return None
+    codeql_cli = os.path.realpath(_cli)
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="codeql-warmup-") as tmp:
+        sarif_out = Path(tmp) / "warmup.sarif"
+        # Per-DB analyze mutex: codeql's IMB disk cache lock is
+        # exclusive — see _codeql_db_lock_for. A sweep miss arriving
+        # while this holds the DB waits there instead of dying on the
+        # lock, then re-peeks the memo this call is about to fill.
+        with _codeql_db_lock_for(db):
+            result = analyze(
+                db,
+                [str(q) for q, _key, _rid in entries],
+                sarif_out,
+                codeql_bin=codeql_cli,
+                timeout_seconds=timeout_seconds,
+                runner=_sandboxed_codeql_runner(
+                    [str(Path(codeql_cli).parent)],
+                ),
+            )
+        from core.sarif.parser import load_sarif
+        sarif = load_sarif(result.sarif_path)
+    if sarif is None:
+        return None
+    runs = sarif.get("runs") or [{}]
+    if len(runs) > 1:
+        # A multi-run SARIF has results outside runs[0]; slicing only
+        # the first run would pre-fill missing-result slices as clean
+        # refutations. Never observed from `database analyze`; refuse
+        # rather than guess.
+        logger.debug(
+            "codeql warm-up: SARIF carries %d runs — refusing to "
+            "pre-fill from a shape the splitter cannot attribute",
+            len(runs),
+        )
+        return None
+    all_results = runs[0].get("results") or []
+
+    known_ids = {rid for _q, _key, rid in entries}
+    by_rule: dict[str, list[dict[str, Any]]] = {}
+    orphan_rules: set[str] = set()
+    for r in all_results:
+        rid = r.get("ruleId") or ""
+        if rid in known_ids:
+            by_rule.setdefault(rid, []).append(r)
+        else:
+            orphan_rules.add(rid or "<missing ruleId>")
+
+    prefilled = 0
+    for _qpath, key, rule_id in entries:
+        slice_ = by_rule.get(rule_id)
+        if slice_ is None:
+            if orphan_rules:
+                continue
+            slice_ = []
+        _value, was_cached = _memo.get_or_compute(key, lambda s=slice_: s)
+        if not was_cached:
+            prefilled += 1
+
+    if orphan_rules:
+        logger.debug(
+            "codeql warm-up: %d unattributable rule id(s) — empty "
+            "slices not pre-filled: %s",
+            len(orphan_rules), sorted(orphan_rules),
+        )
+    return {
+        "queries": len(entries),
+        "prefilled": prefilled,
+        "orphan_rules": len(orphan_rules),
+    }
 
 
 def run_consistency_check(

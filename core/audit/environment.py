@@ -645,6 +645,23 @@ class EnvironmentGuard:
             reason,
         )
 
+    def holdoff(self) -> bool:
+        """True when best-effort BACKGROUND work should stand down:
+        the guard has concluded, or the watched filesystems are below
+        the pause floors right now. Read-only — never probes, waits,
+        or concludes; the dispatch tick owns those transitions. For
+        threads the tick cannot pause (it blocks only the dispatch
+        loop's own thread), checking this at step boundaries is the
+        pause-equivalent."""
+        if self.concluded:
+            return True
+        try:
+            return self._pressure(resume=False) is not None
+        except Exception:
+            # A failing measurement must not stop background work the
+            # watchdog itself would keep dispatching through.
+            return False
+
     # ── Executor tick ────────────────────────────────────────────────
 
     def tick(self) -> None:

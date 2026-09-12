@@ -881,6 +881,24 @@ def codeql_query_for_cwe(cwe: str) -> str | None:
     return entry.get("codeql")
 
 
+def codeql_query_ids_by_pack() -> dict[str, list[str]]:
+    """Every distinct CodeQL query spec the table can emit, by pack prefix.
+
+    Keys are the ID's leading path segment (``cpp`` / ``py`` / ``js``);
+    values are sorted and deduplicated. This is the static universe of
+    ``codeql`` chain entries the dispatch builders can produce — the
+    whole-run warm-up enumerates it per database language so one
+    analyze covers every query a hypothesis could later dispatch.
+    """
+    by_pack: dict[str, set[str]] = {}
+    for entry in CWE_TO_TOOL_DISPATCH.values():
+        query = entry.get("codeql")
+        if not query or "/" not in query:
+            continue
+        by_pack.setdefault(query.split("/", 1)[0], set()).add(query)
+    return {pack: sorted(ids) for pack, ids in sorted(by_pack.items())}
+
+
 def joern_applicable(cwe: str) -> bool:
     """Return whether Joern taint tracking is useful for a CWE."""
     entry = lookup(cwe)

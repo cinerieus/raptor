@@ -7049,6 +7049,14 @@ def _run_audit_body(
     shared.reviewed_before_joern = reviewed_before_joern
     shared.live_classifications = live_classifications
 
+    # --- Background CodeQL warm-up ---
+    # One whole-run ``database analyze`` per database over every
+    # statically dispatchable query, pre-filling config.codeql_memo so
+    # mid-loop run_codeql_sweep lookups hit. Dispatches that arrive
+    # before it finishes fall through to the existing per-query path
+    # unchanged (distinct memo keys never block each other).
+    _launch_codeql_warmup(config)
+
     # --- Executor config ---
     from .executor import ExecutorConfig, run_executor_sync
     from .task_graph import TaskGraph
@@ -10136,6 +10144,106 @@ def _merge_stale(
     except Exception:
         logger.warning("stale detection failed", exc_info=True)
     return gaps
+
+
+#: Database language (codeql_dbs canonical form) → the dispatch
+#: table's query-ID pack prefix. Languages without dispatch-table
+#: CodeQL entries have nothing to warm.
+_CODEQL_PACK_FOR_LANGUAGE = {
+    "cpp": "cpp",
+    "python": "py",
+    "javascript": "js",
+}
+
+
+def _launch_codeql_warmup(config: "OrchestratorConfig") -> None:
+    """Launch the background whole-run CodeQL warm-up (one thread).
+
+    Enumerates the dispatch table's query universe for each database's
+    language, filters it through the SAME dispatchability gate the
+    chain producers apply (``_codeql_query_file`` — run_codeql_sweep
+    only ever sees on-disk query files), and hands the survivors to
+    :func:`core.audit.sweep.warm_codeql_memo` — one database at a
+    time on a single daemon thread (concurrent analyze on ONE db dies
+    on codeql's exclusive disk-cache lock; concurrent JVMs across dbs
+    would stack heap against the review loop). Each analyze runs
+    through the sandboxed runner inside warm_codeql_memo, and the
+    run's environment guard is consulted before launch and between
+    databases — a concluded or pressure-holding guard stops the
+    warm-up (background work must not keep writing evaluator cache
+    through a disk-pressure pause). Daemon: a run that ends first must
+    not be held open by a warm-up nobody will consume. Best-effort
+    throughout; every failure degrades to the per-query dispatch path.
+    """
+    db_paths = list(getattr(config, "codeql_db_paths", None) or [])
+    if not db_paths:
+        return
+    guard = getattr(config, "environment_guard_state", None)
+    if guard is not None and guard.holdoff():
+        logger.debug("codeql warm-up: environment guard holdoff — "
+                     "not launching")
+        return
+    try:
+        from .codeql_dbs import database_language
+        from .cwe_dispatch import codeql_query_ids_by_pack
+    except ImportError:
+        return
+    ids_by_pack = codeql_query_ids_by_pack()
+    memo = getattr(config, "codeql_memo", None)
+
+    work: list[tuple[str, list[str]]] = []
+    for db in db_paths:
+        try:
+            lang = database_language(Path(db))
+        except Exception:
+            logger.debug("codeql warm-up: language probe failed for %s",
+                         db, exc_info=True)
+            continue
+        pack = _CODEQL_PACK_FOR_LANGUAGE.get(lang or "")
+        if pack is None:
+            continue
+        queries = [
+            q for q in ids_by_pack.get(pack, ()) if _codeql_query_file(q)
+        ]
+        if not queries:
+            logger.debug(
+                "codeql warm-up: no dispatchable on-disk query files "
+                "for %s (%s) — nothing to warm", db, lang,
+            )
+            continue
+        work.append((db, queries))
+
+    if not work:
+        return
+
+    def _warm_all() -> None:
+        from .sweep import warm_codeql_memo
+
+        for db, queries in work:
+            if guard is not None and guard.holdoff():
+                logger.debug(
+                    "codeql warm-up: environment guard holdoff — "
+                    "stopping before %s", db,
+                )
+                return
+            try:
+                stats = warm_codeql_memo(db, queries, memo)
+                if stats:
+                    logger.info(
+                        "codeql warm-up: %d/%d memo entries pre-filled "
+                        "for %s",
+                        stats.get("prefilled", 0),
+                        stats.get("queries", 0),
+                        db,
+                    )
+            except Exception:
+                logger.debug(
+                    "codeql warm-up failed for %s", db, exc_info=True,
+                )
+
+    _threading.Thread(
+        target=_warm_all, name="codeql-warmup", daemon=True,
+    ).start()
 
 
 def _codeql_db_for(config, file_path):

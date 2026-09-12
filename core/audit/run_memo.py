@@ -102,6 +102,32 @@ class BoundedMemo(Generic[T]):
                     self._key_locks.pop(evicted, None)
             return value, False
 
+    def peek(
+        self,
+        key: Hashable | None,
+        *,
+        touch: bool = True,
+    ) -> tuple[T | None, bool]:
+        """Non-computing lookup: ``(value, found)``.
+
+        Never blocks on a key lock and never executes — for callers
+        deciding whether a computation is still needed after waiting
+        on an external mutual-exclusion resource, or whether bulk work
+        can be skipped because every key is already present.
+        ``touch=True`` counts a found value as a hit and refreshes its
+        LRU position (a real serve); ``touch=False`` is a speculative
+        probe that must not perturb eviction order or the hit stats.
+        """
+        if key is None:
+            return None, False
+        with self._lock:
+            if key in self._values:
+                if touch:
+                    self._values.move_to_end(key)
+                    self.hit_count += 1
+                return self._values[key], True
+            return None, False
+
     def clear(self) -> None:
         with self._lock:
             self._values.clear()
