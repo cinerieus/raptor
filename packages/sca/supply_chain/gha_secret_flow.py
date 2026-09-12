@@ -792,6 +792,37 @@ def _strip_bash_full_line_comments(body: str) -> str:
     )
 
 
+_STDIN_PIPE_RE = re.compile(
+    r"""echo\s+["']?\$(?:\{\{[^}]*secrets\.[^}]*\}\}|"""
+    r"""[A-Z_]+)["']?\s*\|\s*\S+.*--password-stdin""",
+)
+
+
+def _all_refs_stdin_piped(
+    body: str, secret_env: dict[str, str],
+) -> bool:
+    """True when every secret-referencing line in the body uses the
+    ``echo "$SECRET" | <command> --password-stdin`` pattern — the
+    standard safe credential-passing form for docker login et al."""
+    lines = body.splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        has_secret_ref = False
+        for m in _SECRETS_LITERAL_RE.finditer(stripped):
+            has_secret_ref = True
+        for m in _ENV_SHELL_RE.finditer(stripped):
+            if m.group(1) in secret_env:
+                has_secret_ref = True
+        for m in _ENV_TEMPLATE_RE.finditer(stripped):
+            if m.group(1) in secret_env:
+                has_secret_ref = True
+        if has_secret_ref and not _STDIN_PIPE_RE.search(stripped):
+            return False
+    return True
+
+
 def _is_truthy_run_body_egress(body: str) -> bool:
     """Heuristic: a ``run:`` body that does network egress or a
     redirect-to-file pattern is a potential exfil sink.  Reuses the
@@ -982,7 +1013,17 @@ def _scan_one_step(
         # Otherwise downgrades to medium (informational — the upload
         # carries the secret only if some step writes it to disk
         # first, which we couldn't detect; reviewer triages).
-        if action_name == "actions/upload-artifact" and env_tainted:
+        # Skip when the ONLY tainted env var is GITHUB_TOKEN (an
+        # ephemeral, auto-scoped token that GitHub rotates per-job)
+        # and no env-to-disk write preceded the upload.
+        _only_github_token = (
+            set(job_ctx.secret_bound_env.keys()) == {"GITHUB_TOKEN"}
+        )
+        if (
+            action_name == "actions/upload-artifact"
+            and env_tainted
+            and not (_only_github_token and not job_ctx.env_written_to_disk)
+        ):
             if job_ctx.env_written_to_disk:
                 severity = "high"
                 detail_suffix = (
@@ -1112,6 +1153,16 @@ def _scan_one_step(
             if out_name in bound:
                 secret_refs_in_body.append(bound[out_name])
         unmasked_refs = secret_refs_in_body
+        # Safe-sink exemption: piping a secret into a command's
+        # stdin (e.g. ``echo "$TOKEN" | docker login --password-stdin``)
+        # is the RECOMMENDED credential-passing pattern — the secret
+        # never touches the filesystem or process argv. Suppress the
+        # finding when every secret reference in the body appears only
+        # inside a pipe-to-stdin pattern.
+        if unmasked_refs and _all_refs_stdin_piped(
+            ref_scan_body, job_ctx.secret_bound_env,
+        ):
+            unmasked_refs = []
         if unmasked_refs:
             severity = (
                 "high"

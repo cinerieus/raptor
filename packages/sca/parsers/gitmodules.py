@@ -10,9 +10,9 @@ working tree. The file itself is INI-format with sections like:
 
 The actual commit pin lives in the parent repo's git tree (as a
 "gitlink" tree entry), not in ``.gitmodules``. We resolve the SHA
-best-effort by reading ``.git/modules/<name>/HEAD``; if that
-isn't readable (no ``.git`` directory, fresh clone, file missing)
-the submodule is recorded with ``version=None``.
+best-effort: first by reading ``.git/modules/<name>/HEAD``, then
+by ``git ls-tree HEAD -- <path>`` (works in fresh clones where
+``.git/modules/`` is absent).
 
 ## OSV matching scope
 
@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -90,7 +91,9 @@ def parse(path: Path) -> list[Dependency]:
             # A malformed section without both url and path can't be
             # turned into a meaningful Dependency row.
             continue
-        sha = _resolve_submodule_sha(repo_root, section_name) if repo_root else None
+        sha = _resolve_submodule_sha(
+            repo_root, section_name, sm_path=sm_path,
+        ) if repo_root else None
         dep = _build_dep(
             section_name=section_name,
             url=url,
@@ -165,16 +168,18 @@ def _is_unsafe_path_fragment(fragment: str) -> bool:
 
 def _resolve_submodule_sha(
     repo_root: Path, submodule_name: str,
+    *, sm_path: str | None = None,
 ) -> str | None:
     """Best-effort resolution of the submodule's committed SHA.
 
-    For modern git layouts the submodule's own internal repo lives
-    at ``<repo_root>/.git/modules/<submodule_name>/`` and its
-    ``HEAD`` file (or ``ORIG_HEAD``) records the current commit.
+    Tries two strategies in order:
 
-    Submodule names sometimes contain characters git escapes; we
-    don't try to recover those exotic cases — read fails, return
-    None, the dep is recorded with version=None.
+    1. Read ``.git/modules/<name>/HEAD`` (fast, no subprocess).
+    2. Fall back to ``git ls-tree HEAD -- <path>`` which reads the
+       commit hash from the parent repo's tree object.  This works
+       in fresh clones and CI checkouts where ``git submodule
+       update`` has not yet been run (the ``.git/modules/`` tree is
+       absent but the tree entry still records the pinned SHA).
 
     Both the section-header name and the ``ref:`` indirection come
     straight from attacker-controllable file content — a hostile
@@ -192,6 +197,23 @@ def _resolve_submodule_sha(
             "(path traversal defence)", submodule_name,
         )
         return None
+    # Strategy 1: read from .git/modules/<name>/HEAD.
+    sha = _resolve_from_modules_dir(repo_root, submodule_name)
+    if sha is not None:
+        return sha
+    # Strategy 2: git ls-tree — the tree object always records the
+    # pinned commit even when the submodule hasn't been checked out.
+    if sm_path is not None:
+        sha = _resolve_from_ls_tree(repo_root, sm_path)
+        if sha is not None:
+            return sha
+    return None
+
+
+def _resolve_from_modules_dir(
+    repo_root: Path, submodule_name: str,
+) -> str | None:
+    """Read the submodule SHA from ``.git/modules/<name>/HEAD``."""
     modules_root = repo_root / ".git" / "modules"
     candidate = modules_root / submodule_name / "HEAD"
     if not _is_contained(candidate, modules_root):
@@ -223,6 +245,29 @@ def _resolve_submodule_sha(
             return None
         return _validate_sha(ref_contents.strip())
     return _validate_sha(contents)
+
+
+def _resolve_from_ls_tree(
+    repo_root: Path, sm_path: str,
+) -> str | None:
+    """Read the submodule SHA from the parent repo's tree object."""
+    if _is_unsafe_path_fragment(sm_path):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "ls-tree", "HEAD", "--", sm_path],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        # Output: "<mode> commit <sha>\t<path>"
+        parts = result.stdout.strip().split()
+        if len(parts) < 3 or parts[1] != "commit":
+            return None
+        return _validate_sha(parts[2])
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def _is_contained(candidate: Path, bound: Path) -> bool:

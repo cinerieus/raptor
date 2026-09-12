@@ -318,3 +318,60 @@ def test_lockfile_missing_not_silenced_by_bare_shrinkwrap_name(
         [_manifest(pkg, "npm")], [_dep("lodash", path=pkg)],
     )
     assert any(f.kind == "lockfile_missing" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# lockfile_missing silenced by -r include chain
+# ---------------------------------------------------------------------------
+
+
+def test_lockfile_missing_silenced_by_r_include_with_lockfile_sibling(
+    tmp_path: Path,
+) -> None:
+    """A ``requirements-dev.txt`` with ``-r ../common/requirements.txt``
+    should not fire lockfile_missing when ``common/`` has a lockfile
+    sibling."""
+    dev_dir = tmp_path / "app"
+    dev_dir.mkdir()
+    dev_reqs = dev_dir / "requirements-dev.txt"
+    dev_reqs.write_text("-r ../common/requirements.txt\npytest==8.0\n")
+
+    common_dir = tmp_path / "common"
+    common_dir.mkdir()
+    (common_dir / "requirements.txt").write_text("flask==3.0\n")
+    (common_dir / "requirements.lock").write_text("flask==3.0.0\n")
+
+    deps = [_dep("pytest", ecosystem="PyPI", path=dev_reqs)]
+    findings = check_lockfile_missing(
+        [_manifest(dev_reqs, "PyPI")],
+        deps,
+    )
+    assert all(f.kind != "lockfile_missing" for f in findings), (
+        "-r include target's sibling lockfile should suppress"
+    )
+
+
+def test_lockfile_missing_still_fires_when_r_include_target_has_no_lockfile(
+    tmp_path: Path,
+) -> None:
+    """The -r include chain should NOT suppress when the included
+    directory ALSO lacks a lockfile.  We use ``base.txt`` (not
+    ``requirements.txt``) as the include target so the target's own
+    filename doesn't accidentally satisfy the physical-file check
+    (``requirements.txt`` IS one of the expected lockfile names)."""
+    dev_dir = tmp_path / "app"
+    dev_dir.mkdir()
+    dev_reqs = dev_dir / "requirements-dev.txt"
+    dev_reqs.write_text("-r ../common/base.txt\npytest==8.0\n")
+
+    common_dir = tmp_path / "common"
+    common_dir.mkdir()
+    (common_dir / "base.txt").write_text("flask==3.0\n")
+    # No lockfile in common/.
+
+    deps = [_dep("pytest", ecosystem="PyPI", path=dev_reqs)]
+    findings = check_lockfile_missing(
+        [_manifest(dev_reqs, "PyPI")],
+        deps,
+    )
+    assert any(f.kind == "lockfile_missing" for f in findings)
