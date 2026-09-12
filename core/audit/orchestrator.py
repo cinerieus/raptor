@@ -32,7 +32,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TYPE_CHECKING
+from typing import Any, NoReturn, TYPE_CHECKING
 
 from core.analysis.reachability_gates import (
     GUARD_UNAVAILABLE,
@@ -8418,6 +8418,7 @@ def _run_audit_body(
                 ).content
             ),
             start_time=start_time,
+            max_workers=resolved_workers,
         )
     except Exception:
         logger.debug("dark verification pass failed", exc_info=True)
@@ -25549,6 +25550,7 @@ def _run_dark_verification(
     config: OrchestratorConfig,
     llm_client: Callable | None = None,
     start_time: float | None = None,
+    max_workers: int = 1,
 ) -> None:
     """Run dark-verification pass on eligible outcomes.
 
@@ -25559,6 +25561,21 @@ def _run_dark_verification(
 
     Confirmed witnesses upgrade the outcome to ``"finding"``; refuted
     witnesses downgrade to ``"clean"``.
+
+    Witness probes (one LLM call + one sandboxed execution each) are
+    independent per outcome, so with ``max_workers > 1`` they fan out
+    across threads; verdicts are folded back in item order on the
+    calling thread. A budget/SIGTERM trip stops further probe
+    dispatch — probes already in flight finish and their verdicts are
+    still applied. Single-worker and single-item runs keep the plain
+    serial loop.
+
+    A containment-floor refusal keeps its record-then-raise contract
+    in both worlds: the probe maps the typed refusal to a sentinel
+    (never touching shared state from a worker), further probe
+    dispatch stops, and the calling thread folds verdicts in item
+    order until the first refusal — which records exactly one
+    unverifiable-environment row, persists, and re-raises.
     """
     if llm_client is None:
         return
@@ -25619,26 +25636,27 @@ def _run_dark_verification(
     if not dark_outcomes:
         return
 
-    records: list[dict[str, Any]] = []
+    class _FloorRefusal:
+        """Typed carrier for a containment-floor refusal seen inside a
+        probe: the error-shaped verdict plus the original exception.
+        Folded record-then-raise on the calling thread, so the record
+        lands exactly once and deterministically even when probes
+        fanned out across workers."""
 
-    for outcome in dark_outcomes:
-        # Poll the budget/SIGTERM rails before each witness dispatch:
-        # this post-loop pass multiplies with the expanded CWE
-        # eligibility, and without polling neither the SIGTERM drain
-        # nor max_seconds could stop it — budget exhaustion just made
-        # every remaining iteration a failed LLM call.
-        if start_time is not None and _check_budget(
-            config, start_time, result,
-        ):
-            logger.info(
-                "dark verification stopped — budget/deadline exhausted "
-                "(%d/%d outcomes verified)",
-                len(records), len(dark_outcomes),
-            )
-            break
+        __slots__ = ("exc", "result")
+
+        def __init__(self, result: Any, exc: BaseException) -> None:
+            self.result = result
+            self.exc = exc
+
+    def _probe(outcome: ReviewOutcome) -> Any | None:
+        """Witness generation (LLM) + sandboxed execution for one
+        outcome. Writes no shared state — verdict application happens
+        in item order on the caller's thread — so probes can fan out
+        across workers."""
         lang = language_for_file(outcome.file)
         if lang is None:
-            continue
+            return None
 
         prompt, system = build_witness_prompt(
             file=outcome.file,
@@ -25657,8 +25675,8 @@ def _run_dark_verification(
             llm_response = llm_client(prompt, system)
         # Silent skip is intentional: an LLM failure just drops this
         # outcome from dark verification.
-        except Exception:  # noqa: BLE001, S112
-            continue
+        except Exception:  # noqa: BLE001
+            return None
 
         spec = parse_witness_response(
             llm_response,
@@ -25668,43 +25686,32 @@ def _run_dark_verification(
             language=lang,
         )
         if spec is None:
-            continue
+            return None
 
         # The run dir keeps sandbox --audit evidence for the witness's
         # compile/run steps persistent — without it the tracer writes
         # into the step's throwaway scratch dir, swept on completion.
         try:
-            verify_result = execute_witness(
+            return execute_witness(
                 spec, config.target_path, audit_run_dir=config.out_dir,
             )
         except _floor_errors as exc:
-            # Record-then-raise: the containment floor could not be
-            # met, so the witness never executed — an environment
-            # verdict, not a hypothesis verdict (the outcome's status
-            # is left untouched). The refusal is host-deterministic
-            # (every later witness would refuse identically), so
-            # record the structured unverifiable-environment verdict
-            # on THIS finding, persist what the pass has, and
-            # re-raise: a misconfigured host fails the run loudly
-            # once instead of minting N benign-looking "error" rows.
-            # Only the typed floor subtype is mapped — any other
-            # SandboxSetupError keeps its BaseException flight path.
-            refusal = floor_refusal_result(spec, lang, exc)
-            records.append({
-                "file": outcome.file,
-                "function": outcome.function,
-                "status": outcome.status,
-                "evidence_tool": outcome.evidence_tool,
-                "verdict": refusal.verdict,
-                "match_detail": refusal.match_detail,
-            })
-            save_json(config.out_dir / "dark-verify-results.json", records)
-            logger.error(
-                "dark verification refused: %s",
-                refusal_summary_line(refusal_detail(exc) or {}),
-            )
-            raise
+            # Containment floor unmet — the witness never executed, so
+            # this is an environment verdict, not a hypothesis verdict
+            # (the outcome's status is left untouched). The probe stays
+            # side-effect-free: map the refusal to its error-shaped
+            # verdict HERE (``spec`` and ``lang`` are only in scope
+            # here) and hand it back as a typed sentinel — the
+            # record-then-raise itself happens on the calling thread,
+            # in item order, exactly once, never from a worker. Only
+            # the typed floor subtype is mapped — any other
+            # SandboxSetupError keeps its BaseException flight path
+            # (record-free, aborts the pass in the serial AND parallel
+            # worlds: run_parallel catches only ``Exception``).
+            return _FloorRefusal(floor_refusal_result(spec, lang, exc), exc)
 
+    def _apply(outcome: ReviewOutcome, verify_result: Any) -> dict[str, Any]:
+        """Fold one witness verdict into the outcome + counters."""
         prior = outcome.status
         if verify_result.verdict == "confirmed":
             outcome.status = "finding"
@@ -25759,16 +25766,122 @@ def _run_dark_verification(
                     elif prior == "error":
                         result.errors -= 1
 
-        records.append(
-            {
-                "file": outcome.file,
-                "function": outcome.function,
-                "status": outcome.status,
-                "evidence_tool": outcome.evidence_tool,
-                "verdict": verify_result.verdict,
-                "match_detail": verify_result.match_detail,
-            }
+        return {
+            "file": outcome.file,
+            "function": outcome.function,
+            "status": outcome.status,
+            "evidence_tool": outcome.evidence_tool,
+            "verdict": verify_result.verdict,
+            "match_detail": verify_result.match_detail,
+        }
+
+    records: list[dict[str, Any]] = []
+    workers = max(1, max_workers)
+
+    def _record_floor_refusal(
+        outcome: ReviewOutcome, refusal: _FloorRefusal,
+    ) -> NoReturn:
+        # Record-then-raise: the refusal is host-deterministic (every
+        # later witness would refuse identically), so record the
+        # structured unverifiable-environment verdict on THIS finding,
+        # persist what the pass has, and re-raise — a misconfigured
+        # host fails the run loudly once instead of minting N
+        # benign-looking "error" rows. Runs on the calling thread
+        # only, so the record lands exactly once and in item order
+        # even when probes fanned out across workers.
+        records.append({
+            "file": outcome.file,
+            "function": outcome.function,
+            "status": outcome.status,
+            "evidence_tool": outcome.evidence_tool,
+            "verdict": refusal.result.verdict,
+            "match_detail": refusal.result.match_detail,
+        })
+        save_json(config.out_dir / "dark-verify-results.json", records)
+        logger.error(
+            "dark verification refused: %s",
+            refusal_summary_line(refusal_detail(refusal.exc) or {}),
         )
+        raise refusal.exc
+
+    if workers <= 1 or len(dark_outcomes) <= 1:
+        for outcome in dark_outcomes:
+            # Poll the budget/SIGTERM rails before each witness
+            # dispatch: this post-loop pass multiplies with the
+            # expanded CWE eligibility, and without polling neither the
+            # SIGTERM drain nor max_seconds could stop it — budget
+            # exhaustion just made every remaining iteration a failed
+            # LLM call.
+            if start_time is not None and _check_budget(
+                config, start_time, result,
+            ):
+                logger.info(
+                    "dark verification stopped — budget/deadline exhausted "
+                    "(%d/%d outcomes verified)",
+                    len(records), len(dark_outcomes),
+                )
+                break
+            verify_result = _probe(outcome)
+            if verify_result is None:
+                continue
+            if isinstance(verify_result, _FloorRefusal):
+                _record_floor_refusal(outcome, verify_result)
+            records.append(_apply(outcome, verify_result))
+    else:
+        stop = _threading.Event()
+
+        def _probe_gated(outcome: ReviewOutcome) -> Any | None:
+            # Same budget/SIGTERM poll as the serial loop, sticky
+            # across workers: once tripped, no further witness work
+            # starts; probes already in flight finish and their
+            # verdicts are still applied below.
+            if stop.is_set():
+                return None
+            if start_time is not None and _check_budget(
+                config, start_time, result,
+            ):
+                stop.set()
+                return None
+            probe_result = _probe(outcome)
+            if isinstance(probe_result, _FloorRefusal):
+                # Host-deterministic refusal: every later witness
+                # would refuse identically, so stop dispatching
+                # further probes. The sentinel itself is folded
+                # (record-then-raise) in item order below.
+                stop.set()
+            return probe_result
+
+        from core.llm.concurrency import run_parallel
+
+        # No on_error: an unexpected probe exception fills the slot
+        # with None and the pass CONTINUES past it — conservatively
+        # different from the serial loop, where the same exception
+        # would abort the whole pass. The failed outcome just keeps
+        # its prior verdict (identical to the probe's own None-return
+        # skip paths).
+        probe_results: list[Any | None] = run_parallel(
+            dark_outcomes, _probe_gated,
+            max_workers=workers,
+            label="dark-verify",
+        )
+        # Apply in item order on this thread — verdict folding stays
+        # deterministic and the counters need no locking.
+        for outcome, verify_result in zip(dark_outcomes, probe_results):
+            if verify_result is None:
+                continue
+            if isinstance(verify_result, _FloorRefusal):
+                # The first refusal in item order records and
+                # re-raises; verdicts already folded stay applied,
+                # later slots are discarded — matching the serial
+                # pass, which never probes past the refusal.
+                _record_floor_refusal(outcome, verify_result)
+            records.append(_apply(outcome, verify_result))
+        if stop.is_set():
+            logger.info(
+                "dark verification stopped — budget/deadline exhausted "
+                "(%d/%d outcomes verified)",
+                len(records), len(dark_outcomes),
+            )
 
     if records:
         results_path = config.out_dir / "dark-verify-results.json"
