@@ -2954,6 +2954,36 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # waiver must not banner/warn in the waiver's name).
             waiver_active=not untrusted_fresh_procfs_required(),
         )
+        def _note_floor_refusal(
+                exc: "_errors.SandboxFloorError",
+        ) -> "_errors.SandboxFloorError":
+            """Record a containment-floor refusal into the run-dir
+            evidence stream (best-effort) and return ``exc`` for the
+            caller to raise.
+
+            The verification seams (dark verification, exploit
+            execution, mitigation replay) map these refusals to the
+            ``unverifiable_environment`` status per finding; this is
+            the sandbox-side half — the refusal chokepoint writes a
+            typed record so ``sandbox-summary.json`` carries the
+            run-level count line even when no denial was ever
+            recorded. Never raises on its own; a refusal must not be
+            masked by evidence I/O."""
+            _refusal_dir = audit_run_dir or output
+            if _refusal_dir and not effectively_disabled:
+                try:
+                    from . import summary as _summary_refusal
+                    _summary_refusal.record_floor_refusal(
+                        Path(_refusal_dir),
+                        floor=_tiers.tier_label(exc.floor),
+                        achievable=_tiers.tier_label(exc.achievable),
+                        reason=str(exc),
+                        remedies=exc.instructions or "",
+                    )
+                except Exception:  # noqa: BLE001 — evidence recording is best-effort
+                    logger.debug("floor-refusal record failed",
+                                 exc_info=True)
+            return exc
 
         if (_floor_source == _tiers.FLOOR_SOURCE_ENV
                 and sys.platform == "linux"
@@ -2980,14 +3010,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 "host-pid /proc visible, which is the exact posture "
                 "the requirement refuses."
             )
-            raise _errors.SandboxFloorError(
+            raise _note_floor_refusal(_errors.SandboxFloorError(
                 msg, "",
                 # skip_pid_ns keeps the HOST procfs, which the
                 # redefined ns-only tier explicitly negates — the
                 # honest achievable claim is the policy-layer tier.
                 achievable=_tiers.ContainmentTier.LANDLOCK_ONLY,
                 floor=_floor,
-            )
+            ))
         from ._spawn import mount_ns_available as _mount_ns_avail
 
         # ---- Landlock-absent tolerance (the ported ns-only mode) ----
@@ -3114,11 +3144,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             else:
                 _intended = _tiers.ContainmentTier.LANDLOCK_ONLY
             if _intended < _floor:
-                raise _entry_floor_refusal(
+                raise _note_floor_refusal(_entry_floor_refusal(
                     _intended, _floor,
                     environmental=not use_sandbox,
                     skip_mount_ns=_skip_mount_ns,
-                )
+                ))
 
         def _floor_remedy(extra: str = "") -> str:
             """Remedy sentence for a floor refusal: the situation-
@@ -3170,12 +3200,19 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             delivered = _LANE_TIERS[lane]
             if cap is not None and cap < delivered:
                 delivered = cap
-            _tiers.assert_floor(
-                delivered, _floor, lane=lane, cause=cause,
-                detail=detail,
-                remedy=remedy or _floor_remedy(),
-                setup_category=setup_category,
-            )
+            try:
+                _tiers.assert_floor(
+                    delivered, _floor, lane=lane, cause=cause,
+                    detail=detail,
+                    remedy=remedy or _floor_remedy(),
+                    setup_category=setup_category,
+                )
+            except _errors.SandboxFloorError as _floor_exc:
+                # Refusal chokepoint: record the run-dir evidence the
+                # verification seams' summary line counts, then let
+                # the typed refusal propagate unchanged.
+                _note_floor_refusal(_floor_exc)
+                raise
             if (_landlock_tolerated
                     and _floor_source != _tiers.FLOOR_SOURCE_ENV
                     and delivered <= _tiers.ContainmentTier.NS_NOMOUNT
@@ -3256,7 +3293,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             and sys.platform == "linux" and not effectively_disabled)
         if _netns_inherited_drop:
             if _floor >= _tiers.ContainmentTier.MOUNTLESS_NS:
-                raise _errors.SandboxFloorError(
+                raise _note_floor_refusal(_errors.SandboxFloorError(
                     "sandbox run(): inherit_netns=True drops the "
                     "network namespace from a block_network run — "
                     "the untrusted contract's network block cannot "
@@ -3266,7 +3303,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     "trusted context.",
                     achievable=_tiers.ContainmentTier.NS_NOMOUNT,
                     floor=_floor,
-                )
+                ))
             if state.warn_once("_inherit_netns_block_warned"):
                 logger.warning(
                     "sandbox: inherit_netns=True keeps the caller's "
@@ -5192,18 +5229,23 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 if (_mx_cap is not None
                                         and _mx_cap < _mx_declared):
                                     _mx_declared = _mx_cap
-                                _tiers.assert_floor(
-                                    _mx_declared, _floor,
-                                    lane=("mountless namespace "
-                                          "backend"),
-                                    cause=_mx_cause,
-                                    detail=(f"{_setup_status[0]}: "
-                                            f"{_setup_status[1]}"),
-                                    remedy=_floor_remedy(
-                                        "fix the bind-tree/"
-                                        "tool-path failure."),
-                                    setup_category=_setup_status[0],
-                                )
+                                try:
+                                    _tiers.assert_floor(
+                                        _mx_declared, _floor,
+                                        lane=("mountless namespace "
+                                              "backend"),
+                                        cause=_mx_cause,
+                                        detail=(f"{_setup_status[0]}: "
+                                                f"{_setup_status[1]}"),
+                                        remedy=_floor_remedy(
+                                            "fix the bind-tree/"
+                                            "tool-path failure."),
+                                        setup_category=_setup_status[0],
+                                    )
+                                except _errors.SandboxFloorError as \
+                                        _floor_exc:
+                                    _note_floor_refusal(_floor_exc)
+                                    raise
                                 if (_grant_ids_before is not None
                                         and _grant_path_identities()
                                         != _grant_ids_before):
@@ -5616,12 +5658,16 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 if (_plain_lane_cap is not None
                         and _plain_lane_cap < _fallback_delivered):
                     _fallback_delivered = _plain_lane_cap
-                _tiers.assert_floor(
-                    _fallback_delivered, _floor, lane=_fallback_lane,
-                    cause=_spawn_ladder_err,
-                    detail=_fallback_floor_detail,
-                    remedy=_fallback_floor_remedy,
-                )
+                try:
+                    _tiers.assert_floor(
+                        _fallback_delivered, _floor, lane=_fallback_lane,
+                        cause=_spawn_ladder_err,
+                        detail=_fallback_floor_detail,
+                        remedy=_fallback_floor_remedy,
+                    )
+                except _errors.SandboxFloorError as _floor_exc:
+                    _note_floor_refusal(_floor_exc)
+                    raise
                 # Per-call network-block recheck. Construction
                 # resolved block_network to the NAMESPACE tier for
                 # this call (need_unshare), so the construction-time

@@ -563,7 +563,9 @@ def summary_fields(total_denials: int, denials_sha256: str, run: str,
                    corrupt_lines: int = 0,
                    inode_mismatch: bool = False,
                    planted_object: str = "",
-                   posture: "Mapping | None" = None) -> dict:
+                   posture: "Mapping | None" = None,
+                   floor_refusals: int = 0,
+                   floor_refusals_sha256: str = "") -> dict:
     """MAC fields for sandbox-summary.json: the denial payload is
     covered by its content hash, so a planted or edited summary fails
     verification even when the headline counters are preserved.
@@ -597,4 +599,13 @@ def summary_fields(total_denials: int, denials_sha256: str, run: str,
     if posture is not None:
         fields["posture_mac_key_hidden"] = bool(
             posture.get("mac_key_hidden"))
+    # Containment-floor refusal binding (join only when refusals were
+    # recorded, so tokens minted before the field existed keep
+    # verifying — same posture as the tamper flags above). Binding
+    # the count + content hash means a target that can edit the
+    # summary cannot strip or forge the "environment could not
+    # execute this payload" record without breaking the token.
+    if floor_refusals:
+        fields["floor_refusals"] = int(floor_refusals)
+        fields["floor_refusals_sha256"] = str(floor_refusals_sha256)
     return fields

@@ -529,6 +529,98 @@ def get_run_posture(run_dir: Path) -> dict[str, bool] | None:
         return dict(cur) if cur is not None else None
 
 
+# Evidence-record type for containment-floor refusals (the sandbox
+# floor contract refusing to execute a payload at all). Split OUT of
+# the denial buckets by summarize_and_write: a refusal is neither a
+# runtime enforcement event nor a target behaviour — it means the
+# TARGET NEVER EXECUTED.
+FLOOR_REFUSAL_TYPE = "floor_refusal"
+# Canonical status string for "the environment cannot execute the
+# payload at the required containment tier". MUST equal
+# core.witness.sandbox_outcome.UNVERIFIABLE_ENVIRONMENT (duplicated
+# as a literal because core.sandbox never imports core.witness —
+# the dependency arrow points the other way; a cross-module test
+# pins the equality).
+UNVERIFIABLE_ENVIRONMENT_STATUS = "unverifiable_environment"
+
+# Parent-side memory of the floor refusals THIS process recorded,
+# keyed by resolved run-dir path (same trust model as
+# _degraded_markers: the JSONL lives under the run dir, which other
+# sandbox calls' targets can write to — the parent KNOWS the refusal
+# happened, so summary generation re-asserts from this record when
+# the on-disk evidence lost it). Guarded by _lock.
+_floor_refusals: dict[str, list] = {}
+
+# Bound on stored/emitted refusal text fields — refusal reasons embed
+# operator-facing remedy prose, not unbounded target bytes, but the
+# evidence line must stay well under the PIPE_BUF append-atomicity
+# threshold shared with record_denial.
+_REFUSAL_FIELD_MAX = 1024
+
+
+def record_floor_refusal(run_dir: Path, *, floor: str, achievable: str,
+                         reason: str, remedies: str = "") -> None:
+    """Record a containment-floor refusal into the run-dir evidence
+    stream (and parent memory).
+
+    Called from the refusal chokepoint in ``context.run()`` whenever a
+    ``SandboxFloorError`` is about to propagate and the call has a
+    run/audit directory to attribute evidence to. Consumed by
+    :func:`summarize_and_write`, which surfaces the count line the
+    verification seam's ``unverifiable_environment`` mapping expects
+    (``sandbox-summary.json`` → ``total_floor_refusals`` +
+    ``floor_refusal_line``). Best-effort — never raises: a refusal
+    must not be masked by evidence I/O.
+    """
+    from core.security.prompt_output_sanitise import escape_nonprintable
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "type": FLOOR_REFUSAL_TYPE,
+        "status": UNVERIFIABLE_ENVIRONMENT_STATUS,
+        "floor": str(floor)[:64],
+        "achievable": str(achievable)[:64],
+        "reason": escape_nonprintable(
+            redact_secrets(str(reason)))[:_REFUSAL_FIELD_MAX],
+        "remedies": escape_nonprintable(
+            redact_secrets(str(remedies)))[:_REFUSAL_FIELD_MAX],
+    }
+    try:
+        run_key = str(Path(run_dir).resolve())
+    except OSError:
+        return
+    with _lock:
+        _floor_refusals.setdefault(run_key, []).append(dict(record))
+    try:
+        line = dumps_artifact(record, indent=None, ensure_ascii=True) + "\n"
+        with _lock:
+            if (_active_run_dir is not None
+                    and str(Path(_active_run_dir).resolve()) == run_key):
+                handle = _get_evidence_handle_locked(_active_run_dir)
+                if handle is None or not handle.write_line(line):
+                    msg = f"evidence file unavailable under {run_dir}"
+                    raise OSError(msg)
+            else:
+                # No active-run binding for this dir (floor refusals
+                # attribute to the CALL's own audit/output dir):
+                # transient append through the same validated .audit
+                # channel; inode verification is the held-handle
+                # path's concern, skip it here.
+                transient = _evidence.EvidenceFile.open(
+                    Path(run_dir), DENIALS_FILE)
+                try:
+                    if not transient.write_line(line):
+                        msg = f"evidence append failed under {run_dir}"
+                        raise OSError(msg)
+                finally:
+                    transient.close(verify=False)
+    except Exception:
+        # Parent memory above still carries the refusal for in-process
+        # summary generation; warn so a persistent evidence-channel
+        # failure is visible.
+        logger.warning("record_floor_refusal: failed to append JSONL",
+                       exc_info=True)
+
+
 def record_audit_degraded(run_dir: Path, *, reason: str,
                           instructions: str = "") -> None:
     """Write a marker file when --audit was requested but couldn't run.
@@ -745,7 +837,19 @@ def summarize_and_write(run_dir: Path) -> dict[str, Any] | None:
     # kept as a read fallback for runs produced by older versions.
     jsonl = _evidence.resolve_read_path(run_dir, DENIALS_FILE)
     if not jsonl.exists():
-        return None
+        # Parent-memory floor refusals must survive a target that
+        # DELETED the evidence file outright (the empty-file and
+        # edited-file shapes are re-asserted below; whole-file
+        # deletion used to end here with no summary at all).
+        with _lock:
+            _mem_only = list(_floor_refusals.get(
+                str(run_dir.resolve()), []))
+        if not _mem_only:
+            return None
+        return _assemble_and_write_summary(
+            run_dir, records=[], refusals=_mem_only,
+            corrupt_lines=0, inode_mismatch=inode_mismatch,
+            planted_object="")
 
     # Rename-then-read pattern. Pre-fix the read-then-unlink sequence
     # had a race: a writer (concurrent sandbox subprocess emitting a
@@ -895,8 +999,42 @@ def summarize_and_write(run_dir: Path) -> dict[str, Any] | None:
         # leaves a leftover file but doesn't affect summary output.
         pass
 
-    if (not records and not corrupt_lines and not inode_mismatch
-            and not planted_object):
+    return _assemble_and_write_summary(
+        run_dir, records=records, refusals=None,
+        corrupt_lines=corrupt_lines, inode_mismatch=inode_mismatch,
+        planted_object=planted_object)
+
+
+def _assemble_and_write_summary(
+    run_dir: Path, *, records: list, refusals: "list | None",
+    corrupt_lines: int, inode_mismatch: bool, planted_object: str,
+) -> dict[str, Any] | None:
+    """Assemble and atomically write ``sandbox-summary.json`` from the
+    drained evidence records. Split out of :func:`summarize_and_write`
+    so the deleted-evidence-file path (parent-memory floor refusals
+    with NO on-disk stream left) produces the same summary shape
+    through the same MAC-minting code. ``refusals=None`` means
+    "split them out of ``records`` and merge with parent memory";
+    a list means the caller already resolved them."""
+    # Containment-floor refusals ride the same evidence stream but
+    # are NOT denials (the target never executed) — split them out
+    # before any denial accounting. Parent memory re-asserts records
+    # a target deleted from the on-disk stream (same trust model as
+    # the audit-degraded marker): whichever view carries more
+    # refusals wins.
+    if refusals is None:
+        refusals = [r for r in records
+                    if r.get("type") == FLOOR_REFUSAL_TYPE]
+        with _lock:
+            _mem_refusals = list(_floor_refusals.get(
+                str(run_dir.resolve()), []))
+        if len(_mem_refusals) > len(refusals):
+            refusals = _mem_refusals
+    records = [r for r in records
+               if r.get("type") != FLOOR_REFUSAL_TYPE]
+
+    if (not records and not refusals and not corrupt_lines
+            and not inode_mismatch and not planted_object):
         return None
 
     # Verdict split. macOS audit mode records ALLOWED operations too —
@@ -951,6 +1089,21 @@ def summarize_and_write(run_dir: Path) -> dict[str, Any] | None:
     posture = get_run_posture(run_dir)
     if posture is not None:
         summary["posture"] = posture
+    if refusals:
+        # Containment-floor refusal surfacing (the verification
+        # seam's unverifiable_environment status at run level): one
+        # count, one canonical line, plus the structured records.
+        _first = refusals[0]
+        summary["total_floor_refusals"] = len(refusals)
+        summary["floor_refusals"] = refusals
+        _ref_remedies = _first.get("remedies") or "(none recorded)"
+        summary["floor_refusal_line"] = (
+            f"{len(refusals)} execution(s) refused: environment "
+            f"cannot meet the containment floor "
+            f"({_first.get('floor', '?')} required, "
+            f"{_first.get('achievable', '?')} achievable) — "
+            f"remedies: {_ref_remedies}"
+        )
     if corrupt_lines or inode_mismatch or planted_object:
         # Tamper flags. Corrupt lines mean someone rewrote evidence in
         # place (the inode check cannot see that on the Landlock-only
@@ -1018,10 +1171,19 @@ def summarize_and_write(run_dir: Path) -> dict[str, Any] | None:
         json.dumps(denials, sort_keys=True, ensure_ascii=True)
         .encode("utf-8")
     ).hexdigest()
+    _refusals_sha = (
+        hashlib.sha256(
+            json.dumps(refusals, sort_keys=True, ensure_ascii=True)
+            .encode("utf-8")
+        ).hexdigest()
+        if refusals else ""
+    )
     _token = _tmac.mint(_tmac.summary_fields(
         len(denials), _denials_sha, run=_tmac.run_binding(run_dir),
         corrupt_lines=corrupt_lines, inode_mismatch=inode_mismatch,
-        planted_object=planted_object, posture=posture))
+        planted_object=planted_object, posture=posture,
+        floor_refusals=len(refusals),
+        floor_refusals_sha256=_refusals_sha))
     if _token:
         summary["mac"] = _token
 
@@ -1053,6 +1215,17 @@ def summarize_and_write(run_dir: Path) -> dict[str, Any] | None:
     # that lived here pre-fix was redundant after the rename and
     # would always OSError now (caught by the swallow); keeping the
     # comment marker for clarity.
+    #
+    # Consume the parent-memory refusal mirror now that it is folded
+    # into a successfully WRITTEN summary: leaving it armed made a
+    # second summarize call on the same run dir (sweep-mode CLI, a
+    # double terminal transition) take the deleted-evidence branch
+    # and REWRITE the summary from memory alone — clobbering the
+    # denial records under a fresh valid MAC. Popped only on the
+    # success path, so a failed write keeps the re-assert armed.
+    if refusals:
+        with _lock:
+            _floor_refusals.pop(str(run_dir.resolve()), None)
     return summary
 
 

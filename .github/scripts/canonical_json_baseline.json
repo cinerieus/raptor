@@ -5,8 +5,8 @@
   "dumps_flows_to_hash:core/project/report.py:_finding_fingerprint": {
    "note": "sha256[:12] finding ids persisted in manifest.json/findings.jsonl; pinned form uses ensure_ascii=False, so dumps_canonical would change every id — frozen"
   },
-  "dumps_flows_to_hash:core/sandbox/summary.py:summarize_and_write": {
-   "note": "mint-side _denials_sha provenance stamp (sort_keys, ensure_ascii=True) feeding telemetry_mac.mint; frozen MAC form, sandbox tree deliberately left untouched here"
+  "dumps_flows_to_hash:core/sandbox/summary.py:_assemble_and_write_summary": {
+   "note": "mint-side _denials_sha + _refusals_sha provenance stamps (sort_keys, ensure_ascii=True) feeding telemetry_mac.mint — the summarize_and_write assembly moved here so the deleted-evidence path shares it; byte form frozen to keep existing MACs verifying (triage._denials_sha256 is the verify twin)"
   },
   "dumps_flows_to_hash:core/sandbox/triage.py:_denials_sha256": {
    "note": "verify-side denials sha (sort_keys, ensure_ascii=True), must stay byte-identical to summary.py's mint side — frozen"
@@ -56,8 +56,8 @@
   "raw_dumps_in_canonical_module:core/sandbox/_spawn.py:run_sandboxed": {
    "note": "inline twin of _landlock_audit._write_audit_config's serialization — the two must stay byte-identical — frozen"
   },
-  "raw_dumps_in_canonical_module:core/sandbox/summary.py:summarize_and_write": {
-   "note": "same site as its dumps_flows_to_hash twin — frozen telemetry MAC form"
+  "raw_dumps_in_canonical_module:core/sandbox/summary.py:_assemble_and_write_summary": {
+   "note": "same frozen MAC canonical form as summarize_and_write (the assembly extracted into a helper); see the dumps_flows_to_hash twin above"
   },
   "raw_dumps_in_canonical_module:core/sandbox/triage.py:_denials_sha256": {
    "note": "same site as its dumps_flows_to_hash twin — frozen MAC canonical form"

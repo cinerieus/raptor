@@ -315,6 +315,7 @@ def _verify_summary(
             return None, _INTEGRITY_TAMPERED
         return summary, _INTEGRITY_LEGACY
     posture = summary.get("posture")
+    _refusals = summary.get("floor_refusals") or []
     fields = telemetry_mac.summary_fields(
         summary.get("total_denials", 0),
         _denials_sha256(summary.get("denials", [])),
@@ -323,6 +324,11 @@ def _verify_summary(
         inode_mismatch=inode_mismatch,
         planted_object=planted_object,
         posture=posture if isinstance(posture, dict) else None,
+        floor_refusals=len(_refusals)
+        if isinstance(_refusals, list) else 0,
+        floor_refusals_sha256=(
+            _denials_sha256(_refusals)
+            if isinstance(_refusals, list) and _refusals else ""),
     )
     if telemetry_mac.verify(fields, token):
         if writer_flagged:
