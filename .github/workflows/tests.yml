@@ -777,6 +777,105 @@ jobs:
           set -f
           python -m pytest $SANDBOX_FILES -v
 
+  # PR-time sandbox feature-matrix subset: the u24 image x the {full,
+  # default} lanes of the weekly sandbox-matrix.yml, run against the
+  # prebuilt GHCR image published by sandbox-matrix-image.yml
+  # (--skip-build). The degradation lattice's end-to-end signal was
+  # weekly-only, so a real lattice regression could sit invisible for
+  # days until the Saturday run (or a manual dispatch) surfaced it;
+  # these two lanes are the cheap high-yield subset — `default` is
+  # stock docker confinement, the lane that catches the userns-denied
+  # class, `full` is the all-features lane. Measured warm cost is
+  # ~37s per lane cell plus the image pull.
+  #
+  # The weekly full matrix stays untouched as the unfiltered backstop:
+  # both images, all five lanes, fresh image builds. Fork PRs skip this
+  # job (their read-only token cannot pull the private GHCR image) and
+  # keep that weekly coverage only, like the other image-path tiers.
+  # Like every gated tier, force_full events also run it — each
+  # merge-queue entry and the twice-weekly full-suite cron pay the
+  # ~1-2 min pull + two lanes; accepted, a red matrix SHOULD block a
+  # merge. Known residual: the sandbox gate is import-graph-computed,
+  # so a PR touching only the matrix harness scripts under
+  # core/sandbox/scripts/feature-matrix does not fire this job —
+  # harness changes keep their weekly/dispatch coverage.
+  #
+  # Failure ergonomics: run-matrix.sh ends by printing report.py's lane
+  # matrix to the job log and exits with its verdict — nothing is
+  # swallowed. The failure step additionally lifts matrix.md +
+  # failures.txt into the step summary, and the artifact upload carries
+  # the same evidence shape as the weekly run.
+  sandbox-feature-matrix:
+    needs: [pre_check, changes]
+    if: |
+      needs.pre_check.outputs.should_skip != 'true' &&
+      needs.changes.outputs.sandbox == 'true' &&
+      needs.pre_check.outputs.pkg_access == 'true'
+    runs-on: ubuntu-latest
+    # 30 (not the warm-path ~5): when a PR changes requirements, the
+    # image's baked venv is stale (sxv.reqhash mismatch) and each lane
+    # pip-installs a fresh venv in-container before its tests.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read              # pull the private GHCR matrix image
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Pull the prebuilt matrix image
+        run: |
+          set -euo pipefail
+          echo "${{ github.token }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          if ! docker pull "ghcr.io/${owner}/raptor-sandbox-matrix:u24"; then
+            echo "::error::ghcr.io/${owner}/raptor-sandbox-matrix:u24 is not available — dispatch the 'Sandbox matrix image' workflow once to publish it, then re-run this job."
+            exit 1
+          fi
+          # run-matrix.sh --skip-build looks for the local build tag.
+          docker tag "ghcr.io/${owner}/raptor-sandbox-matrix:u24" \
+            raptor-sandbox-matrix:u24
+
+      - name: Run the matrix subset (u24 x full,default)
+        run: core/sandbox/scripts/feature-matrix/run-matrix.sh --image 24 --lanes full,default --skip-build
+
+      - name: Surface the matrix report in the step summary
+        if: failure()
+        # RUNNER_TEMP is fresh per job on hosted runners, so the glob
+        # matches exactly the one run this job executed. failures.txt
+        # always exists but holds only a newline when the failure had no
+        # per-test lines (e.g. a stray-lane harness error) — the grep
+        # skips whitespace-only files; matrix.md always carries the lane
+        # verdicts, and the full detail is in the job log either way.
+        run: |
+          base="${RUNNER_TEMP}/raptor-sandbox-matrix"
+          for f in "$base"/*/matrix.md; do
+            [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY"
+          done
+          for f in "$base"/*/failures.txt; do
+            if [ -f "$f" ] && grep -q '[^[:space:]]' "$f"; then
+              { echo; echo '```'; cat "$f"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          true
+
+      - name: Upload matrix results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: sandbox-feature-matrix-pr-results
+          path: |
+            ${{ runner.temp }}/raptor-sandbox-matrix/*/matrix.md
+            ${{ runner.temp }}/raptor-sandbox-matrix/*/matrix.json
+            ${{ runner.temp }}/raptor-sandbox-matrix/*/failures.txt
+            ${{ runner.temp }}/raptor-sandbox-matrix/*/*/*/probe.json
+            ${{ runner.temp }}/raptor-sandbox-matrix/*/*/*/pytest-*.out
+          retention-days: 14
+          if-no-files-found: warn
+
   # Exploit-feasibility integration tier: 11 × ~15 s tests calling
   # analyze_binary against real binaries. Gated on the package's real
   # upstream dependency surface.
@@ -1116,6 +1215,7 @@ jobs:
       - python-unit-tests-sca
       - python-unit-tests-sandbox
       - python-unit-tests-sandbox-macos
+      - sandbox-feature-matrix
       - python-unit-tests-exploit-feasibility
       - python-prompt-audit
       - ci-lint-tests
