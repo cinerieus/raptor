@@ -1102,6 +1102,10 @@ class OrchestratorResult:
     refinement_rounds: int = 0
     clean_checks: int = 0
     clean_check_rescues: int = 0
+    # Clean-check flow sweeps whose evidence reached the FIRST review
+    # prompt (pre-run) — those functions need no post-verdict rescue
+    # call.
+    clean_check_preruns: int = 0
     sarif_clean_resolved: int = 0
     outcomes: list[ReviewOutcome] = field(default_factory=list)
     # Structured prefilter/triage kill records (see
@@ -2507,6 +2511,53 @@ def review_one_function(
 
     _fuse_all_evidence(ctx)
 
+    # ── Clean-check pre-run ───────────────────────────────────────────
+    # For functions in the clean-check population (same gate as the
+    # post-verdict rescue, minus the verdict), run the rescue's
+    # mechanical flow sweep BEFORE the first review call and surface
+    # the flows in the first prompt — a clean verdict then needs no
+    # second full review call re-presenting the same evidence. Skipped
+    # when the Joern CPG is still building (the index can gain flows
+    # mid-review; the rescue keeps its current behaviour there) and in
+    # blind first passes (mechanical evidence is deliberately withheld
+    # from the first prompt).
+    cc_preran = False
+    if (
+        config.clean_check
+        and not config.blind_first_pass
+        and not gap.get("_joern_pending")
+    ):
+        try:
+            from .refinement import (
+                build_flow_preview_prompt,
+                clean_check_applicable,
+            )
+
+            _cc_bucket = triage.bucket.value if triage else "investigate"
+            if clean_check_applicable(
+                _cc_bucket,
+                gap_key in entry_points,
+                gap_key in sinks_set,
+                sloc=gap.get("sloc", 0),
+            ):
+                _cc_flows = _clean_check_flows(
+                    gap["file"], gap["name"], evidence_index,
+                )
+                cc_preran = True
+                if _cc_flows:
+                    ctx["flow_preview"] = build_flow_preview_prompt(
+                        _cc_flows,
+                    )
+                    with result._lock:
+                        result.clean_check_preruns += 1
+        except Exception:
+            logger.debug(
+                "clean-check pre-run failed for %s:%s",
+                gap.get("file"),
+                gap.get("name"),
+                exc_info=True,
+            )
+
     # ── LLM review ────────────────────────────────────────────────────
     review_start = time.monotonic()
     # Failed attempts are counted (failed_calls) but carry NO per-call
@@ -2751,7 +2802,14 @@ def review_one_function(
             if _should_cc(outcome, bucket_val, is_ep, is_sk, sloc=gap_sloc):
                 with result._lock:
                     result.clean_checks += 1
-                cc_flows = _run_clean_check_sweep(
+                # Consume the pre-run: when the sweep already ran at
+                # context time, its flows were in the first prompt (or
+                # it found none) — re-reading the index and firing a
+                # second full review call re-presents evidence the
+                # model just saw. The rescue only fires when the
+                # pre-run could not run (CPG pending at dispatch,
+                # blind first pass, sweep error).
+                cc_flows = None if cc_preran else _run_clean_check_sweep(
                     outcome,
                     config,
                     evidence_index,
@@ -6978,6 +7036,12 @@ def _run_audit_body(
                 joern_state["submit_time"] = None
 
         if joern_state["future"] is not None:
+            # Gap-extra-key marker consumed by the clean-check pre-run:
+            # the CPG can still enrich the (in-place-mutated) evidence
+            # index between this gap's context assembly and its
+            # verdict, so the pre-run must not claim to have seen the
+            # rescue's evidence.
+            gap["_joern_pending"] = True
             shared.reviewed_before_joern.append(gap)
 
     # --- Main executor pass ---
@@ -17996,7 +18060,24 @@ def _run_clean_check_sweep(
     Checks the evidence index for any flows the LLM may have missed.
     Returns a text description of discovered flows, or None.
     """
-    key = f"{outcome.file}:{outcome.function}"
+    return _clean_check_flows(
+        outcome.file, outcome.function, evidence_index,
+    )
+
+
+def _clean_check_flows(
+    file_path: str,
+    function_name: str,
+    evidence_index: dict[str, EvidenceRecord] | None = None,
+) -> str | None:
+    """Collect the clean-check sweep's flow evidence for one function.
+
+    Shared by the post-verdict rescue and the pre-review flow preview
+    — the same evidence-index read, so a pre-run that already surfaced
+    these flows in the first prompt makes the rescue's re-read (and
+    its second review call) redundant.
+    """
+    key = f"{file_path}:{function_name}"
 
     if evidence_index:
         rec = evidence_index.get(key)

@@ -1030,6 +1030,13 @@ def format_context_for_prompt(
     if ctx.get("clean_check"):
         sections.append(PromptSection("clean_check", "\n" + ctx["clean_check"], 0))
 
+    if ctx.get("flow_preview"):
+        # Clean-check pre-run: the rescue sweep's flows surfaced in the
+        # FIRST review prompt (see orchestrator._clean_check_flows).
+        sections.append(
+            PromptSection("flow_preview", "\n" + ctx["flow_preview"], 0)
+        )
+
     if ctx.get("negative_space"):
         from .negative_space import format_negative_space_prose
         ns_text = format_negative_space_prose(ctx["negative_space"])

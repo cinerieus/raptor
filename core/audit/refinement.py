@@ -186,6 +186,29 @@ def merge_outcomes(original: Any, refined: Any) -> Any:
     return _summed(refined)
 
 
+def clean_check_applicable(
+    triage_bucket: str,
+    is_entry_point: bool,
+    is_sink: bool,
+    sloc: int = 0,
+) -> bool:
+    """The verdict-independent half of the clean-check gate.
+
+    True when the function is in the clean-check population: triage
+    bucket deep_dive OR entry point / sink, with sufficient SLOC.
+    Shared by the post-verdict rescue (which additionally requires a
+    clean status) and the pre-review flow sweep (which runs before
+    any verdict exists).
+    """
+    if sloc > 0 and sloc < MIN_SLOC_CLEAN_CHECK:
+        return False
+
+    if triage_bucket == "deep_dive":
+        return True
+
+    return bool(is_entry_point or is_sink)
+
+
 def should_clean_check(
     outcome: Any,
     triage_bucket: str,
@@ -204,13 +227,9 @@ def should_clean_check(
     if status != "clean":
         return False
 
-    if sloc > 0 and sloc < MIN_SLOC_CLEAN_CHECK:
-        return False
-
-    if triage_bucket == "deep_dive":
-        return True
-
-    return bool(is_entry_point or is_sink)
+    return clean_check_applicable(
+        triage_bucket, is_entry_point, is_sink, sloc=sloc,
+    )
 
 
 def build_clean_check_prompt(
@@ -240,6 +259,35 @@ def build_clean_check_prompt(
          "sanitized before the sink, bounds-checked, or not reachable from "
          "untrusted input), explain why and confirm clean. If it represents "
          "a real issue, revise your status to finding or suspicious."),
+    ]
+
+    return "\n".join(lines)
+
+
+def build_flow_preview_prompt(tool_flows: str) -> str:
+    """Build the pre-review flow-preview section.
+
+    Same mechanical sweep output the post-verdict clean-check rescue
+    presents, surfaced in the FIRST review prompt instead — the model
+    must address the flows up front rather than being re-asked after a
+    clean verdict.  The flow text quotes target identifiers via the
+    tool output, so it is defanged with ``neutralize_tag_forgery``
+    before interpolation.
+    """
+    from core.security.prompt_envelope import neutralize_tag_forgery
+
+    lines = [
+        "## Mechanical flow sweep",
+        "",
+        "The mechanical tools found these flows in this function:",
+        "",
+        neutralize_tag_forgery(tool_flows),
+        "",
+        ("Address each flow explicitly in your review. If a flow is "
+         "benign (e.g. sanitized before the sink, bounds-checked, or "
+         "not reachable from untrusted input), say why. If it "
+         "represents a real issue, factor it into your hypotheses and "
+         "verdict."),
     ]
 
     return "\n".join(lines)
