@@ -326,6 +326,7 @@ def run_edge_pass(
     *,
     commit_fn: Callable[..., None],
     on_progress: Callable | None = None,
+    max_workers: int = 1,
 ) -> tuple[dict[str, Any], dict[str, list]]:
     """Scope obligations, review unreviewed tier-1 edges, and return
     ``(summary, tier2_by_caller)`` — the latter for the orchestrator
@@ -335,6 +336,15 @@ def run_edge_pass(
     the run's LLM budget is exhausted. Degrades honestly when no LLM
     client is wired (summary names the reason; obligations are still
     scoped + persisted for the report and ``/review gaps``).
+
+    Edge reviews are independent (each commits its own journal entry
+    through *commit_fn*, an append-only chokepoint), so with
+    ``max_workers > 1`` they fan out across threads; summary deltas
+    fold on the calling thread. The budget headroom check is an atomic
+    check-and-reserve scaled by in-flight reviews, sticky once
+    tripped — no new reviews dispatch after the trip, in-flight ones
+    finish and are counted. Single-worker and single-edge runs keep
+    the plain serial loop.
     """
     from core.audit.edge_obligations import build_and_write
 
@@ -430,61 +440,93 @@ def run_edge_pass(
     _PIN_RESERVE_USD = 1.0
     pin_reserve = len(getattr(config, "pins", None) or []) * _PIN_RESERVE_USD
 
-    for i, rec in enumerate(gaps):
+    # Per-review estimate for the headroom check below. Parallel
+    # workers scale the estimate by the number of reviews already in
+    # flight so N concurrent dispatches cannot each claim the same
+    # last dollar of headroom — conservative by construction: the pass
+    # may stop a review or two early, it never overshoots the reserve.
+    _EDGE_EST_COST_USD = 0.1
+
+    import threading
+
+    reserve_lock = threading.Lock()
+    inflight = [0]
+    stopped = [False]
+
+    def _try_reserve() -> bool:
+        """Atomic check-and-reserve for one edge review.
+
+        Sticky once tripped — every later item counts as
+        budget-skipped, matching the serial loop's break.
+        """
+        with reserve_lock:
+            if stopped[0]:
+                return False
+            try:
+                if budget_client.is_budget_exhausted(
+                        estimated_cost=(
+                            _EDGE_EST_COST_USD * (inflight[0] + 1)
+                            + pin_reserve)):
+                    stopped[0] = True
+                    return False
+            except AttributeError:
+                pass
+            inflight[0] += 1
+            return True
+
+    def _release_reserve() -> None:
+        with reserve_lock:
+            inflight[0] -= 1
+
+    def _review_one(item: tuple[int, dict[str, Any]]) -> dict[str, Any]:
+        """Review one tier-1 edge; returns summary deltas."""
+        i, rec = item
+        if not _try_reserve():
+            return {"skipped_budget": 1}
         try:
-            if budget_client.is_budget_exhausted(
-                    estimated_cost=0.1 + pin_reserve):
-                summary["skipped_budget"] = len(gaps) - i
-                logger.info(
-                    "edge pass: budget exhausted — %d tier-1 edge(s) "
-                    "left unreviewed (they stay obligation gaps)",
-                    summary["skipped_budget"],
+            caller_span = _span_of(spans, rec["caller_file"], rec["caller"])
+            callee_span = _span_of(spans, rec["callee_file"], rec["callee"])
+            if not caller_span or not callee_span:
+                return {"errors": 1}
+            caller_src = _read_span(
+                Path(config.target_path), rec["caller_file"], caller_span)
+            callee_src = _read_span(
+                Path(config.target_path), rec["callee_file"], callee_span)
+            prompt = build_edge_prompt(
+                rec, caller_src, callee_src,
+                knowledge=_edge_knowledge_block(
+                    getattr(config, "out_dir", None), rec,
+                    caller_src, callee_src,
+                ),
+            )
+            t0 = time.monotonic()
+            try:
+                response = llm.generate_structured(
+                    prompt, EDGE_REVIEW_SCHEMA,
+                    system_prompt=_EDGE_SYSTEM_PROMPT,
+                    call_class="edge_review",
                 )
-                break
-        except AttributeError:
-            pass
-        caller_span = _span_of(spans, rec["caller_file"], rec["caller"])
-        callee_span = _span_of(spans, rec["callee_file"], rec["callee"])
-        if not caller_span or not callee_span:
-            summary["errors"] += 1
-            continue
-        caller_src = _read_span(
-            Path(config.target_path), rec["caller_file"], caller_span)
-        callee_src = _read_span(
-            Path(config.target_path), rec["callee_file"], callee_span)
-        prompt = build_edge_prompt(
-            rec, caller_src, callee_src,
-            knowledge=_edge_knowledge_block(
-                getattr(config, "out_dir", None), rec,
-                caller_src, callee_src,
-            ),
-        )
-        t0 = time.monotonic()
-        try:
-            response = llm.generate_structured(
-                prompt, EDGE_REVIEW_SCHEMA,
-                system_prompt=_EDGE_SYSTEM_PROMPT,
-                call_class="edge_review",
-            )
-            call = unwrap_structured_response(
-                response,
-                empty_result={"status": "error", "body": "empty LLM response"},
-            )
-            result, cost, model = call.result, call.cost, call.model
-        except Exception:  # noqa: BLE001 — one edge failing must not kill the pass
-            logger.warning(
-                "edge review failed for %s", edge_key(rec), exc_info=True,
-            )
-            summary["errors"] += 1
-            continue
+                call = unwrap_structured_response(
+                    response,
+                    empty_result={"status": "error", "body": "empty LLM response"},
+                )
+                result, cost, model = call.result, call.cost, call.model
+            except Exception:  # noqa: BLE001 — one edge failing must not kill the pass
+                logger.warning(
+                    "edge review failed for %s", edge_key(rec), exc_info=True,
+                )
+                return {"errors": 1}
+        finally:
+            _release_reserve()
 
         # Accumulated for the caller to book into the phase cost
         # ledger (the pass runs during prep, before the AuditResult
         # exists) — otherwise every edge review lands "unattributed"
         # in cost-breakdown.json.
-        summary["cost_usd"] = summary.get("cost_usd", 0.0) + (cost or 0.0)
-        summary["wall_time_s"] = (
-            summary.get("wall_time_s", 0.0) + (time.monotonic() - t0))
+        delta: dict[str, Any] = {
+            "cost_usd": cost or 0.0,
+            "wall_time_s": time.monotonic() - t0,
+        }
 
         status = str(result.get("status") or "error")
         if status not in ("clean", "suspicious", "finding", "error"):
@@ -523,18 +565,18 @@ def run_edge_pass(
         except Exception:  # noqa: BLE001
             logger.warning("edge outcome commit failed for %s",
                            edge_key(rec), exc_info=True)
-            summary["errors"] += 1
-            continue
-        summary["reviewed"] += 1
+            delta["errors"] = 1
+            return delta
+        delta["reviewed"] = 1
         # Count the COMMITTED status: the journal-write chokepoint
         # enforces the tool-gated promotion invariant, so an
         # LLM-only contract "finding" lands as suspicious (edge
         # contracts get tool evidence via deepen//validate, not here).
         committed = getattr(outcome, "status", status)
         if committed == "finding":
-            summary["findings"] += 1
+            delta["findings"] = 1
         elif committed == "suspicious":
-            summary["suspicious"] += 1
+            delta["suspicious"] = 1
         if on_progress is not None:
             try:
                 # 0-based: format_progress_line renders ``idx + 1``
@@ -543,4 +585,55 @@ def run_edge_pass(
                 on_progress(i, len(gaps), outcome)
             except Exception:  # noqa: BLE001
                 logger.debug("edge progress callback failed", exc_info=True)
+        return delta
+
+    def _fold(delta: dict[str, Any]) -> None:
+        for key in ("reviewed", "findings", "suspicious", "errors",
+                    "skipped_budget"):
+            if delta.get(key):
+                summary[key] += delta[key]
+        for key in ("cost_usd", "wall_time_s"):
+            if delta.get(key):
+                summary[key] = summary.get(key, 0.0) + delta[key]
+
+    items = list(enumerate(gaps))
+    workers = max(1, max_workers)
+
+    if workers <= 1 or len(items) <= 1:
+        for item in items:
+            _fold(_review_one(item))
+    else:
+        from core.llm.concurrency import run_parallel
+
+        item_errors: list[tuple[int, Exception]] = []
+
+        def _on_error(
+            item: tuple[int, dict[str, Any]], exc: Exception,
+        ) -> dict[str, Any]:
+            item_errors.append((item[0], exc))
+            return {}
+
+        deltas: list[dict[str, Any] | None] = run_parallel(
+            items, _review_one,
+            max_workers=workers,
+            label="edge-review",
+            on_error=_on_error,
+        )
+        for delta in deltas:
+            if delta:
+                _fold(delta)
+        if item_errors:
+            # Serial parity: an unexpected failure outside the guarded
+            # LLM call aborts the pass (the orchestrator degrades to a
+            # function-only audit); committed edge verdicts survive in
+            # the journal either way.
+            item_errors.sort(key=lambda t: t[0])
+            raise item_errors[0][1]
+
+    if summary["skipped_budget"]:
+        logger.info(
+            "edge pass: budget exhausted — %d tier-1 edge(s) "
+            "left unreviewed (they stay obligation gaps)",
+            summary["skipped_budget"],
+        )
     return summary, tier2_by_caller

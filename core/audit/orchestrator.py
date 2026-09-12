@@ -3776,6 +3776,16 @@ def _sarif_clean_files_from_cache(
     return clean
 
 
+def _resolve_max_workers(config: OrchestratorConfig) -> int:
+    """Worker count for LLM fan-out: the operator's ``--max-workers``
+    when set, else derived from the primary model's rate limit."""
+    if config.max_workers:
+        return config.max_workers
+    from core.llm.concurrency import derive_max_workers
+
+    return derive_max_workers(config.models[0] if config.models else "default")
+
+
 def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
     """Compute all mode-independent prep for the audit loop.
 
@@ -4340,6 +4350,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None):
                 config, checklist, context_map,
                 commit_fn=_commit_outcome,
                 on_progress=on_progress,
+                max_workers=_resolve_max_workers(config),
             )
             _edge_pass_summary = edge_summary
             logger.info(
@@ -6976,21 +6987,16 @@ def _run_audit_body(
     shared.live_classifications = live_classifications
 
     # --- Executor config ---
-    from core.llm.concurrency import derive_max_workers
-
     from .executor import ExecutorConfig, run_executor_sync
     from .task_graph import TaskGraph
 
+    resolved_workers = _resolve_max_workers(config)
     if config.max_workers == 0:
-        model = config.models[0] if config.models else "default"
-        resolved_workers = derive_max_workers(model)
         logger.info(
             "auto workers: model=%s → max_workers=%d",
-            model,
+            config.models[0] if config.models else "default",
             resolved_workers,
         )
-    else:
-        resolved_workers = config.max_workers
     executor_config = ExecutorConfig(max_workers=resolved_workers)
 
     layer_disagreements: list[Any] = []
