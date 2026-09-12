@@ -20,7 +20,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from . import landlock as _landlock
 from . import probes as _probes
@@ -2045,19 +2045,69 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
     # "isolation could not engage", never as a silent "0 findings".
     if strict_required:
         from .errors import SandboxSetupError
+
+        def _strict_gate_refuse(
+                exc: "SandboxSetupError") -> "SandboxSetupError":
+            """Record strict's construction abort as a floor-class
+            refusal, then return it for raising. Floor-class in
+            substance: strict IS "floor = the intended tier" plus
+            the seccomp capability axis — the environment cannot
+            meet the containment the profile demands, and the
+            target never executes. The exception stays a plain
+            SandboxSetupError (record-then-raise, not a conversion):
+            the gate aggregates MIXED unmet requirements (tier
+            floors and the seccomp axis, possibly several at once),
+            so one typed floor/achievable field pair would overclaim
+            — the record carries honest labels computed from the
+            same probes the gate consulted instead."""
+            if sys.platform == "darwin":
+                _floor_t = _tiers.ContainmentTier.SEATBELT
+                _ach_t = _tiers.ContainmentTier.BARE
+            else:
+                # strict demands the mount tier when it has a
+                # target/output to bind, the namespace tier
+                # otherwise; achievable follows the failed probes,
+                # worst axis first (a missing filter voids every
+                # tier's contract, exactly as in the seccomp axis
+                # arms).
+                _floor_t = (_tiers.ContainmentTier.MOUNT_NS
+                            if (target or output)
+                            else _tiers.ContainmentTier.NS_NOMOUNT)
+                if (seccomp_profile
+                        and not _seccomp.check_seccomp_available()):
+                    _ach_t = _tiers.ContainmentTier.BARE
+                elif not use_sandbox:
+                    _ach_t = (_tiers.ContainmentTier.LANDLOCK_ONLY
+                              if check_landlock_available()
+                              else _tiers.ContainmentTier.BARE)
+                else:
+                    from ._spawn import (
+                        mount_ns_available as _sg_mount_avail,
+                    )
+                    if _sg_mount_avail():
+                        _ach_t = _tiers.ContainmentTier.MOUNTLESS_NS
+                    elif check_landlock_available():
+                        _ach_t = _tiers.ContainmentTier.LANDLOCK_ONLY
+                    else:
+                        _ach_t = _tiers.ContainmentTier.BARE
+            return _record_floor_refusal(
+                audit_run_dir or output, exc,
+                floor_label=_tiers.tier_label(_floor_t),
+                achievable_label=_tiers.tier_label(_ach_t))
+
         if not use_sandbox and sys.platform == "darwin":
             msg = (
                 "sandbox profile 'strict' requires the seatbelt "
                 "backend, but sandbox-exec is unavailable or failed "
                 "its smoke test on this host"
             )
-            raise SandboxSetupError(
+            raise _strict_gate_refuse(SandboxSetupError(
                 msg,
                 "verify /usr/bin/sandbox-exec exists and can run a "
                 "minimal profile; or explicitly choose a profile "
                 "that degrades gracefully (e.g. `--sandbox full`). "
                 "RAPTOR will not silently downgrade for you.",
-            )
+            ))
         # Linux: collect EVERY unmet strict requirement before
         # raising. Constrained hosts frequently miss several at once
         # (no userns implies no mount-ns; minimal runners lack
@@ -2107,20 +2157,20 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 "will not silently downgrade for you.",
             ))
         if len(unmet) == 1:
-            raise SandboxSetupError(
+            raise _strict_gate_refuse(SandboxSetupError(
                 f"sandbox profile 'strict' requires {unmet[0][0]}",
                 unmet[0][1],
-            )
+            ))
         if unmet:
             missing = "; ".join(
                 f"({i}) {m}" for i, (m, _f) in enumerate(unmet, 1))
             fixes = " ".join(
                 f"({i}) {f}" for i, (_m, f) in enumerate(unmet, 1))
-            raise SandboxSetupError(
+            raise _strict_gate_refuse(SandboxSetupError(
                 f"sandbox profile 'strict' has {len(unmet)} unmet "
                 f"requirements on this host — it requires {missing}",
                 fixes,
-            )
+            ))
 
     if effectively_disabled and not state._cli_sandbox_disabled:
         logger.info("Sandbox disabled for this call")
@@ -3005,33 +3055,19 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         def _note_floor_refusal(
                 exc: "_errors.SandboxFloorError",
         ) -> "_errors.SandboxFloorError":
-            """Record a containment-floor refusal into the run-dir
-            evidence stream (best-effort) and return ``exc`` for the
-            caller to raise.
-
-            The verification seams (dark verification, exploit
-            execution, mitigation replay) map these refusals to the
-            ``unverifiable_environment`` status per finding; this is
-            the sandbox-side half — the refusal chokepoint writes a
-            typed record so ``sandbox-summary.json`` carries the
-            run-level count line even when no denial was ever
-            recorded. Never raises on its own; a refusal must not be
-            masked by evidence I/O."""
-            _refusal_dir = audit_run_dir or output
-            if _refusal_dir and not effectively_disabled:
-                try:
-                    from . import summary as _summary_refusal
-                    _summary_refusal.record_floor_refusal(
-                        Path(_refusal_dir),
-                        floor=_tiers.tier_label(exc.floor),
-                        achievable=_tiers.tier_label(exc.achievable),
-                        reason=str(exc),
-                        remedies=exc.instructions or "",
-                    )
-                except Exception:  # noqa: BLE001 — evidence recording is best-effort
-                    logger.debug("floor-refusal record failed",
-                                 exc_info=True)
-            return exc
+            """run()'s refusal chokepoint half of
+            :func:`_record_floor_refusal` (see its docstring for the
+            record's consumers and the active-run-dir fallback that
+            covers calls with no audit/output dir of their own).
+            Recording is skipped under the operator's explicit
+            disable: floor := BARE there, so no floor-contract
+            refusal can fire — the only raise that still routes here
+            is the require_fresh_procfs + skip_pid_ns caller-bug
+            contradiction, a coding error rather than environment
+            evidence."""
+            if effectively_disabled:
+                return exc
+            return _record_floor_refusal(audit_run_dir or output, exc)
 
         _explicit_tier, _explicit_src = _explicit_untrusted_floor()
         try:
@@ -4204,10 +4240,27 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     f"sandbox namespace setup failed "
                     f"(unshare {' '.join(_engage_flags)}): {_engage_reason}"
                 )
-                raise SandboxSetupError(
+                _engage_exc = SandboxSetupError(
                     msg_0,
                     ENGAGE_FAIL_INSTRUCTIONS,
                 )
+                if _floor > _tiers.ContainmentTier.BARE:
+                    # Pre-spawn definitive namespace refusal on a
+                    # floored call: floor-class in substance (the
+                    # namespace tier the floor demands is
+                    # undeliverable; the target never executed) —
+                    # record-then-raise, type kept, mirroring the
+                    # userns entry arm's mapping: the policy layers
+                    # still engage when the kernel has them.
+                    _record_floor_refusal(
+                        audit_run_dir or output, _engage_exc,
+                        floor_label=_tiers.tier_label(_floor),
+                        achievable_label=_tiers.tier_label(
+                            _tiers.ContainmentTier.LANDLOCK_ONLY
+                            if check_landlock_available()
+                            else _tiers.ContainmentTier.BARE),
+                    )
+                raise _engage_exc
             if _engages is None:  # noqa: SIM102
                 # Probe couldn't RUN (transient load) — NOT a verdict. Do
                 # NOT abort a possibly-working scan; proceed and let a real
@@ -4819,11 +4872,31 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     from .errors import SandboxSetupError
                     from .probes import SEATBELT_FAIL_INSTRUCTIONS
                     msg_0 = f"sandbox seatbelt setup failed: {_mac_status[1]}"
-                    raise SandboxSetupError(
+                    _e_exc = SandboxSetupError(
                         msg_0,
                         SEATBELT_FAIL_INSTRUCTIONS,
                         setup_category=_mac_status[0],
                     )
+                    if _floor > _tiers.ContainmentTier.BARE:
+                        # Delivery-time contract failure on the
+                        # seatbelt lane: floor-class in substance for
+                        # a floored (untrusted-class) call — the
+                        # entry-time seatbelt-absence refusal already
+                        # records, and a readiness failure at
+                        # delivery must not leave less evidence than
+                        # the probe-time one. Record-then-raise, type
+                        # kept (engagement error, as for the Linux
+                        # status bytes); trusted calls (floor BARE)
+                        # keep the plain fail-loud raise with no
+                        # record. There is no policy layer below
+                        # seatbelt on macOS, so achievable is BARE.
+                        _record_floor_refusal(
+                            audit_run_dir or output, _e_exc,
+                            floor_label=_tiers.tier_label(_floor),
+                            achievable_label=_tiers.tier_label(
+                                _tiers.ContainmentTier.BARE),
+                        )
+                    raise _e_exc
                 if _mac_status is not None and _mac_status[0] == "P":
                     from .errors import SandboxSetupError
                     msg_0 = (
@@ -5165,7 +5238,7 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 f"sandbox fresh-procfs mount failed for an "
                                 f"untrusted run: {_setup_status[1]}"
                             )
-                            raise SandboxSetupError(
+                            _f_exc = SandboxSetupError(
                                 msg_0,
                                 "the sandbox could not replace the host-pid "
                                 "procfs bind with a pid-namespace-local "
@@ -5180,6 +5253,35 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                     literal_contract=(_rfp_kwarg is True)),
                                 setup_category=_setup_status[0],
                             )
+                            if _floor > _tiers.ContainmentTier.BARE:
+                                # Delivery-time contract failure:
+                                # floor-class in substance (the target
+                                # never executed because the required
+                                # containment could not be delivered),
+                                # so it records like the entry-time
+                                # refusals. Record-then-raise, type
+                                # kept: the child-side status-byte
+                                # raises stay engagement errors by
+                                # design (child-side truth the floor
+                                # assertion cannot replace). The
+                                # delivered posture kept the policy
+                                # layers but exposed the host procfs
+                                # — below the ns-only tier's promise,
+                                # so the honest achievable label is
+                                # the policy-layer tier (probed: a
+                                # Landlock-less kernel understates
+                                # to none rather than overstate).
+                                _record_floor_refusal(
+                                    audit_run_dir or output, _f_exc,
+                                    floor_label=_tiers.tier_label(_floor),
+                                    achievable_label=_tiers.tier_label(
+                                        _tiers.ContainmentTier
+                                        .LANDLOCK_ONLY
+                                        if check_landlock_available()
+                                        else _tiers.ContainmentTier
+                                        .BARE),
+                                )
+                            raise _f_exc
                         if _setup_status is not None and _setup_status[0] == "C":
                             # Fail-closed child setup abort: the spawn
                             # child refused to continue (unusable
@@ -5264,11 +5366,63 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 f"sandbox {_layer} setup failed in the spawn "
                                 f"child: {_setup_status[1]}"
                             )
-                            raise SandboxSetupError(
+                            _lsu_exc = SandboxSetupError(
                                 msg_0,
                                 _instr,
                                 setup_category=_setup_status[0],
                             )
+                            if _setup_status[0] == "U":
+                                # The status-byte shape of the
+                                # ladder's category-'U' contract: the
+                                # spawn child died at its unshare
+                                # stage after reporting on the
+                                # exec-status pipe. The EXCEPTION
+                                # shape of the same failure leaves
+                                # used_spawn False by construction
+                                # (the raise happens before the
+                                # assignment); the status shape must
+                                # reset it explicitly, or the
+                                # ladder's catch falls through with
+                                # the SETUP CHILD's CompletedProcess
+                                # as the target's result — fabricated
+                                # rc, no fallback run, and a floored
+                                # call bypassing the fallback
+                                # dispatch's floor refusal (which is
+                                # also where the refusal records,
+                                # with this exception chained as its
+                                # cause — no record here, or the one
+                                # refusal would count twice).
+                                used_spawn = False
+                            elif _floor > _tiers.ContainmentTier.BARE:
+                                # Terminal delivery-time layer-apply
+                                # failure ('L'/'S') on a floored
+                                # call: floor-class in substance (a
+                                # tier-contract layer could not be
+                                # delivered; the target never
+                                # executed) — same record-then-raise
+                                # as the F/E bytes, type kept.
+                                # Achievable follows the failed
+                                # layer, understating: 'S' voids
+                                # every tier's contract (the filter
+                                # is in all of them); 'L' leaves the
+                                # namespace tier's own promise when
+                                # the filter is deliverable, else
+                                # none.
+                                if _setup_status[0] == "S":
+                                    _lsu_ach = _tiers.ContainmentTier.BARE
+                                else:  # 'L'
+                                    _lsu_ach = (
+                                        _tiers.ContainmentTier.NS_NOMOUNT
+                                        if (seccomp_profile
+                                            and check_seccomp_available())
+                                        else _tiers.ContainmentTier.BARE)
+                                _record_floor_refusal(
+                                    audit_run_dir or output, _lsu_exc,
+                                    floor_label=_tiers.tier_label(_floor),
+                                    achievable_label=_tiers.tier_label(
+                                        _lsu_ach),
+                                )
+                            raise _lsu_exc
                         # Retry without the bind tree on a mount-ns ('M') or
                         # in-sandbox exec ('X') failure reported by the exec-
                         # status pipe. 'X' is the common tool_paths case: the
@@ -6364,6 +6518,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # (a lane the contract does not know about cannot be asserted
         # pre-exec), so it converts a silent bypass into a loud
         # failure at first use rather than preventing the first run.
+        # Deliberately NOT routed through the refusal-recording
+        # chokepoint: this is an internal-invariant violation (a code
+        # bug in a lane), not environment evidence — a floor_refusal
+        # record would count it as "environment cannot meet the
+        # floor" at the verification seams.
         if not getattr(result, "_floor_checked", False):
             raise _errors.SandboxFloorError(
                 "sandbox internal invariant violated: a result reached "
@@ -7111,6 +7270,85 @@ def run_trusted(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return run(cmd, profile="none", **kwargs)
 
 
+# Recording preserves the refusal's concrete type: callers raise the
+# exact exception they passed in (SandboxFloorError from the typed
+# arms, plain SandboxSetupError from strict's record-then-raise).
+_FloorExcT = TypeVar("_FloorExcT", bound=_errors.SandboxSetupError)
+
+
+def _record_floor_refusal(
+        run_dir: "str | os.PathLike | None",
+        exc: _FloorExcT,
+        *,
+        floor_label: "str | None" = None,
+        achievable_label: "str | None" = None,
+) -> _FloorExcT:
+    """Record a containment-floor refusal into the run-dir evidence
+    stream (best-effort) and return ``exc`` for the caller to raise.
+
+    The verification seams (dark verification, exploit execution,
+    mitigation replay) map these refusals to the
+    ``unverifiable_environment`` status per finding; this is the
+    sandbox-side half — the refusal chokepoints write a typed record
+    so ``sandbox-summary.json`` carries the run-level count line even
+    when no denial was ever recorded. Serves run()'s in-run
+    chokepoint AND the pre-run() floor-class refusal arms (the
+    untrusted entry gate's userns/libseccomp/seatbelt arms, strict's
+    construction gate), which fire before any run() closure exists.
+
+    ``run_dir`` is the call's own attribution dir (``audit_run_dir``
+    or ``output``). When the call carries neither — a target-only
+    ``run_untrusted``, or an entry-gate refusal raised before the
+    dirs were even passed — fall back to the process's active run
+    dir (``summary.set_active_run_dir``, the run this refusal
+    happened inside), so the refusal still reaches that run's
+    evidence stream instead of silently skipping the record. With no
+    active run either, there is nowhere durable to attribute
+    evidence: the raise itself (BaseException semantics — cannot be
+    swallowed by ``except Exception``) is the signal, the same
+    documented limitation every run-dir evidence writer has.
+
+    ``floor_label``/``achievable_label`` override the labels read
+    from ``exc``'s typed fields — for record-then-raise sites whose
+    exception stays a plain :class:`SandboxSetupError` (strict's
+    construction gate, where the mixed tier-plus-seccomp-axis
+    requirements don't map onto one typed field pair).
+
+    Never raises on its own; a refusal must not be masked by
+    evidence I/O.
+    """
+    try:
+        from . import summary as _summary_refusal
+        if not run_dir:
+            run_dir = _summary_refusal.get_active_run_dir()
+        if not run_dir:
+            return exc
+        _summary_refusal.record_floor_refusal(
+            Path(run_dir),
+            floor=(floor_label
+                   or _tiers.tier_label(exc.floor)),  # type: ignore[attr-defined]
+            achievable=(achievable_label
+                        or _tiers.tier_label(exc.achievable)),  # type: ignore[attr-defined]
+            reason=str(exc),
+            remedies=exc.instructions or "",
+        )
+    except Exception:  # noqa: BLE001 — evidence recording is best-effort
+        logger.debug("floor-refusal record failed", exc_info=True)
+    return exc
+
+
+def _untrusted_refusal_floor() -> "_tiers.ContainmentTier":
+    """Floor field for an untrusted entry-gate refusal: the consent
+    chain's resolved floor, with a pinned ``none`` (BARE) mapped back
+    to the class default — never-BARE-by-consent keeps the default
+    contract in force for the refusal, and a record claiming floor
+    ``none`` would read as no violation at all."""
+    floor, _src = resolve_untrusted_floor()
+    if floor is _tiers.ContainmentTier.BARE:
+        return _tiers.untrusted_default_floor()
+    return floor
+
+
 def _seccomp_axis_arm(entry: str, *,
                       warn: bool = True) -> "tuple[str, str] | None":
     """Refuse-or-waive decision for the seccomp capability axis of the
@@ -7207,8 +7445,30 @@ def _seccomp_axis_arm(entry: str, *,
     )
 
 
-def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
+def _require_userns_or_optin(entry: str, restrict_reads: bool = True,
+                             *, record_dir: "str | None" = None) -> bool:
     """Fail closed when the untrusted-execution contract cannot hold.
+
+    ``record_dir`` — the caller's evidence-attribution dir
+    (``audit_run_dir or output``, threaded by run_untrusted*): every
+    refusal this gate raises is floor-class in substance (the
+    environment cannot meet the untrusted containment contract — the
+    target never executed), so each one records a ``floor_refusal``
+    into the run-dir evidence stream via
+    :func:`_record_floor_refusal` before propagating, exactly like
+    the refusals raised inside run(). Arm-by-arm typed mapping
+    (achievable understates, never overstates):
+
+    * darwin seatbelt arm — floor=the resolved untrusted floor
+      (SEATBELT), achievable=BARE (rlimits-only is all a
+      seatbelt-less mac delivers);
+    * libseccomp arm — floor=the resolved untrusted floor,
+      achievable=BARE (every tier's contract includes the filter, so
+      no tier is fully deliverable without it — the same mapping as
+      run()'s seccomp axis arm);
+    * userns arm — floor=the resolved untrusted floor,
+      achievable=LANDLOCK_ONLY when Landlock is available (the
+      policy layers still engage), else BARE.
 
     The contract's credential-exfil defence is the PID/user namespace:
     without it the child runs as caller_uid in the HOST namespaces,
@@ -7254,8 +7514,7 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
                 "RAPTOR_ALLOW_DEGRADED_UNTRUSTED).", entry,
             )
             return False
-        from .errors import SandboxSetupError
-        raise SandboxSetupError(
+        raise _record_floor_refusal(record_dir, _errors.SandboxFloorError(
             f"{entry}: the seatbelt tier provides the untrusted-"
             f"execution contract on macOS, but sandbox-exec is "
             f"unavailable or failed its smoke test on this host — "
@@ -7263,7 +7522,9 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
             "verify /usr/bin/sandbox-exec exists and can run a "
             "minimal profile, or set RAPTOR_ALLOW_DEGRADED_UNTRUSTED=1 "
             "to explicitly accept rlimits-only containment.",
-        )
+            achievable=_tiers.ContainmentTier.BARE,
+            floor=_untrusted_refusal_floor(),
+        ))
     # libseccomp is part of the untrusted-execution contract on
     # Linux, not an optional layer — see _seccomp_axis_arm (shared
     # with run()'s floor-resolution arm so the direct payload-
@@ -7275,8 +7536,13 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
     # governs it.
     _seccomp_refusal = _seccomp_axis_arm(entry)
     if _seccomp_refusal is not None:
-        from .errors import SandboxSetupError
-        raise SandboxSetupError(*_seccomp_refusal)
+        raise _record_floor_refusal(record_dir, _errors.SandboxFloorError(
+            *_seccomp_refusal,
+            # Same mapping as run()'s seccomp axis arm: no tier's
+            # contract is deliverable without the filter.
+            achievable=_tiers.ContainmentTier.BARE,
+            floor=_untrusted_refusal_floor(),
+        ))
     if check_net_available():
         return False
     # Namespace loss on a userns-blocked host is acceptable only when
@@ -7320,7 +7586,6 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
             "host's userns restriction.", entry, _consent_name,
         )
         return True
-    from .errors import SandboxSetupError
     msg = (
         f"{entry}: this host cannot create unprivileged user "
         f"namespaces, so the untrusted-execution contract (PID-ns "
@@ -7351,7 +7616,15 @@ def _require_userns_or_optin(entry: str, restrict_reads: bool=True) -> bool:
                 f"'{_tiers.tier_label(_floor)}', which the env var "
                 f"does not override."
             )
-    raise SandboxSetupError(msg)
+    raise _record_floor_refusal(record_dir, _errors.SandboxFloorError(
+        msg, "",
+        # The namespace tier is what this host lacks; the policy
+        # layers still engage when the kernel has them.
+        achievable=(_tiers.ContainmentTier.LANDLOCK_ONLY
+                    if check_landlock_available()
+                    else _tiers.ContainmentTier.BARE),
+        floor=_untrusted_refusal_floor(),
+    ))
 
 
 def _reopen_write_only(fd: int, flags: int) -> "int | None":
@@ -7777,6 +8050,9 @@ def run_untrusted(cmd: list[str], *, target: str | None = None, output: str | No
     # channel closed. See _require_userns_or_optin.
     _degraded_no_pidns = _require_userns_or_optin(
         "run_untrusted", restrict_reads,
+        # Evidence attribution for the gate's floor-class refusals:
+        # same precedence as run()'s own refusal chokepoint.
+        record_dir=kwargs.get("audit_run_dir") or output,
     )
     # start_new_session is deliberately NOT accepted: the setsid
     # detachment below is part of the untrusted-execution contract
@@ -8105,6 +8381,9 @@ def run_untrusted_networked(
     # read grant.
     _degraded_no_pidns = _require_userns_or_optin(
         "run_untrusted_networked", restrict_reads,
+        # Evidence attribution for the gate's floor-class refusals:
+        # same precedence as run()'s own refusal chokepoint.
+        record_dir=kwargs.get("audit_run_dir") or output,
     )
     # start_new_session refused for the same reason as run_untrusted:
     # setsid detachment is contract, not preference (see the rationale
