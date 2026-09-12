@@ -384,7 +384,7 @@ class TestReviewOneFunctionTimeoutPath:
         end = src.find("\ndef ", idx)
         window = src[idx:end if end != -1 else len(src)]
         assert "_timeout_reduced_retry(" in window
-        assert '_classify_error(exc) == "timeout"' in window
+        assert '_classify_error(exc, config) == "timeout"' in window
 
 
 class TestMultiPassReviewUnaffected:

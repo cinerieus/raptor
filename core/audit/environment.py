@@ -253,6 +253,35 @@ def classify_systemic(exc: BaseException) -> str | None:
     return None
 
 
+# Row-marking policy for journal writers: disk/fd/memory errnos are
+# unambiguous environment failures. Network and auth failures also
+# feed the breaker, but a SUB-THRESHOLD blip must keep its recoverable
+# per-function lane (end-of-run api_error re-queue, the timeout
+# reduced-context retry) — scattered transient failures marked
+# ``environment`` would permanently error those functions' reviews.
+_ROW_ENVIRONMENT_CLASSES = frozenset({CLASS_DISK, CLASS_FDS, CLASS_MEMORY})
+
+
+def marks_row_environment(
+    exc: BaseException, guard: EnvironmentGuard | None,
+) -> bool:
+    """Whether this failure's journal row should carry
+    ``error_class="environment"``.
+
+    True for disk/fd/memory errnos (always environmental), and for
+    ANY systemic class once the run's breaker has concluded — after a
+    conclusion the environment is proven down, so the in-flight
+    failures draining behind it are environment-caused, not
+    per-function.
+    """
+    cls = classify_systemic(exc)
+    if cls is None:
+        return False
+    if cls in _ROW_ENVIRONMENT_CLASSES:
+        return True
+    return guard is not None and guard.concluded
+
+
 def _fault_dir_hint(
     exc: BaseException, allowed_dirs: list[Path],
 ) -> Path | None:

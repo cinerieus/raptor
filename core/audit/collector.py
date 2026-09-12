@@ -428,6 +428,13 @@ def append_journal_for_outcome(
         reused=reused,
         reused_from_run=reused_from_run,
         producer=producer,
+        # Machine-readable failure class on error verdicts only:
+        # separates environment-caused non-reviews from genuine
+        # per-function review errors for journal readers.
+        error_class=(
+            (getattr(outcome, "error_class", "") or None)
+            if outcome.status == "error" else None
+        ),
     )
     try:
         append_entry(out_dir, entry)

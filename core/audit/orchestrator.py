@@ -2668,7 +2668,7 @@ def review_one_function(
                 gap["name"],
                 exc,
             )
-            if _classify_error(exc) == "timeout" and not _check_budget(
+            if _classify_error(exc, config) == "timeout" and not _check_budget(
                 config, start_time, result,
             ):
                 # First timeout for this function: one immediate
@@ -2683,7 +2683,7 @@ def review_one_function(
                 note_dispatch_failure(
                     config, f"{gap['file']}:{gap['name']}", exc,
                 )
-                outcome = _error_outcome(gap, exc)
+                outcome = _error_outcome(gap, exc, config)
 
     outcome.line = gap.get("line_start", 0)
     result.cost_tracker.record_call(
@@ -10337,6 +10337,11 @@ def _commit_outcome(
         "cost_usd": outcome.cost_usd,
         "duration_s": outcome.duration_s,
     }
+    if outcome.status == "error" and outcome.error_class:
+        # Machine-readable failure class: lets readers separate
+        # environment-caused non-reviews from genuine per-function
+        # review errors without parsing the body text.
+        entry["error_class"] = outcome.error_class
     if gap.get("edge_callee"):
         # Tier-1 edge-contract reviews journal under an edge-suffixed
         # key, but this audit-log record's key is the caller's plain
@@ -10968,17 +10973,57 @@ def _multi_pass_review(
 # class ceiling) — because by end of run a transport brownout has
 # usually cleared, and without the re-queue a single timeout
 # permanently errors the function's review.
+#
+# ``environment`` (disk/fd/memory errnos; any systemic class once the
+# breaker has concluded) is deliberately absent: an in-run retry
+# re-dispatches into the same faulted environment. The rows stay
+# error verdicts — excluded from the reviewed set, the coverage
+# import, and verdict reuse — so the functions re-enter the gap set
+# on the next run. Sub-threshold network/auth failures do NOT map to
+# ``environment`` (see _classify_error): a scattered transport blip
+# keeps its recoverable lane here.
 _RECOVERABLE_ERROR_CLASSES = frozenset(
     {"json_parse", "truncation", "api_error", "timeout"},
 )
 
 
-def _classify_error(exc: Exception) -> str:
+def _classify_error(
+    exc: Exception, config: OrchestratorConfig | None = None,
+) -> str:
     msg = str(exc).lower()
     if "content filter" in msg or "blocked" in msg:
         return "content_filter"
     if "budget exceeded" in msg:
         return "budget"
+    # Environmental failures (see environment.marks_row_environment:
+    # chain-walked disk/fd/memory errnos always; network/auth only
+    # once the run's breaker has CONCLUDED) get their own class so
+    # journal readers can tell "the environment failed" from "this
+    # review failed". Deliberately NOT in _RECOVERABLE_ERROR_CLASSES:
+    # the end-of-run retry would re-dispatch into the same faulted
+    # environment; the next run (whose gap fold excludes error
+    # verdicts) retries the function instead. Checked before the
+    # message-text classes below — a systemic errno anywhere in the
+    # chain makes the whole failure environmental regardless of the
+    # outer wrapper. Sub-threshold network blips deliberately fall
+    # THROUGH to the recoverable classes below (they still feed the
+    # breaker window at the failure writers): marking scattered
+    # transients "environment" would permanently error those
+    # functions' reviews.
+    try:
+        from .environment import CLASS_NETWORK, marks_row_environment
+        from .environment import classify_systemic as _systemic
+        if marks_row_environment(
+            exc, getattr(config, "environment_guard_state", None),
+        ):
+            return "environment"
+        if _systemic(exc) == CLASS_NETWORK:
+            # A causal connection/DNS failure is a transport brownout:
+            # the recoverable api_error lane (end-of-run re-queue)
+            # owns it, whatever the outer wrapper's message says.
+            return "api_error"
+    except ImportError:
+        pass
     if "truncated" in msg or "output token limit" in msg:
         return "truncation"
     if isinstance(exc, json.JSONDecodeError):
@@ -11022,13 +11067,17 @@ def _classify_error(exc: Exception) -> str:
     return "internal"
 
 
-def _error_outcome(gap: dict[str, Any], exc: Exception) -> ReviewOutcome:
+def _error_outcome(
+    gap: dict[str, Any],
+    exc: Exception,
+    config: OrchestratorConfig | None = None,
+) -> ReviewOutcome:
     return ReviewOutcome(
         file=gap["file"],
         function=gap["name"],
         status="error",
         body=f"orchestrator: review_fn raised {type(exc).__name__}: {exc}",
-        error_class=_classify_error(exc),
+        error_class=_classify_error(exc, config),
     )
 
 
@@ -11092,7 +11141,7 @@ def _timeout_reduced_retry(
         # Report the ORIGINAL timeout: its classification routes the
         # outcome into the end-of-run retry pass's timeout handling
         # (reduced context + capped per-call timeout).
-        return _error_outcome(gap, exc)
+        return _error_outcome(gap, exc, config)
     outcome.context_reduced = True
     if outcome.review_result is not None:
         outcome.review_result["context_reduced"] = True
@@ -14335,7 +14384,7 @@ def _review_items(
             note_dispatch_failure(
                 config, f"{gap['file']}:{gap['name']}", exc,
             )
-            outcome = _error_outcome(gap, exc)
+            outcome = _error_outcome(gap, exc, config)
 
         if outcome.status == "finding":
             gate_violations = _check_finding_gates(outcome, mode=config.mode)

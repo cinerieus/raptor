@@ -86,17 +86,30 @@ def _commit_error_outcome(
     # Terminal for this function — let the breaker correlate it with
     # other functions' failures.
     note_dispatch_failure(config, f"{file}:{function}", exc)
+    # Both classes are deliberately NOT in the end-of-run recoverable
+    # set: a deterministic bug in the review path would re-fail on
+    # immediate re-dispatch, and an environmental failure would
+    # re-dispatch into the same faulted environment. The next run
+    # (which excludes error verdicts from its reviewed set) retries
+    # the function. ``environment`` is machine-readably distinct so
+    # journal readers can tell the environment failed, not the review
+    # — marked only for disk/fd/memory errnos, or any systemic class
+    # once the breaker has concluded (sub-threshold network/auth
+    # blips keep the per-function class; they fed the window above).
+    from .environment import marks_row_environment
+    error_class = (
+        "environment" if marks_row_environment(
+            exc, getattr(config, "environment_guard_state", None),
+        )
+        else "task_exception"
+    )
     outcome = ReviewOutcome(
         file=file,
         function=function,
         status="error",
         body=f"review failed: {type(exc).__name__}: {exc}",
         line=task.gap.get("line_start", 0),
-        # Distinct class, deliberately NOT in the end-of-run
-        # recoverable set: a deterministic bug in the review path
-        # would re-fail on immediate re-dispatch; the next run (which
-        # excludes error verdicts from its reviewed set) retries it.
-        error_class="task_exception",
+        error_class=error_class,
     )
     try:
         if collector is not None:

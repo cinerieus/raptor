@@ -200,6 +200,14 @@ class ReviewJournalEntry:
     # ``agentic``. Enables reliable ``import_journal`` tool-label
     # mapping without inferring from ``run_id`` string patterns.
     producer: str | None = None
+    # ``error_class``: machine-readable failure class on
+    # ``verdict == "error"`` rows (``environment`` for systemic
+    # environmental failures vs the per-function classes). Error rows
+    # never fold into coverage or verdict reuse regardless; the class
+    # lets readers separate "the environment failed" from "this
+    # review failed" without parsing the body. Additive; absent on
+    # non-error and pre-field rows.
+    error_class: str | None = None
     # ``edge_callee``: set ONLY on tier-1 edge-contract review entries
     # ("callee_file:callee", file component percent-encoded). The
     # entry's ``file``/``function`` stay the CALLER so every existing
@@ -588,6 +596,7 @@ def _entry_from_dict(raw: dict[str, Any]) -> ReviewJournalEntry:
         reused=raw.get("reused"),
         reused_from_run=raw.get("reused_from_run"),
         producer=raw.get("producer"),
+        error_class=raw.get("error_class"),
         edge_callee=raw.get("edge_callee"),
         edge_verdicts=raw.get("edge_verdicts"),
         integrity=raw.get("integrity"),
