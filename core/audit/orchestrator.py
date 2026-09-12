@@ -202,6 +202,7 @@ from .sweep import (
     run_semgrep_sweep,
     run_smt_verb_direct,
 )
+from .sweep_memo import SweepMemo, hash_file as _memo_hash_file, hash_text as _memo_hash_text
 from .topo_order import topological_sort as _topological_sort
 from .triage import TriageBucket, classify_all, format_triage_summary
 
@@ -767,6 +768,15 @@ class OrchestratorConfig:
     # measured optima — tune per target density.
     prior_claims_per_function: int = 3
     prior_claim_excerpt_chars: int = 600
+    # Per-run memo for deterministic tool-chain sweep steps (semgrep /
+    # coccinelle / codeql / smt / compiler): identical dispatches
+    # recurring across hypotheses, critique/promotion re-checks and
+    # reused verdicts return the cached result instead of re-spawning
+    # the subprocess. Keys are content hashes of the steering inputs;
+    # see core.audit.sweep_memo for the soundness contract. One memo
+    # per run — never share across runs (the run-lifetime bound is
+    # part of the key contract).
+    sweep_memo: SweepMemo = field(default_factory=SweepMemo, repr=False)
 
 
 @dataclass
@@ -15895,6 +15905,25 @@ def _ghidra_re_context(
     return re_types, xref_source
 
 
+def _memoized_sweep_step(
+    config: OrchestratorConfig,
+    tool: str,
+    key_parts: dict[str, str | int | None],
+    runner: Callable[[], Any],
+) -> Any:
+    """Route one memo-eligible sweep step through the per-run memo.
+
+    Falls back to a direct run when the config carries no memo (test
+    stand-ins) or when any key part is un-hashable (``None`` value —
+    see :meth:`SweepMemo.make_key`).
+    """
+    memo = getattr(config, "sweep_memo", None)
+    if memo is None:
+        return runner()
+    key = SweepMemo.make_key(tool, key_parts)
+    return memo.get_or_run(key, runner)
+
+
 def _run_tool_chain(
     chain: list[dict[str, Any]],
     *,
@@ -16036,18 +16065,35 @@ def _run_tool_chain(
                 # those get the identifier-consistency and
                 # negative-control gates (stock rules are curated).
                 rule_keyword = tool_cfg.get("keyword") or ""
+                _sg_line_end = _checklist_line_end(
+                    config, file_path, function_name,
+                ) or (line_start + 50 if line_start else 0)
+                _sg_hypothesis = hypothesis if rule_keyword else ""
                 try:
-                    sweep = run_semgrep_sweep(
-                        target_path=effective_target,
-                        file_path=file_path,
-                        function_name=function_name,
-                        rule_config=rule_path,
-                        line_start=line_start,
-                        line_end=_checklist_line_end(
-                            config, file_path, function_name)
-                        or (line_start + 50 if line_start else 0),
-                        hypothesis=hypothesis if rule_keyword else "",
-                        rule_keyword=rule_keyword,
+                    sweep = _memoized_sweep_step(
+                        config,
+                        "semgrep",
+                        {
+                            "rule": _memo_hash_file(rule_path),
+                            "file": _memo_hash_file(
+                                effective_target / file_path),
+                            "path": file_path,
+                            "function": function_name,
+                            "line_start": line_start,
+                            "line_end": _sg_line_end,
+                            "hypothesis": _memo_hash_text(_sg_hypothesis),
+                            "keyword": rule_keyword,
+                        },
+                        lambda: run_semgrep_sweep(
+                            target_path=effective_target,
+                            file_path=file_path,
+                            function_name=function_name,
+                            rule_config=rule_path,
+                            line_start=line_start,
+                            line_end=_sg_line_end,
+                            hypothesis=_sg_hypothesis,
+                            rule_keyword=rule_keyword,
+                        ),
                     )
                 finally:
                     if rule_path and os.path.basename(rule_path).startswith("audit_sweep_"):
@@ -16085,13 +16131,28 @@ def _run_tool_chain(
                     _increment_tier_dict(tier_counters, "semgrep", "refuted")
 
             elif tool_type == "smt":
-                smt_result = run_smt_verb_direct(
-                    file_path=file_path,
-                    function_name=function_name,
-                    verb=tool_cfg["verb"],
-                    source=source or "",
-                    hypothesis=hypothesis,
-                    target_path=str(effective_target),
+                # target_path is a semantic input here (it selects the
+                # target-kind vocab packs), not a staleness proxy — the
+                # analysed text travels in ``source``.
+                smt_result = _memoized_sweep_step(
+                    config,
+                    "smt",
+                    {
+                        "verb": tool_cfg["verb"],
+                        "source": _memo_hash_text(source or ""),
+                        "hypothesis": _memo_hash_text(hypothesis),
+                        "path": file_path,
+                        "function": function_name,
+                        "target": str(effective_target),
+                    },
+                    lambda: run_smt_verb_direct(
+                        file_path=file_path,
+                        function_name=function_name,
+                        verb=tool_cfg["verb"],
+                        source=source or "",
+                        hypothesis=hypothesis,
+                        target_path=str(effective_target),
+                    ),
                 )
                 if smt_result.outcome == "confirmed":
                     confirmed.append(f"smt:{tool_cfg['verb']}")
@@ -16708,20 +16769,45 @@ def _run_tool_chain(
                         domain_vocab=domain_vocab,
                     )
                 else:
-                    cocci_result = run_coccinelle_sweep(
-                        target_path=effective_target,
-                        file_path=file_path,
-                        function_name=function_name,
-                        cocci_rule=tool_cfg["rule"],
-                        line_start=line_start or None,
-                        # Real function bound from the checklist (same
-                        # source the semgrep leg uses); the sweep falls
-                        # back to a +50 window when unresolvable.
-                        line_end=_checklist_line_end(
-                            config, file_path, function_name,
-                        ) or None,
-                        domain_vocab=domain_vocab,
-                    )
+                    _cc_line_end = _checklist_line_end(
+                        config, file_path, function_name,
+                    ) or None
+
+                    def _run_cocci() -> Any:
+                        return run_coccinelle_sweep(
+                            target_path=effective_target,
+                            file_path=file_path,
+                            function_name=function_name,
+                            cocci_rule=tool_cfg["rule"],
+                            line_start=line_start or None,
+                            # Real function bound from the checklist
+                            # (same source the semgrep leg uses); the
+                            # sweep falls back to a +50 window when
+                            # unresolvable.
+                            line_end=_cc_line_end,
+                            domain_vocab=domain_vocab,
+                        )
+
+                    if domain_vocab is None:
+                        cocci_result = _memoized_sweep_step(
+                            config,
+                            "coccinelle",
+                            {
+                                "rule": _memo_hash_file(tool_cfg["rule"]),
+                                "file": _memo_hash_file(
+                                    effective_target / file_path),
+                                "path": file_path,
+                                "function": function_name,
+                                "line_start": line_start or 0,
+                                "line_end": _cc_line_end or 0,
+                            },
+                            _run_cocci,
+                        )
+                    else:
+                        # A DomainVocabulary re-renders the rule text
+                        # per run state and has no stable content hash
+                        # — vocab-rendered sweeps run unmemoized.
+                        cocci_result = _run_cocci()
                 if cocci_result.outcome == "confirmed":
                     confirmed.append(f"coccinelle:{Path(tool_cfg['rule']).stem}")
                     if tier_counters:
@@ -16823,16 +16909,38 @@ def _run_tool_chain(
                     continue
                 from .sweep import run_codeql_sweep
 
-                codeql_result = run_codeql_sweep(
-                    target_path=effective_target,
-                    file_path=file_path,
-                    function_name=function_name,
-                    query_path=tool_cfg["query"],
-                    database_path=_tool_db,
-                    line_start=line_start,
-                    line_end=_checklist_line_end(
-                        config, file_path, function_name)
-                    or (line_start + 50 if line_start else 0),
+                _cq_line_end = _checklist_line_end(
+                    config, file_path, function_name,
+                ) or (line_start + 50 if line_start else 0)
+                codeql_result = _memoized_sweep_step(
+                    config,
+                    "codeql",
+                    {
+                        "query": _memo_hash_file(tool_cfg["query"]),
+                        # The database's row data is too large to hash;
+                        # its metadata file pins the build identity and
+                        # the memo's run lifetime bounds the rest (the
+                        # DB is built once per run). Missing metadata
+                        # → un-hashable → unmemoized.
+                        "db_meta": _memo_hash_file(
+                            Path(_tool_db) / "codeql-database.yml"),
+                        "db": str(_tool_db),
+                        "file": _memo_hash_file(
+                            effective_target / file_path),
+                        "path": file_path,
+                        "function": function_name,
+                        "line_start": line_start,
+                        "line_end": _cq_line_end,
+                    },
+                    lambda: run_codeql_sweep(
+                        target_path=effective_target,
+                        file_path=file_path,
+                        function_name=function_name,
+                        query_path=tool_cfg["query"],
+                        database_path=_tool_db,
+                        line_start=line_start,
+                        line_end=_cq_line_end,
+                    ),
                 )
                 if codeql_result.outcome == "confirmed":
                     confirmed.append(f"codeql:{Path(tool_cfg['query']).stem}")
@@ -16855,15 +16963,32 @@ def _run_tool_chain(
             elif tool_type == "compiler":
                 from .compiler_sweep import run_compiler_analyzer_sweep
 
-                comp_result = run_compiler_analyzer_sweep(
-                    target_path=effective_target,
-                    file_path=file_path,
-                    function_name=function_name,
-                    hypothesis=hypothesis,
-                    cwe=tool_cfg.get("cwe", ""),
-                    line_start=line_start,
-                    line_end=line_start + 50 if line_start else 0,
-                    out_dir=config.out_dir,
+                # The TU's #include closure is not hashed — the memo's
+                # single-run lifetime over a read-only target tree
+                # bounds it (see core.audit.sweep_memo).
+                comp_result = _memoized_sweep_step(
+                    config,
+                    "compiler",
+                    {
+                        "file": _memo_hash_file(
+                            effective_target / file_path),
+                        "path": file_path,
+                        "function": function_name,
+                        "hypothesis": _memo_hash_text(hypothesis),
+                        "cwe": tool_cfg.get("cwe", ""),
+                        "line_start": line_start,
+                        "target": str(effective_target),
+                    },
+                    lambda: run_compiler_analyzer_sweep(
+                        target_path=effective_target,
+                        file_path=file_path,
+                        function_name=function_name,
+                        hypothesis=hypothesis,
+                        cwe=tool_cfg.get("cwe", ""),
+                        line_start=line_start,
+                        line_end=line_start + 50 if line_start else 0,
+                        out_dir=config.out_dir,
+                    ),
                 )
                 if comp_result.outcome == "confirmed":
                     confirmed.append(comp_result.rule_id or "compiler:analyzer")

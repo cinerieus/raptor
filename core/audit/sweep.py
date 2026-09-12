@@ -685,16 +685,22 @@ def run_semgrep_sweep(
                         + ", ".join(sorted(named)[:5]) + ")"
                     )
 
-        if (
-            in_function and capped_reason is None and rule_keyword
-            and _rule_matches_negative_control(
+        control_error = False
+        if in_function and capped_reason is None and rule_keyword:
+            _ctl = _rule_matches_negative_control(
                 rule_config, rule_keyword, file_path,
             )
-        ):
-            capped_reason = (
-                f"presence detector: rule for {rule_keyword!r} also "
-                "matches the guarded negative-control fixture"
-            )
+            if _ctl is None:
+                # Control run failed — proceed uncapped for THIS
+                # dispatch, but stamp the result so the sweep memo
+                # never pins it (nothing was banked; a re-dispatch
+                # must re-run the control and get its chance to cap).
+                control_error = True
+            elif _ctl:
+                capped_reason = (
+                    f"presence detector: rule for {rule_keyword!r} also "
+                    "matches the guarded negative-control fixture"
+                )
 
         if capped_reason:
             logger.info(
@@ -741,6 +747,12 @@ def run_semgrep_sweep(
                 serialized.append({"line": getattr(f, "line", 0),
                                    "rule_id": getattr(f, "rule_id", ""),
                                    "message": getattr(f, "message", "")})
+        details: dict[str, Any] | None = None
+        if capped_reason:
+            details = {"reason": capped_reason}
+        if control_error:
+            details = details or {}
+            details["negative_control_error"] = True
         return SweepResult(
             tool="semgrep",
             file_path=file_path,
@@ -749,7 +761,7 @@ def run_semgrep_sweep(
             matches=serialized,
             rule_id=rule_config,
             errors=result.errors,
-            details={"reason": capped_reason} if capped_reason else None,
+            details=details,
         )
     except Exception as exc:  # noqa: BLE001
         return SweepResult(
@@ -852,21 +864,27 @@ def _expanded_second_pass(
                         + ", ".join(sorted(named)[:5]) + ")"
                     )
 
-        if (
-            matches and capped_reason is None and rule_keyword
-            and _rule_matches_negative_control(
+        control_error = False
+        if matches and capped_reason is None and rule_keyword:
+            _ctl = _rule_matches_negative_control(
                 rule_config, rule_keyword, file_path,
             )
-        ):
-            capped_reason = (
-                f"presence detector: rule for {rule_keyword!r} also "
-                "matches the guarded negative-control fixture"
-            )
+            if _ctl is None:
+                # Same contract as the plain pass: uncapped for this
+                # dispatch, stamped so the sweep memo refuses to pin.
+                control_error = True
+            elif _ctl:
+                capped_reason = (
+                    f"presence detector: rule for {rule_keyword!r} also "
+                    "matches the guarded negative-control fixture"
+                )
 
         details: dict[str, Any] = {
             "expanded_view": True,
             "dropped_out_of_file": exp.dropped_out_of_file,
         }
+        if control_error:
+            details["negative_control_error"] = True
         if capped_reason:
             details["reason"] = capped_reason
             logger.info(
@@ -1010,12 +1028,19 @@ def _relanguage_rule_config(
 
 def _rule_matches_negative_control(
     rule_config: str, keyword: str, file_path: str,
-) -> bool:
+) -> bool | None:
     """Run *rule_config* against the keyword's guarded fixture.
 
     True means the rule fires on safe code — it is a presence detector.
-    Errors return False: a broken control run must not fabricate
-    inconclusive outcomes for rules that behaved on the real target.
+    False means the control ran (or is deterministically inapplicable:
+    no fixture for the keyword, un-relanguageable rule) and did not
+    fire. None means the control RUN itself failed (semgrep missing,
+    timeout, crash): a broken control must not fabricate inconclusive
+    outcomes for rules that behaved on the real target, so the caller
+    proceeds uncapped — but it must also mark the result so the
+    per-run sweep memo refuses to pin the uncapped verdict (see
+    ``SweepMemo.put``): nothing was banked, and the next dispatch must
+    re-run the control and get its chance to cap.
     """
     fixture = negative_control_fixture(keyword, file_path)
     if fixture is None:
@@ -1059,7 +1084,7 @@ def _rule_matches_negative_control(
 
         result = run_rule(fixture, control_config, timeout=60)
     except Exception:  # noqa: BLE001
-        return False
+        return None
     finally:
         if relanged is not None:
             with contextlib.suppress(OSError):
@@ -1071,7 +1096,7 @@ def _rule_matches_negative_control(
         # rejected, timeout): its empty findings say nothing about
         # the rule. Do NOT cache matched=False — that permanently
         # disarmed the presence-detector cap for this keyword.
-        return False
+        return None
     matched = bool(result.findings)
     _negative_control_cache[cache_key] = matched
     return matched
