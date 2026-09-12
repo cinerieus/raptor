@@ -803,8 +803,14 @@ def _all_refs_stdin_piped(
 ) -> bool:
     """True when every secret-referencing line in the body uses the
     ``echo "$SECRET" | <command> --password-stdin`` pattern — the
-    standard safe credential-passing form for docker login et al."""
+    standard safe credential-passing form for docker login et al.
+
+    Only inspects direct secret literals and secret-bound env vars;
+    step-output taint is invisible here.  Returns False when no
+    direct-ref lines are found (no vacuous truth) so callers that
+    also track step-output taint are not accidentally suppressed."""
     lines = body.splitlines()
+    found_any = False
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
@@ -818,9 +824,11 @@ def _all_refs_stdin_piped(
         for m in _ENV_TEMPLATE_RE.finditer(stripped):
             if m.group(1) in secret_env:
                 has_secret_ref = True
-        if has_secret_ref and not _STDIN_PIPE_RE.search(stripped):
-            return False
-    return True
+        if has_secret_ref:
+            found_any = True
+            if not _STDIN_PIPE_RE.search(stripped):
+                return False
+    return found_any
 
 
 def _is_truthy_run_body_egress(body: str) -> bool:

