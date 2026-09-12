@@ -628,29 +628,46 @@ def run_sandboxed(cmd: list[str], *,
                 # the child's first write will create it.
                 pass
 
-    # 2b. exclude_tmp_baseline: with /private/tmp stripped from the
-    #     profile's writable exceptions, the child's default TMPDIR
-    #     (/var/folders/...) is ALSO unwritable under write isolation
-    #     — tempfile falls through candidate dirs and compilers fail
-    #     on intermediates. Redirect TMPDIR into {output}/.tmp, which
-    #     rides the output writable exception. Without an output dir
-    #     there is nowhere writable to point it — warn, because
-    #     tmp-dependent tools will fail (that is the flag's contract:
-    #     only use it when the workload doesn't need tmp).
-    if exclude_tmp_baseline:
-        if output:
-            _scratch_tmp = os.path.join(output, ".tmp")
-            try:
-                os.makedirs(_scratch_tmp, mode=0o700, exist_ok=True)
-            except OSError:
-                pass
-            child_env["TMPDIR"] = _scratch_tmp
-        else:
-            logger.warning(
-                "exclude_tmp_baseline without output=: tmp writes are "
-                "denied and TMPDIR has no writable redirect target — "
-                "tmp-dependent tools in this sandbox will fail"
-            )
+    # 2b. TMPDIR steering under write isolation: whenever the profile
+    #     engages the file-write deny (same condition as
+    #     seatbelt.build_profile's write_isolation_engaged gate — keep
+    #     them in sync), the child's default TMPDIR (the per-user
+    #     /var/folders/... DARWIN_USER_TEMP_DIR, which rides the
+    #     safe-env allowlist into every child env) sits OUTSIDE every
+    #     write exception: python's tempfile silently falls back to
+    #     /tmp, but tools that honour TMPDIR directly (clang
+    #     intermediates, git, tar) get EPERM — confirmed on current
+    #     macOS (26.6.2) for every write-isolated shape left at the
+    #     host-default TMPDIR. Linux has no such gap (its default
+    #     TMPDIR=/tmp IS seeded writable). Redirect TMPDIR into
+    #     {output}/.tmp, which rides the output writable exception —
+    #     never widen the profile's write exceptions to the
+    #     /var/folders tree instead (host-shared, cross-run mutable).
+    #     Earlier code steered only under exclude_tmp_baseline (the
+    #     untrusted lane), leaving every trusted-lane write-isolated
+    #     run with an unwritable default TMPDIR.
+    #     Without an output dir there is nowhere writable to point it;
+    #     for exclude_tmp_baseline that is fatal for tmp-dependent
+    #     tools (every /tmp spelling is denied too) — warn, per the
+    #     flag's contract: only use it when the workload doesn't need
+    #     tmp. (With the /private/tmp seed intact, tempfile's /tmp
+    #     fallback still works, so no warning there.)
+    _write_isolation_engaged = bool(
+        output or writable_paths or target or restrict_reads
+    )
+    if _write_isolation_engaged and output:
+        _scratch_tmp = os.path.join(output, ".tmp")
+        try:
+            os.makedirs(_scratch_tmp, mode=0o700, exist_ok=True)
+        except OSError:
+            pass
+        child_env["TMPDIR"] = _scratch_tmp
+    elif exclude_tmp_baseline:
+        logger.warning(
+            "exclude_tmp_baseline without output=: tmp writes are "
+            "denied and TMPDIR has no writable redirect target — "
+            "tmp-dependent tools in this sandbox will fail"
+        )
 
     # 3. rlimits via preexec_fn.
     #

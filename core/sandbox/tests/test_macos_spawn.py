@@ -196,6 +196,80 @@ def test_audit_streamer_scoped_to_run_process_tree(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only")
+def test_tmpdir_steered_into_output_scratch_under_write_isolation(
+        tmp_path, monkeypatch):
+    """Whenever the profile engages write isolation and an output dir
+    exists, the child's TMPDIR must be steered into {output}/.tmp.
+    Pre-fix, only the untrusted lane (exclude_tmp_baseline=True) was
+    steered: every trusted-lane write-isolated macOS run kept the
+    host-default per-user /var/folders TMPDIR, which sits OUTSIDE the
+    write exceptions — python's tempfile silently fell back to /tmp,
+    but tools that honour TMPDIR directly (clang intermediates, git,
+    tar) got EPERM (confirmed on current macOS). The steer must ride
+    the EXISTING output write exception, never widen the profile.
+
+    Cross-platform: SANDBOX_EXEC is swapped for a script that records
+    the SBPL profile text it was handed, then execs the target (the
+    real shim + trampoline layering runs on Linux too).
+    """
+    capture = tmp_path / "profile.sb"
+    fake = tmp_path / "fake-sandbox-exec"
+    fake.write_text(
+        f'#!/bin/sh\nprintf %s "$2" > "{capture}"\nshift 3\nexec "$@"\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setattr(_macos_spawn, "SANDBOX_EXEC", str(fake))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    r = _macos_spawn.run_sandboxed(
+        ["/bin/sh", "-c", 'printf %s "$TMPDIR"'],
+        output=str(out_dir),
+        # A host-default-style TMPDIR rides the safe-env allowlist
+        # into every child env — the steer must override it, not
+        # merely fill an absent value.
+        env={"PATH": "/usr/bin:/bin",
+             "TMPDIR": "/var/folders/zz/host-default/T/"},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r.returncode == 0
+    expected_tmp = os.path.join(str(out_dir), ".tmp")
+    assert r.stdout == expected_tmp
+    assert os.path.isdir(expected_tmp)
+
+    # The steered TMPDIR must be covered by the OUTPUT write
+    # exception already in the profile — no new write-exception
+    # entry, no /var/folders widening.
+    profile = capture.read_text()
+    out_real = os.path.realpath(str(out_dir))
+    assert f'(subpath "{out_real}")' in profile
+    assert expected_tmp.startswith(out_real + os.sep)
+    assert "/var/folders" not in profile
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only")
+def test_tmpdir_not_steered_without_write_isolation(tmp_path,
+                                                    monkeypatch):
+    """No write isolation (network-only-equivalent kwargs) → the
+    child keeps its inherited TMPDIR: nothing is unwritable, so the
+    steer must not engage (behaviour-budget: non-write-isolated runs
+    are byte-identical)."""
+    fake = tmp_path / "fake-sandbox-exec"
+    fake.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(_macos_spawn, "SANDBOX_EXEC", str(fake))
+
+    r = _macos_spawn.run_sandboxed(
+        ["/bin/sh", "-c", 'printf %s "${TMPDIR-unset}"'],
+        block_network=True,
+        env={"PATH": "/usr/bin:/bin", "SENTINEL": "1"},
+        capture_output=True, text=True, timeout=15,
+    )
+    assert r.returncode == 0
+    assert r.stdout == "unset"
+
+
 # --- Darwin-only behavioural tests ------------------------------------
 
 @darwin_only
