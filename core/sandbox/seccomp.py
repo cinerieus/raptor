@@ -199,13 +199,17 @@ _SECCOMP_BLOCK_ALWAYS = (
     # any future relaxation of the capability check would route around it.
     "open_by_handle_at", "name_to_handle_at",
 )
-# NOTE on namespace/mount syscalls: LANE-DEPENDENT. The subprocess/
-# preexec lanes do NOT block them — their filter installs before the
-# `unshare` CLI bootstrap execs, so blocking unshare(2) there kills
-# the sandbox's own setup. The FORK-BACKEND lane DOES block namespace
-# creation (block_ns_creation below): its filter installs in the
-# grandchild after every namespace the sandbox itself needs exists,
-# which removed the old constraint outright. mount/umount2/pivot_root
+# NOTE on namespace/mount syscalls: LANE-DEPENDENT. The unshare-CLI
+# subprocess lane does NOT block them — its filter installs before
+# the `unshare` CLI bootstrap execs, so blocking unshare(2) there
+# kills the sandbox's own setup (documented residual: that lane's
+# payload keeps kernel namespace-creation surface; the kernel's
+# unmapped-uid checks bound what a created ns can do). The
+# FORK-BACKEND lane and the PLAIN subprocess lane (no unshare
+# bootstrap — the payload execs directly under the filter) DO block
+# namespace creation (block_ns_creation below): the fork backend
+# installs in the grandchild after every namespace the sandbox itself
+# needs exists, and the plain lane never legitimately unshares. mount/umount2/pivot_root
 # stay unblocked at the seccomp layer on all lanes — a landlocked
 # process is already denied every mount(2) topology change
 # (Landlock's sb_mount hook), which is also why the grandchild mounts

@@ -20,6 +20,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from . import landlock as _landlock
 from . import probes as _probes
@@ -2485,14 +2486,31 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             except OSError:
                 _host_nproc_cap = None  # /proc unreadable — skip the cap
 
-    preexec = _make_preexec_fn(effective_limits, writable_paths=writable_paths,
-                               allowed_tcp_ports=allowed_tcp_ports,
-                               seccomp_profile=seccomp_profile,
-                               seccomp_block_udp=seccomp_block_udp,
-                               readable_paths=_preexec_readable,
-                               deny_all_tcp_connect=_degraded_tcp_deny,
-                               host_nproc_cap=_host_nproc_cap,
-                               reaper_cell=_reaper_cell)
+    _preexec_build_kwargs: dict[str, Any] = dict(
+        writable_paths=writable_paths,
+        allowed_tcp_ports=allowed_tcp_ports,
+        seccomp_profile=seccomp_profile,
+        seccomp_block_udp=seccomp_block_udp,
+        readable_paths=_preexec_readable,
+        deny_all_tcp_connect=_degraded_tcp_deny,
+        host_nproc_cap=_host_nproc_cap,
+        reaper_cell=_reaper_cell,
+    )
+    preexec = _make_preexec_fn(effective_limits, **_preexec_build_kwargs)
+    # Plain-subprocess variant with the namespace-creation deny rules
+    # (unshare/clone CLONE_NEW*, setns; clone3→ENOSYS). The fork
+    # backend's grandchild always installs these; the subprocess lanes
+    # could not take them blanket because the unshare-CLI lane's
+    # filter precedes its own `unshare` bootstrap. run() selects this
+    # variant exactly when the command is NOT unshare-wrapped
+    # (need_unshare False), so the plain lane stops being the one
+    # lane where a sandboxed payload can still reach the kernel's
+    # namespace-creation surface. Two closures, not a mutable flag: a
+    # preexec fn is fork-inherited, and a flag flipped per-run would
+    # race concurrent run() calls on this context.
+    preexec_ns_blocked = _make_preexec_fn(
+        effective_limits, seccomp_block_ns_creation=True,
+        **_preexec_build_kwargs)
 
     # Host-fingerprint persona — opt-in. Built once per sandbox() context
     # and reused across every run() call inside it. Cleanup happens in
@@ -3658,15 +3676,32 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # expect the raise to gate their build steps).
         _check_requested = bool(kwargs.pop("check", False))
 
-        # Always set resource limits via preexec_fn
+        # `need_unshare` is computed BEFORE the preexec selection below
+        # because the two must agree: the ns-creation-blocking preexec
+        # variant is only safe when the command is NOT wrapped in the
+        # `unshare` CLI bootstrap (the filter would refuse the
+        # bootstrap's own unshare). See the block comment further down
+        # for what the predicate means.
+        need_unshare = (use_sandbox
+                        and not use_seatbelt
+                        and (block_network or use_mount or restrict_reads))
+
+        # Always set resource limits via preexec_fn. The plain
+        # subprocess lane (no unshare bootstrap) takes the variant
+        # that additionally denies namespace creation — the payload
+        # execs directly under the filter there, and nothing it
+        # legitimately runs unshares; the unshare-wrapped lane keeps
+        # the permissive variant (its bootstrap must unshare, and the
+        # fork backend covers ns-blocking for the namespace lanes).
+        _lane_preexec = preexec if need_unshare else preexec_ns_blocked
         existing_preexec = kwargs.pop("preexec_fn", None)
         if existing_preexec:
             def combined() -> None:
                 existing_preexec()  # Caller's setup first (may open FDs)
-                preexec()           # Our limits + Landlock last (restricts from here on)
+                _lane_preexec()     # Our limits + Landlock last (restricts from here on)
             kwargs["preexec_fn"] = combined
         else:
-            kwargs["preexec_fn"] = preexec
+            kwargs["preexec_fn"] = _lane_preexec
 
         # Missing-tool resolution check, BEFORE any lane dispatch. A
         # command that resolves NOWHERE — not on the caller's PATH, not
@@ -3734,9 +3769,8 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # ineligible-for-spawn macOS call (or even a fully eligible
         # one, since the unshare_cmd is built unconditionally below)
         # tries to resolve `unshare` and crashes the sandbox call.
-        need_unshare = (use_sandbox
-                        and not use_seatbelt
-                        and (block_network or use_mount or restrict_reads))
+        # (Assigned above, before the preexec selection that must
+        # agree with it.)
 
         # Representative engagement gate. The availability probes that set
         # `use_sandbox` test a NARROWER op (`unshare --user --net`) than the

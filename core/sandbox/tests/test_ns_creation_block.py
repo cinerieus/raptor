@@ -5,9 +5,12 @@ namespace above all — reaches the kernel code paths behind most
 container-escape CVEs even though uid_map writes are refused. The
 fork backend's filter installs AFTER the sandbox's own namespace
 setup, so denying namespace creation there costs legitimate
-workloads nothing; the subprocess/preexec lanes install their filter
-BEFORE exec'ing the unshare CLI bootstrap and must keep the
-syscalls.
+workloads nothing. On the subprocess side the contract is per-lane:
+the PLAIN lane (payload execs directly under the filter) takes the
+ns-blocking preexec variant too, while the unshare-CLI lane installs
+its filter BEFORE exec'ing the unshare bootstrap and must keep the
+syscalls — context selects between the two variants keyed on
+need_unshare.
 """
 
 import os
@@ -19,19 +22,29 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_only_the_spawn_lane_blocks_ns_creation_source_pin():
-    """Source pin: block_ns_creation=True is passed by _spawn's
-    grandchild-installed filter and by NOTHING else — the preexec
-    lanes' filter precedes the unshare CLI bootstrap."""
+def test_ns_block_lane_contract_source_pin():
+    """Source pin on the per-lane contract: _spawn's grandchild-
+    installed filter always blocks; context builds an ns-blocking
+    preexec VARIANT and selects it keyed on need_unshare (so the
+    unshare-CLI bootstrap never runs under it); the audit lane —
+    whose filter also precedes its own setup — never enables it."""
     spawn = (_REPO_ROOT / "core" / "sandbox" / "_spawn.py").read_text(
         encoding="utf-8")
     assert "block_ns_creation=True" in spawn
-    for other in ("context.py", "_landlock_audit.py"):
-        src = (_REPO_ROOT / "core" / "sandbox" / other).read_text(
-            encoding="utf-8")
-        assert "block_ns_creation=True" not in src, (
-            f"{other} must not enable the ns block — its filter "
-            f"installs before the sandbox's own namespace setup")
+    ctx = (_REPO_ROOT / "core" / "sandbox" / "context.py").read_text(
+        encoding="utf-8")
+    assert "seccomp_block_ns_creation=True" in ctx, (
+        "context no longer builds the plain-lane ns-blocking variant")
+    assert ("preexec if need_unshare else preexec_ns_blocked"
+            in ctx), (
+        "the preexec selection must be keyed on need_unshare — an "
+        "unconditional ns-blocking preexec kills the unshare-CLI "
+        "lane's own bootstrap")
+    la = (_REPO_ROOT / "core" / "sandbox" /
+          "_landlock_audit.py").read_text(encoding="utf-8")
+    assert "block_ns_creation" not in la, (
+        "_landlock_audit must not enable the ns block — its filter "
+        "installs before the sandbox's own namespace setup")
 
 
 def test_ns_flags_cover_every_clone_namespace():

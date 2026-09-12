@@ -864,8 +864,14 @@ def setup_mount_ns(target: str | None, output: str | None,
                    rw_submounts_ok: bool = False,
                    rootfs: str | None = None,
                    require_target_ro: bool = False,
-                   src_fds: dict[str, int] | None = None) -> None:
+                   src_fds: dict[str, int] | None = None,
+                   fresh_netns: bool = False) -> None:
     """Establish pivot_root'd tmpfs sandbox root.
+
+    `fresh_netns`: the caller unshared a NEW network namespace for
+    this child. Enables the fresh per-namespace sysfs at /sys (only
+    mountable when the userns owns the netns), which hides host NIC
+    names/MACs; False keeps the host /sys rbind.
 
     Must be called AFTER the child has entered the new user-ns and acquired
     CAP_SYS_ADMIN (via the parent's newuidmap setup), and BEFORE
@@ -1054,9 +1060,31 @@ def setup_mount_ns(target: str | None, output: str | None,
     # — the former recursive host bind carried EVERY host node,
     # including /dev/pts/*, into the sandbox, and the default
     # read-unrestricted posture let the child read-open the operator's
-    # pty slave). /sys: recursive bind from host.
+    # pty slave). /sys: a FRESH sysfs instance when the caller created
+    # a fresh network namespace — sysfs's net class is netns-tagged,
+    # so the fresh instance shows only ns-local devices, while the
+    # host rbind exposed every host NIC name and MAC address
+    # (/sys/class/net/*/address) inside "network-blocked" runs — a
+    # host fingerprint the anti-fingerprint posture is supposed to
+    # withhold. (The kernel permits the sysfs mount exactly when the
+    # mounting userns owns the netns.) Without a fresh netns the
+    # kernel refuses the sysfs mount, so the host rbind remains the
+    # only option there; a refusal on the fresh-netns lane degrades
+    # the same way, warned (fingerprint residual, not a containment
+    # loss).
     _mount_minimal_dev(root)
-    _mount("/sys", f"{root}/sys", None, MS_BIND | MS_REC)
+    _fresh_sys = False
+    if fresh_netns:
+        try:
+            _mount("sysfs", f"{root}/sys", "sysfs")
+            _fresh_sys = True
+        except OSError:
+            warn_post_fork(
+                b"mount_ns: fresh sysfs mount failed; host /sys "
+                b"(incl. NIC names/MACs) stays visible in the "
+                b"sandbox\n")
+    if not _fresh_sys:
+        _mount("/sys", f"{root}/sys", None, MS_BIND | MS_REC)
 
     # 6. /proc: bind host /proc. Fresh procfs would require a pid-ns
     # which we haven't entered yet at this point. Host pids remain

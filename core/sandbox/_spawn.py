@@ -1793,12 +1793,14 @@ def run_sandboxed(
             allow_unix_sockets=_allow_unix,
             unix_scope_export_sock=_unix_scope_child_sock,
             # This filter installs in the GRANDCHILD, after every
-            # namespace the sandbox itself needs already exists — the
-            # one install point where denying namespace creation to
-            # the target costs nothing and closes the nested-userns
-            # kernel attack surface. The subprocess/preexec lanes
-            # must NOT set this (their filter precedes the unshare
-            # CLI bootstrap).
+            # namespace the sandbox itself needs already exists — an
+            # install point where denying namespace creation to the
+            # target costs nothing and closes the nested-userns
+            # kernel attack surface. The unshare-CLI subprocess lane
+            # must NOT set this (its filter precedes the unshare
+            # bootstrap); the PLAIN subprocess lane sets it too
+            # (context selects the ns-blocking preexec variant when
+            # the command is not unshare-wrapped).
             block_ns_creation=True,
         ) if seccomp_profile else None
 
@@ -2294,7 +2296,9 @@ def run_sandboxed(
                                    rw_submounts_ok=_rw_submounts_ok,
                                    rootfs=rootfs,
                                    require_target_ro=_require_target_ro,
-                                   src_fds=_bind_src_fds)
+                                   src_fds=_bind_src_fds,
+                                   fresh_netns=bool(
+                                       ns_flags & CLONE_NEWNET))
                 except OSError as _mnt_exc:
                     # ESTALE out of a pinned bind = the source stopped
                     # resolving to its validation-time inode — a

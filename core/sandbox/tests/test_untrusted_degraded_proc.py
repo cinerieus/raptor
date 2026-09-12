@@ -98,7 +98,10 @@ class TestDegradedRunUntrusted:
         assert len(warnings) == 2, (
             "degraded run_untrusted must warn on EVERY call, "
             f"got {len(warnings)}")
-        assert len(preexec_recorder) == 2
+        # Two run_untrusted calls, two preexec builds each (the plain
+        # variant plus its ns-creation-blocking twin — context builds
+        # the pair and run() selects per lane).
+        assert len(preexec_recorder) == 4
         for kwargs in preexec_recorder:
             readable = kwargs.get("readable_paths") or []
             assert "/proc" not in readable, (

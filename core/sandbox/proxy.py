@@ -749,6 +749,14 @@ def _hex_v6(ip: str) -> str:
     return b"".join(raw[i:i + 4][::-1] for i in range(0, 16, 4)).hex().upper()
 
 
+# Whether this host HAS the kernel socket table the peer-uid lookup
+# reads. Distinguishes "lookup unavailable on this platform" (macOS —
+# every peer resolves None; the gate stays advisory) from "lookup
+# failed for THIS peer" (Linux — fail closed after one retry).
+# Computed once: platform capability, not per-connection state.
+_PEER_UID_TABLE_AVAILABLE = os.path.exists("/proc/net/tcp")
+
+
 def _loopback_peer_uid(peer, sockname) -> "int | None":
     """Best-effort UID of a connected loopback TCP peer.
 
@@ -763,12 +771,17 @@ def _loopback_peer_uid(peer, sockname) -> "int | None":
 
     Returns None when the UID cannot be determined — non-Linux hosts
     (no /proc/net), malformed peername tuples, or a row that vanished
-    because the peer closed mid-lookup. Callers treat None as
-    "unknown, allow": this is a defense-in-depth gate layered on the
-    loopback-only bind + hostname allowlist, and failing closed on a
-    lookup miss would break macOS and add a kernel-race denial mode.
-    Residual: a same-UID process can still hand its connected fd to
-    another principal (SCM_RIGHTS); no /proc view defends that.
+    because the peer closed mid-lookup. The caller's policy on None
+    is capability-scoped: on hosts WITH the socket table
+    (_PEER_UID_TABLE_AVAILABLE) an undetermined UID is retried once
+    and then REFUSED — allowing it let a different-uid local process
+    race connect-vs-row-visibility (or exhaust the row scan) to ride
+    the proxy's allowlisted egress. On hosts without the table
+    (macOS) None is the permanent answer for every peer, honest or
+    not, and the gate stays layered defense only (loopback-only bind
+    + hostname allowlist). Residual: a same-UID process can still
+    hand its connected fd to another principal (SCM_RIGHTS); no
+    /proc view defends that.
 
     Cost: one bounded /proc read per inbound loopback TCP connection
     (unix-socket lanes never reach this). The scan stops at the first
@@ -2623,16 +2636,35 @@ class EgressProxy:
 
         # Same-UID gate for loopback TCP peers (main listener AND TCP
         # lanes; unix lanes are already mode-0600 via bind_unix's
-        # umask). Loopback is shared with EVERY local user — without
-        # this, any other account on the host could ride the proxy's
-        # allowlisted egress. TCP has no SO_PEERCRED, so the peer's
-        # UID comes from its /proc/net/tcp{,6} socket row; an
-        # undeterminable UID (None) is allowed by design — see
-        # _loopback_peer_uid for the fail-open rationale + residuals.
+        # umask AND carry the SO_PEERCRED+ancestry gate). Loopback is
+        # shared with EVERY local user — without this, any other
+        # account on the host could ride the proxy's allowlisted
+        # egress. TCP has no SO_PEERCRED, so the peer's UID comes from
+        # its /proc/net/tcp{,6} socket row. On hosts that HAVE the
+        # table, an undeterminable UID is retried once (the peer's row
+        # can lag its connect by a scheduling beat) and then REFUSED:
+        # the old unconditional allow-on-None handed a different-uid
+        # local process a deterministic ride — race the connect
+        # against row visibility, or pad the table past the scan.
+        # Hosts without the table (macOS) keep the advisory behaviour;
+        # None there is the permanent answer for every honest peer.
         if client_ip != "unix" and isinstance(peer, tuple) and len(peer) >= 2:
-            peer_uid = _loopback_peer_uid(
-                peer, writer.get_extra_info("sockname"),
-            )
+            sockname = writer.get_extra_info("sockname")
+            peer_uid = _loopback_peer_uid(peer, sockname)
+            if peer_uid is None and _PEER_UID_TABLE_AVAILABLE:
+                await asyncio.sleep(0.01)
+                peer_uid = _loopback_peer_uid(peer, sockname)
+                if peer_uid is None:
+                    logger.warning(
+                        "egress proxy: rejecting loopback peer %s:%s — "
+                        "its socket row never appeared in the kernel "
+                        "table, so its uid cannot be verified "
+                        "(fail-closed; same-uid callers should not "
+                        "hit this — retry, or use the unix lane)",
+                        client_ip, peer[1],
+                    )
+                    writer.close()
+                    return
             if peer_uid is not None and peer_uid != os.geteuid():
                 logger.warning(
                     "egress proxy: rejecting loopback peer %s:%s owned "

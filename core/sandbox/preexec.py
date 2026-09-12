@@ -217,7 +217,8 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
                      readable_paths: list | None = None,
                      deny_all_tcp_connect: bool = False,
                      host_nproc_cap: int | None = None,
-                     reaper_cell: dict | None = None):
+                     reaper_cell: dict | None = None,
+                     seccomp_block_ns_creation: bool = False):
     """Create a preexec_fn that sets resource limits, Landlock, and seccomp.
 
     Resource limits (rlimit) apply for memory / CPU / file-size.
@@ -274,6 +275,18 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
     growth to the configured headroom instead of leaving it unbounded.
     None (or 0) skips it — the namespace paths keep their stronger
     ns-local accounting.
+
+    `seccomp_block_ns_creation=True` adds the namespace-creation deny
+    rules (unshare/clone CLONE_NEW*, setns, clone3→ENOSYS) to the
+    seccomp filter — the same set the fork-backend grandchild always
+    gets. ONLY safe for the PLAIN subprocess lane, where the payload
+    execs directly under this preexec: the unshare-CLI lane installs
+    this filter BEFORE exec'ing its own `unshare` bootstrap, which the
+    rules would refuse. Nothing a plain-lane payload legitimately
+    runs creates namespaces, and namespace creation is kernel attack
+    surface (copy_namespaces / nested-userns paths) reachable with no
+    capability — so the plain lane closes it too instead of leaving
+    it the one lane where unshare(2) still lands in the kernel.
     """
     landlock_fn = None
     # `readable_paths is not None` (not truthiness): an empty list means
@@ -307,7 +320,8 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
             landlock_fn is not None and _get_landlock_abi() >= 6)
 
     seccomp_fn = (
-        _make_seccomp_preexec(seccomp_profile, block_udp=seccomp_block_udp)
+        _make_seccomp_preexec(seccomp_profile, block_udp=seccomp_block_udp,
+                              block_ns_creation=seccomp_block_ns_creation)
         if seccomp_profile else None
     )
 
