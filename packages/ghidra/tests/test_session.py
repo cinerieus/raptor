@@ -156,6 +156,23 @@ class TestFixOwner:
         prp.write_text("not xml {{{", encoding="utf-8")
         assert fix_owner(prp) is False
 
+    def test_malformed_xml_failure_is_logged(self, tmp_path, caplog):
+        """A hostile/corrupt prp that defeats the owner patch used to
+        fail SILENTLY, surfacing only later as a cryptic JVM
+        NotOwnerException — the debug log must name the real cause."""
+        import logging
+
+        prp = tmp_path / "project.prp"
+        prp.write_text("not xml {{{", encoding="utf-8")
+        with caplog.at_level(
+            logging.DEBUG, logger="packages.ghidra.project_util",
+        ):
+            assert fix_owner(prp) is False
+        assert any(
+            "owner patch failed" in rec.message and rec.exc_info
+            for rec in caplog.records
+        )
+
 
 class TestListPrograms:
     def test_no_project(self):

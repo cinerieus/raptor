@@ -58,8 +58,8 @@ def fix_owner(prp_path: Path) -> bool:
                         "patched project owner: %s -> %s", old, current
                     )
                     return True
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — best-effort patch; a corrupt prp surfaces later as the JVM's NotOwnerException, so name the real cause here
+        logger.debug("owner patch failed for %s", prp_path, exc_info=True)
     return False
 
 
