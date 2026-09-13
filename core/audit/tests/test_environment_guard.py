@@ -7,7 +7,6 @@ from __future__ import annotations
 import errno
 import json
 import threading as _threading
-import time as _time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1266,21 +1265,26 @@ class TestFanOutPauseParity:
         monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 1.0)
         monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
         monkeypatch.setattr(env_mod, "WATCHDOG_CHECK_INTERVAL_S", 0.2)
-        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+        fs = _BarrierFs(_stat(1 * 1024 * 1024))
+        g = self._real_guard(tmp_path, fs)
+        fs.guard = g
 
-        def _worker(delay: float) -> None:
-            _time.sleep(delay)
-            g.tick()
+        th_a, a_done = self._tick_in_thread(g)
+        # Barrier: A demonstrably inside the pause loop under its own
+        # 1s bound (a wall-clock stagger only measured scheduler
+        # load, not guard logic).
+        assert fs.paused_measure.wait(timeout=10)
+        # B joins under a bound that cannot expire within the test —
+        # the constant is read at wait entry, so B's release inside
+        # the join window can only come from the first conclusion,
+        # never from serving its OWN bound.
+        monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 300.0)
+        th_b, b_done = self._tick_in_thread(g)
 
-        t0 = _time.monotonic()
-        th_a = _threading.Thread(target=_worker, args=(0.0,), daemon=True)
-        th_b = _threading.Thread(target=_worker, args=(0.5,), daemon=True)
-        th_a.start()
-        th_b.start()
         th_a.join(timeout=10)
+        assert a_done.is_set()
+        assert g.concluded  # A's own pause bound expired
         th_b.join(timeout=10)
-        total = _time.monotonic() - t0
-        assert g.concluded
-        # B (joined mid-pause) is released by A's conclusion at ~1s,
-        # not after its OWN full bound on top of it.
-        assert total < 1.9, f"pass released only after {total:.2f}s"
+        assert b_done.is_set(), (
+            "joiner not released by the first conclusion"
+        )
