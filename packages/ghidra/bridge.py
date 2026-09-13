@@ -281,16 +281,46 @@ class GhidraBridge:
         project_name = get_project_name(gpr_path)
         project = open_project(str(gpr_path.parent), project_name)
 
-        root = project.getProjectData().getRootFolder()
-        files = list(root.getFiles())
-        if not files:
-            project.close()
-            raise GhidraSessionError(
-                f"cannot apply enrichments: project {project_name} "
-                f"contains no programs"
+        # Everything between open and consume must close the project
+        # on failure — a raise here otherwise leaks the open pyghidra
+        # project (and its lock) for the process lifetime.
+        try:
+            programs = _walk_program_paths(
+                project.getProjectData().getRootFolder(),
             )
-
-        program, consumer = consume_program(project, f"/{files[0].getName()}")
+            if not programs:
+                raise GhidraSessionError(
+                    f"cannot apply enrichments: project {project_name} "
+                    f"contains no programs"
+                )
+            # Honour the operator's program selection exactly like the
+            # headless path (`headless._project_process_args`) and the
+            # worker path (`server_worker._Session.open`) do — pre-fix
+            # this branch always consumed the first ROOT file, so on a
+            # multi-program project the enrichments were silently
+            # applied to the WRONG program, and a project whose
+            # programs all live in subfolders failed outright.
+            target = (self.program_name or programs[0]).strip("/")
+            parts = target.split("/")
+            if any(not part or part.startswith("-") or part == ".."
+                   for part in parts):
+                # Same refusal as headless._project_process_args:
+                # program names come from the analysed project's own
+                # (attacker-controlled) database.
+                raise GhidraSessionError(
+                    f"refusing suspicious program name: {target!r} "
+                    "(empty, dash-leading, or traversal component)"
+                )
+            if target not in programs:
+                raise GhidraSessionError(
+                    f"cannot apply enrichments: program {target!r} not "
+                    f"found in project {project_name} "
+                    f"(has: {', '.join(programs)})"
+                )
+            program, consumer = consume_program(project, f"/{target}")
+        except BaseException:
+            project.close()
+            raise
 
         try:
             tx = program.startTransaction("RAPTOR enrichments")
@@ -512,6 +542,20 @@ class GhidraBridge:
         from core.json import save_json
         save_json(out_path, doc)
         logger.info("wrote %s (%d functions)", out_path, len(db.functions))
+
+
+def _walk_program_paths(folder, prefix: str = "") -> list:
+    """Program paths relative to the project root — subfolder programs
+    included (``sub/dir/prog``), root files bare. Mirrors
+    ``server_worker._Session._walk_programs`` (kept separate: the
+    worker module is an isolated subprocess entry point with no
+    package imports)."""
+    out = [prefix + str(f.getName()) for f in folder.getFiles()]
+    for sub in folder.getFolders():
+        out.extend(_walk_program_paths(
+            sub, prefix + str(sub.getName()) + "/",
+        ))
+    return out
 
 
 def _get_comment_type_map() -> dict:
