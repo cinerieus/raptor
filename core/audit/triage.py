@@ -225,8 +225,9 @@ def classify_function(
     # the trust model). Boundary-adjacent functions never skip:
     # generated ones demote to GLANCE, vendored ones keep their normal
     # routing. The skip tier requires corroborated generator
-    # provenance — a bare in-file banner (target-controlled text) or a
-    # structural shape only ever earns GLANCE, so nothing becomes
+    # provenance (two distinct signals) — a bare in-file banner, a
+    # bare generated-output filename, or a structural shape (all
+    # target-controlled) only ever earn GLANCE, so nothing becomes
     # invisible on the target's say-so. Every decision leaves a
     # suppressions.jsonl record (orchestrator side).
     if vendor_verdict is not None:

@@ -24,14 +24,16 @@ project list:
   swarms of one-line functions with near-zero comment variance).
 
 Trust model (mirrors the inventory builder's anti-evasion rule): the
-in-file banner is TARGET-CONTROLLED text. A banner alone therefore
-NEVER earns the skip tier — only the glance tier (the function still
-gets a cheap LLM look, and every decision leaves a suppressions.jsonl
-record; nothing becomes invisible). The skip tier requires the
-banner to be corroborated by an independent generated-shaped path or
-filename (``core.inventory.exclusions.generated_marker_corroborated``
-— the same corroboration the inventory layer demands before excluding
-a file outright). Structural evidence (tables / one-liner swarms) is
+in-file banner AND the filename are TARGET-CONTROLLED. Any single
+such signal — a banner alone, a generated-output filename alone —
+therefore NEVER earns the skip tier, only the glance tier (the
+function still gets a cheap LLM look, and every decision leaves a
+suppressions.jsonl record; nothing becomes invisible on the target's
+say-so). The skip tier requires TWO distinct signals: a banner
+corroborated by an independent generated-shaped path or filename
+(``core.inventory.exclusions.generated_marker_corroborated`` — the
+same corroboration the inventory layer demands before excluding a
+file outright). Structural evidence (tables / one-liner swarms) is
 also target-controlled and maps to the glance tier only.
 
 Routing itself lives in :func:`core.audit.triage.classify_function`;
@@ -251,25 +253,21 @@ def classify_file(
     checklist_marker: str = "",
 ) -> VendorVerdict | None:
     """Classify one file from its path, content, and gap records."""
-    # 1. Filename convention — independent corroboration by itself.
     suffix = _generated_suffix(file_path)
-    if suffix:
-        return VendorVerdict(
-            kind=KIND_GENERATED,
-            signal="extension",
-            detail=f"generated-output filename ({suffix})",
-            corroborated=True,
-        )
 
-    # 2. Generator banner (comment-anchored), including the inventory
+    # 1. Generator banner (comment-anchored), including the inventory
     #    builder's own uncorroborated-marker flag from the checklist.
+    #    Banner + independent generated-shaped path/filename = two
+    #    distinct signals = skip-eligible.
     banner = _banner_marker(text)
     signal = "banner"
     if not banner and checklist_marker:
         banner = "inventory generated-file marker"
         signal = "checklist"
     if banner:
-        corroborated = generated_marker_corroborated(file_path)
+        corroborated = (
+            generated_marker_corroborated(file_path) or bool(suffix)
+        )
         return VendorVerdict(
             kind=KIND_GENERATED,
             signal=signal,
@@ -282,6 +280,23 @@ def classify_file(
                 )
             ),
             corroborated=corroborated,
+        )
+
+    # 2. Filename convention ALONE. The filename is the target's
+    #    say-so exactly like an in-file banner — renaming a backdoored
+    #    helper's file to evil.pb.go must not buy it review
+    #    invisibility — so a bare suffix match is glance-tier, never
+    #    skip (the corroborated=True it used to return routed every
+    #    non-boundary function in the file to SKIP with zero review).
+    if suffix:
+        return VendorVerdict(
+            kind=KIND_GENERATED,
+            signal="extension",
+            detail=(
+                f"generated-output filename ({suffix}) "
+                "(single target-controlled signal — glance, never skip)"
+            ),
+            corroborated=False,
         )
 
     # 3. Vendored-provenance banner (upstream import pinned to a

@@ -94,12 +94,34 @@ class TestVendorDecisionStructured:
 
 class TestClassifyFunctionRouting:
     def test_corroborated_generated_skips(self):
+        # corroborated=True means TWO distinct signals agreed (banner
+        # + independent generated-shaped path/filename) — only that
+        # earns the skip tier.
         tr = classify_function(
             file="gen/wire.c", function="f", sloc=3,
             vendor_verdict=_generated(corroborated=True),
         )
         assert tr.bucket == TriageBucket.SKIP
         assert vendor_decision(tr) == "skip"
+
+    def test_extension_only_verdict_never_skips(self):
+        # End-to-end anti-evasion: the filename is the target's
+        # say-so. Renaming a backdoored helper's file to evil.pb.go
+        # must not route its functions to SKIP (zero review) — a
+        # bare suffix match is glance-tier like every other single
+        # target-controlled signal.
+        from core.audit.vendored_detector import classify_file
+
+        v = classify_file("evil.pb.go", "int f(void) { return 0; }\n")
+        assert v is not None
+        assert v.kind == KIND_GENERATED
+        assert v.corroborated is False
+        tr = classify_function(
+            file="evil.pb.go", function="helper", sloc=3,
+            vendor_verdict=v,
+        )
+        assert tr.bucket == TriageBucket.GLANCE
+        assert vendor_decision(tr) == "glance"
 
     def test_uncorroborated_banner_glances_never_skips(self):
         # Anti-evasion: the banner is target-controlled text — alone
