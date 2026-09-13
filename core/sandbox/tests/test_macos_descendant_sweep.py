@@ -127,6 +127,11 @@ class TestCollectDescendants:
 
 
 class TestSweepDescendants:
+    # Every direct sweep call passes protect=frozenset(): the sweep's
+    # default protect set is {os.getpid(), os.getppid()}, and inside a
+    # container pid namespace a pytest worker can genuinely run AS pid
+    # 101/103 — silently exempting that synthetic pid from the verdict
+    # and flipping these assertions on whichever worker drew the pid.
     @pytest.fixture(autouse=True)
     def _record_kills(self, monkeypatch):
         self.killed = []
@@ -136,7 +141,8 @@ class TestSweepDescendants:
     def test_live_descendants_swept(self):
         tables = [[(100, 50, 100), (101, 100, 101), (103, 101, 103)], []]
         swept = _macos_spawn._sweep_descendants(
-            100, snapshot_fn=lambda: tables.pop(0))
+            100, snapshot_fn=lambda: tables.pop(0),
+            protect=frozenset())
         assert swept == {101, 103}
         assert sorted(self.killed) == [101, 103]
 
@@ -148,7 +154,8 @@ class TestSweepDescendants:
         post = [(100, 50, 100), (103, 1, 103), (200, 1, 200)]
         tables = [post, []]
         swept = _macos_spawn._sweep_descendants(
-            100, live_snapshot=live, snapshot_fn=lambda: tables.pop(0))
+            100, live_snapshot=live, snapshot_fn=lambda: tables.pop(0),
+            protect=frozenset())
         assert swept == {103}
         assert 200 not in self.killed
 
@@ -158,7 +165,8 @@ class TestSweepDescendants:
         post = [(100, 50, 100), (103, 1, 103)]
         tables = [post, []]
         swept = _macos_spawn._sweep_descendants(
-            100, snapshot_fn=lambda: tables.pop(0))
+            100, snapshot_fn=lambda: tables.pop(0),
+            protect=frozenset())
         assert swept == set()
         assert self.killed == []
 
@@ -170,7 +178,8 @@ class TestSweepDescendants:
         post = [(100, 50, 100), (103, 1, 777)]
         tables = [post, []]
         swept = _macos_spawn._sweep_descendants(
-            100, live_snapshot=live, snapshot_fn=lambda: tables.pop(0))
+            100, live_snapshot=live, snapshot_fn=lambda: tables.pop(0),
+            protect=frozenset())
         assert swept == set()
 
     def test_sweep_is_bounded(self):
@@ -182,12 +191,13 @@ class TestSweepDescendants:
             calls["n"] += 1
             return [(100, 50, 100), (101, 100, 101)]
 
-        _macos_spawn._sweep_descendants(100, snapshot_fn=snapshot)
+        _macos_spawn._sweep_descendants(100, snapshot_fn=snapshot,
+                                        protect=frozenset())
         assert calls["n"] == _macos_spawn._SWEEP_MAX_PASSES
 
     def test_snapshot_failure_is_quiet_noop(self):
         swept = _macos_spawn._sweep_descendants(
-            100, snapshot_fn=lambda: None)
+            100, snapshot_fn=lambda: None, protect=frozenset())
         assert swept == set()
         assert self.killed == []
 

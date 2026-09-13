@@ -376,7 +376,8 @@ def _grant_pin_mismatch(path: str, dev: int, ino: int) -> str:
 
 
 def _sweep_descendants(root_pid, *, live_snapshot=None, extra_pgids=(),
-                       snapshot_fn=None, max_passes=_SWEEP_MAX_PASSES):
+                       snapshot_fn=None, max_passes=_SWEEP_MAX_PASSES,
+                       protect=None):
     """Post-wait sweep: SIGKILL every process still attributable to the
     shim's tree, independent of process group. Best-effort, bounded to
     ``max_passes`` snapshot+kill rounds (later rounds catch children
@@ -390,10 +391,18 @@ def _sweep_descendants(root_pid, *, live_snapshot=None, extra_pgids=(),
     changes its own pgid via setsid/setpgid, which cannot silently
     recreate the recorded value for an unrelated process in practice).
 
+    ``protect`` overrides the never-kill set (default: the calling
+    process and its parent). Callers exercising the sweep against a
+    synthetic table pass an explicit set so the verdict cannot depend
+    on which live pids the caller happens to run under.
+
     Returns the set of pids signalled (for logging/tests).
     """
     snapshot_fn = snapshot_fn or _ps_snapshot
-    protect = {os.getpid(), os.getppid()}
+    if protect is None:
+        protect = {os.getpid(), os.getppid()}
+    else:
+        protect = set(protect)
     known = {}
     if live_snapshot:
         live_pgids = {pid: pgid for pid, _ppid, pgid in live_snapshot}
