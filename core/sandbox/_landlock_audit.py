@@ -483,6 +483,19 @@ def run_landlock_audit(
         evidence_file.close(verify=False)
         raise
 
+    # env=None → scrubbed allowlist env, NOT the full host
+    # environment (same contract as _spawn.run_sandboxed): the public
+    # context.run() path always supplies an env, so this default only
+    # serves direct callers — and an audited target must not inherit
+    # ambient secrets (session credentials, cloud keys) because a
+    # caller skipped the wrapper. This is the namespace-less lane,
+    # where /proc-based exfil defences are weakest. env={} still
+    # means an empty env. Resolved parent-side so the forked child
+    # performs no post-fork imports.
+    if env is None:
+        from core.config import RaptorConfig
+        env = RaptorConfig.get_safe_env()
+
     target_pid = -1
     tracer_pid = -1
     def _cleanup_fds() -> None:
@@ -613,13 +626,11 @@ def run_landlock_audit(
                 if seccomp_preexec is not None:
                     seccomp_preexec()
 
-                # Exec target. env=None → inherit parent's; env={} →
-                # empty env. subprocess.run uses None-sentinel for
-                # inherit; we honour the same.
-                if env is None:
-                    os.execvp(cmd[0], list(cmd))
-                else:
-                    os.execvpe(cmd[0], list(cmd), env)
+                # Exec target. env was resolved parent-side: the
+                # caller's dict verbatim (including {} = empty env),
+                # or the scrubbed allowlist when the caller passed
+                # None — never the full parent environment.
+                os.execvpe(cmd[0], list(cmd), env)
             except FileNotFoundError:
                 os._exit(127)
             except PermissionError:
