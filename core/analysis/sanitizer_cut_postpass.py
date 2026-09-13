@@ -306,6 +306,17 @@ def _grammar_ok(language: str, cache: dict[str, bool]) -> bool:
 # the sink is refused outright — evaluating the gate from each
 # candidate stays sound at any count, but the cost is per-candidate
 # and unbounded fan-out is a DoS surface on hostile input.
+#
+# Both directions of the threshold: RAISING it multiplies the
+# all-must-suppress evaluation cost per finding (each candidate is a
+# full resolver+gate run — the DoS surface this cap exists to bound)
+# for marginal extra suppression coverage in source-dense files;
+# LOWERING it refuses more findings outright, losing legitimate
+# suppressions in ordinary multi-source methods. The cap bounds
+# candidate ENUMERATION only — classifying ONE already-known trace
+# line has no fan-out and must never be gated on it (see
+# _kinds_for_line), or the b42 circularity ban silently evaporates in
+# source-dense files.
 _MAX_CANDIDATE_SOURCES = 4
 
 
@@ -406,6 +417,34 @@ def _candidate_source_lines_with_kinds(
     return before_sink
 
 
+def _kinds_for_line(
+    file_path: Path, line: int, language: str,
+    _cache: dict[Path, list[tuple] | None],
+    extra_patterns: tuple = (),
+) -> frozenset[str]:
+    """Source kinds of ONE known line, from the uncapped scan cache.
+
+    Trace-carrying findings name their source line outright — no
+    candidate enumeration happens, so the _MAX_CANDIDATE_SOURCES
+    refusal (a bound on per-candidate gate fan-out) must not apply.
+    Routing this lookup through the capped candidate view silently
+    returned no kinds for files with more source-shaped lines than
+    the cap, and with it the b42 circularity ban — the
+    false-suppression direction, in exactly the source-dense files
+    (Juliet-style batteries) where the ban matters.
+    """
+    if file_path not in _cache:
+        _cache[file_path] = _scan_file_for_kinds(
+            file_path, language, extra_patterns)
+    entries = _cache[file_path]
+    if entries is None:
+        return frozenset()
+    for ln, kinds in entries:
+        if ln == line:
+            return frozenset(kinds)
+    return frozenset()
+
+
 def _candidate_source_lines(
     file_path: Path, sink_line: int, language: str,
     _cache: dict[Path, list[tuple] | None],
@@ -418,7 +457,7 @@ def _candidate_source_lines(
 
 def _locate_unique_source_line(
     file_path: Path, sink_line: int, language: str,
-    _cache: dict[Path, list[int] | None],
+    _cache: dict[Path, list[tuple] | None],
     extra_patterns: tuple = (),
 ) -> int | None:
     """Back-compat single-source form: the file's single source-shaped
@@ -502,7 +541,7 @@ def run_postpass(
     learned_patterns = _compile_extra_source_patterns(extra_source_patterns)
     if learned_patterns:
         stats.mechanism_counts["learned-source-patterns"] = len(learned_patterns)
-    source_cache: dict[Path, list[int] | None] = {}
+    source_cache: dict[Path, list[tuple] | None] = {}
     text_cache: dict[Path, str] = {}
     grammar_cache: dict[str, bool] = {}
     repo_root = Path(repo_root).resolve()
@@ -572,16 +611,14 @@ def run_postpass(
             # Classify the trace's own source line so the circularity
             # ban (below) covers trace-carrying findings too: a
             # CodeQL flow that STARTS at a system read must not have
-            # that read discharged as taint-free.
+            # that read discharged as taint-free. Looked up in the
+            # uncapped scan cache — the candidate cap bounds
+            # enumeration fan-out, not single-line classification.
             if language == "java":
-                tk = _candidate_source_lines_with_kinds(
-                    resolved_path, int(sink_line) + 10**9, language,
-                    source_cache,
-                    learned_patterns if language == "java" else (),
+                finding_kinds |= _kinds_for_line(
+                    resolved_path, trace_line, language,
+                    source_cache, learned_patterns,
                 )
-                for ln, ks in tk:
-                    if ln == trace_line:
-                        finding_kinds |= set(ks)
         else:
             with_kinds = _candidate_source_lines_with_kinds(
                 resolved_path, int(sink_line), language, source_cache,

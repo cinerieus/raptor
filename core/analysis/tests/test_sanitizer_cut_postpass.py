@@ -494,6 +494,74 @@ class TestTfSystemReadBan:
         assert stats["examined"] == 1
         assert stats["recorded_suppress"] == 0
 
+    def test_trace_env_source_banned_in_source_dense_file(self, tmp_path):
+        # The trace-classification lookup must not ride the candidate
+        # cap: with more than _MAX_CANDIDATE_SOURCES source-shaped
+        # lines in the file, the capped view returns nothing, the
+        # trace's getenv line classifies as no kind, and the TF tier
+        # discharges the finding's own source — the b42 failure mode,
+        # back through the trace door.
+        env_dense = """public class Test {
+    void run() {
+        String data = System.getenv("ADD");
+        java.io.File f = new java.io.File(data);
+    }
+    void other(javax.servlet.http.HttpServletRequest r) {
+        String a1 = r.getParameter("a1");
+        String a2 = r.getParameter("a2");
+        String a3 = r.getParameter("a3");
+        String a4 = r.getParameter("a4");
+        String a5 = r.getParameter("a5");
+    }
+}
+"""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        src = repo / "Test.java"
+        src.write_text(env_dense)
+        sarif = _sarif(src, cwe="cwe-22", sink_line=4, rule_id="pathtrav")
+        result = sarif["runs"][0]["results"][0]
+        result["codeFlows"] = [{"threadFlows": [{"locations": [
+            {"location": {"physicalLocation": {
+                "artifactLocation": {"uri": str(src)},
+                "region": {"startLine": 3}}}},
+            {"location": {"physicalLocation": {
+                "artifactLocation": {"uri": str(src)},
+                "region": {"startLine": 4}}}},
+        ]}]}]
+        sarif_path = tmp_path / "scan.sarif"
+        sarif_path.write_text(json.dumps(sarif))
+        out = tmp_path / "out"
+        out.mkdir()
+        stats = run_postpass([sarif_path], repo, out)
+        assert stats["examined"] == 1
+        assert stats["recorded_suppress"] == 0
+        assert stats["mechanism_counts"].get(
+            "taint-free:banned-system-read-source") == 1
+
+    def test_candidate_cap_still_bounds_traceless_findings(self, tmp_path):
+        # Other direction of the threshold: without a trace, the same
+        # source-dense file still refuses on candidate fan-out — the
+        # single-line classification fix must not widen enumeration.
+        dense = """public class Test {
+    void run(javax.servlet.http.HttpServletRequest r) {
+        String a1 = r.getParameter("a1");
+        String a2 = r.getParameter("a2");
+        String a3 = r.getParameter("a3");
+        String a4 = r.getParameter("a4");
+        String a5 = r.getParameter("a5");
+        java.io.File f = new java.io.File(a1);
+    }
+}
+"""
+        repo, _, sarif_path, out = _write(
+            tmp_path, dense,
+            {"cwe": "cwe-22", "sink_line": 8, "rule_id": "pathtrav"},
+        )
+        stats = run_postpass([sarif_path], repo, out)
+        assert stats["examined"] == 1
+        assert stats["refused_reasons"].get("no-source-candidates") == 1
+
     def test_non_source_tf_union_still_suppresses(self, tmp_path):
         # File.separator is never a locator source kind: a servlet-
         # source finding whose sink value unions {separator, "/opt"}
