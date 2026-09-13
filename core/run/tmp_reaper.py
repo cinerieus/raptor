@@ -93,9 +93,9 @@ _DIR_PREFIXES = (
     # IRIS per-refinement CodeQL pack scratch (core/iris/codeql_runner.py);
     # rmtree'd in the runner's finally.
     "raptor-iris-codeql-",
-    # Recon-agent clone scratch (packages/recon/agent.py); rmtree'd on
-    # exit unless --keep. A --keep dir surviving past the age floor is
-    # forgotten debug output — the sweep reclaims it like any other.
+    # Historical recon-agent clone scratch (the deprecated
+    # packages/recon agent, since removed, used this prefix). Kept so
+    # the sweep still reclaims leftovers written by older installs.
     "raptor_recon_",
     # CPython multiprocessing's own resource dir — leaks when a process
     # (e.g. a sandboxed child we SIGKILL) dies without cleanup.

@@ -12,7 +12,7 @@ the subprocess env when they spawn the wrapper.
 
 `RAPTOR_DIR` is also set here. Modules that follow the project's
 "hard lookup, no fallbacks" path-safety rule (CLAUDE.md, e.g.
-packages/recon/agent.py) read `os.environ["RAPTOR_DIR"]` at
+packages/llm_analysis/agent.py) read `os.environ["RAPTOR_DIR"]` at
 import time and KeyError if unset. CI runners and developer
 shells that don't pre-export RAPTOR_DIR would otherwise fail
 test collection. Set it here to the project root (the directory
