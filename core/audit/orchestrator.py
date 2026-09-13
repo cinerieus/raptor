@@ -11417,15 +11417,6 @@ class _ContentFilterError(Exception):
     """Raised when the LLM response is blocked by a content filter."""
 
 
-_STATUS_SEVERITY = {
-    "finding": 3,
-    "suspicious": 2,
-    "dormant": 1,
-    "clean": 0,
-    "error": -1,
-}
-
-
 class _ClientBudgetGate:
     """CostGate over the run's budget-capped LLM client.
 
