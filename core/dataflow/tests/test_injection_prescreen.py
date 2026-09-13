@@ -9,6 +9,7 @@ refute, and only when every path is neutralised.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -519,3 +520,28 @@ class TestBranchWrappedValidatorNeverRefutes:
             paths=[path], repo_root=repo,
             rule_id="py/path-injection",
         ) is None
+
+
+# ---------------------------------------------------------------------------
+# _read_source containment (shared contained/capped helper)
+# ---------------------------------------------------------------------------
+
+
+class TestReadSourceContainment:
+    def test_relative_path_reads(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        assert ip._read_source(tmp_path, "a.py") == "x = 1\n"
+
+    def test_traversal_refused(self, tmp_path):
+        (tmp_path / "outside.py").write_text("secret", encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        assert ip._read_source(repo, "../outside.py") is None
+
+    def test_symlink_escape_refused(self, tmp_path):
+        outside = tmp_path / "outside.py"
+        outside.write_text("secret", encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        os.symlink(outside, repo / "link.py")
+        assert ip._read_source(repo, "link.py") is None
