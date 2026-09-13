@@ -479,6 +479,36 @@ class TestParseWorkflowRunEvent:
         assert event.head_sha == "abc123def456abc123def456abc123def456abc1"
         assert event.conclusion is None
 
+    def test_lifecycle_actions_get_distinct_evidence_ids(self):
+        """`requested` and `completed` events of one run must not share
+        an evidence id — EvidenceStore.add replaces on id match, so a
+        collision silently discarded one lifecycle event and corrupted
+        the workflow-timing attribution pattern."""
+        base = {
+            "type": "WorkflowRunEvent",
+            "actor_login": "owner",
+            "actor_id": 123,
+            "repo_name": "owner/repo",
+        }
+        wf = {"name": "CI", "head_sha": "abc123def456abc123def456abc123def456abc1"}
+        requested = parse_workflow_run_event(
+            {**base, "created_at": "2025-07-13T20:37:04Z",
+             "payload": {"action": "requested", "workflow_run": dict(wf)}},
+        )
+        completed = parse_workflow_run_event(
+            {**base, "created_at": "2025-07-13T20:39:11Z",
+             "payload": {"action": "completed",
+                         "workflow_run": {**wf, "conclusion": "success"}}},
+        )
+        assert requested.evidence_id != completed.evidence_id
+
+        from src.store import EvidenceStore
+
+        store = EvidenceStore()
+        store.add(requested)
+        store.add(completed)
+        assert len(store) == 2, "one lifecycle event was silently discarded"
+
     def test_parses_workflow_completed_success(self):
         """Parses a workflow run completed with success."""
         row = {

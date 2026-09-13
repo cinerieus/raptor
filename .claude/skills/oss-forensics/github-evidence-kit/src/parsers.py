@@ -423,7 +423,19 @@ def parse_workflow_run_event(row: dict[str, Any], table: str | None = None) -> W
     head_sha = workflow_run.get("head_sha", "0" * 40)
 
     return WorkflowRunEvent(
-        evidence_id=generate_evidence_id("workflow", ctx.repository.full_name, workflow_name, head_sha[:8]),
+        # The id must carry the lifecycle action and the row timestamp:
+        # a run's `requested` and `completed` events used to share one
+        # id, and EvidenceStore.add replaces on id match — ingesting
+        # both silently discarded one, corrupting the workflow-timing
+        # attribution pattern this event type exists for.
+        evidence_id=generate_evidence_id(
+            "workflow",
+            ctx.repository.full_name,
+            workflow_name,
+            head_sha[:8],
+            normalized_action,
+            ctx.when.isoformat(),
+        ),
         when=ctx.when,
         who=ctx.who,
         what=f"Workflow '{workflow_name}' {normalized_action}",
