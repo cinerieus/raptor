@@ -718,6 +718,34 @@ def _resolve_binary_function(db: REDatabase, name: str) -> REFunction | None:
     return next((f for f in db.functions if f.name == lookup), None)
 
 
+def _binary_decompilation(
+    out_dir: Path, target_path: Path, function_name: str,
+) -> str | None:
+    """Sanitised decompilation for a binary checklist item, or None
+    when the RE database has none for the function.
+
+    Callers must treat None as an error — sweeping an empty source
+    silently logs a vacuous outcome for code that exists in the
+    binary. Sanitisation degrades to the raw decompilation on
+    failure (hostile symbol content must not turn into a crash).
+    """
+    from core.audit.binary_context import find_redb, load_redb
+    redb_path = find_redb(out_dir, target_path)
+    db = load_redb(redb_path) if redb_path else None
+    func_obj = (
+        _resolve_binary_function(db, function_name)
+        if db is not None else None
+    )
+    if func_obj is None or not func_obj.decompilation:
+        return None
+    source = func_obj.decompilation
+    try:
+        from core.audit.decompiler_sanitise import sanitise
+        return sanitise(source)
+    except Exception:  # noqa: BLE001 — degrade to raw
+        return source
+
+
 def cmd_sweep(args: argparse.Namespace) -> int:
     """Run a mechanical tool against a file/function and log the result.
 
@@ -802,14 +830,10 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 )
                 _discard_inline_rule()
                 return 1
-            from core.audit.binary_context import find_redb, load_redb
-            redb_path = find_redb(out_dir, target_path)
-            db = load_redb(redb_path) if redb_path else None
-            func_obj = (
-                _resolve_binary_function(db, args.function)
-                if db is not None else None
+            decomp_source = _binary_decompilation(
+                out_dir, target_path, args.function,
             )
-            if func_obj is None or not func_obj.decompilation:
+            if decomp_source is None:
                 print(
                     "error: no decompilation available for "
                     f"{args.function} — cannot sweep",
@@ -824,12 +848,6 @@ def cmd_sweep(args: argparse.Namespace) -> int:
                 mode="w", suffix=".c",
                 prefix="raptor-binsweep-", delete=False,
             )
-            decomp_source = func_obj.decompilation
-            try:
-                from core.audit.decompiler_sanitise import sanitise
-                decomp_source = sanitise(decomp_source)
-            except Exception:  # noqa: BLE001 — degrade to raw
-                pass
             _bin_tmp.write(decomp_source)
             _bin_tmp.close()
             sweep_target = Path(_bin_tmp.name).parent
@@ -967,18 +985,24 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     if tool == "heap-copy":
         from core.audit.sweep import run_heap_copy_sweep
 
-        # Read the source — binary items use decompilation
+        # Read the source — binary items use decompilation. Missing
+        # decompilation is an error, not an empty sweep: running the
+        # detector over "" logs a vacuous outcome for code that exists
+        # in the binary (same contract as the rule-file branch).
         source = ""
         from core.inventory.binary_builder import BINARY_PATH_PREFIX
         if args.file.startswith(BINARY_PATH_PREFIX):
-            from core.audit.binary_context import find_redb, load_redb
-            redb_path = find_redb(out_dir, target_path)
-            db = load_redb(redb_path) if redb_path else None
-            if db is not None:
-                func_obj = _resolve_binary_function(db, args.function)
-                if func_obj and func_obj.decompilation:
-                    from core.audit.decompiler_sanitise import sanitise
-                    source = sanitise(func_obj.decompilation)
+            decomp = _binary_decompilation(
+                out_dir, target_path, args.function,
+            )
+            if decomp is None:
+                print(
+                    "error: no decompilation available for "
+                    f"{args.function} — cannot sweep",
+                    file=sys.stderr,
+                )
+                return 1
+            source = decomp
         else:
             src_path = target_path / args.file
             if src_path.is_file():
@@ -1014,17 +1038,22 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         from core.audit import sweep as sweep_mod
         sweep_fn = getattr(sweep_mod, sweep_fn_map[tool])
 
+        # Same decompilation contract as heap-copy above: a missing
+        # decompilation errors instead of sweeping "".
         source = ""
         from core.inventory.binary_builder import BINARY_PATH_PREFIX
         if args.file.startswith(BINARY_PATH_PREFIX):
-            from core.audit.binary_context import find_redb, load_redb
-            redb_path = find_redb(out_dir, target_path)
-            db = load_redb(redb_path) if redb_path else None
-            if db is not None:
-                func_obj = _resolve_binary_function(db, args.function)
-                if func_obj and func_obj.decompilation:
-                    from core.audit.decompiler_sanitise import sanitise
-                    source = sanitise(func_obj.decompilation)
+            decomp = _binary_decompilation(
+                out_dir, target_path, args.function,
+            )
+            if decomp is None:
+                print(
+                    "error: no decompilation available for "
+                    f"{args.function} — cannot sweep",
+                    file=sys.stderr,
+                )
+                return 1
+            source = decomp
         else:
             src_path = target_path / args.file
             if src_path.is_file():
