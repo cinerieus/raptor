@@ -14,13 +14,21 @@ convention used by joern CPG sharing and annotation directories.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:                                    # pragma: no cover
+    _HAS_FCNTL = False
 
 from core.evidence import EvidenceTier, TIER_RANK, stronger
 from core.json import dumps_artifact, load_json, save_json
@@ -109,6 +117,44 @@ def _project_dir(out_dir: Path) -> Path:
 
 def _store_path(out_dir: Path) -> Path:
     return _project_dir(out_dir) / _STORE_DIR / _STORE_FILE
+
+
+@contextlib.contextmanager
+def store_lock(out_dir: Path):
+    """Cross-process exclusive lock over the project spec store's
+    read-modify-write window.
+
+    Same idiom as ``core.project.project.project_file_lock``: flock a
+    sibling ``.lock`` file (not ``specs.json`` itself, which
+    ``save_specs`` atomically replaces — locking a replaced inode
+    splits lockers), hold it across the whole load → merge → save
+    cycle, degrade to a no-op without fcntl. Without it, concurrent
+    writers on the same project (parallel /agentic + /audit, or an
+    operator ``/annotate`` promotion during a run) interleave and the
+    later save silently drops the earlier one's confirmed specs /
+    round history. The ``.lock`` file is deliberately left behind —
+    unlink-after-unlock races split lockers across two inodes.
+    """
+    if not _HAS_FCNTL:
+        yield
+        return
+    lock_path = _project_dir(out_dir) / _STORE_DIR / ".lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        # Lock file uncreatable (read-only dir, ENOSPC) — proceed
+        # unserialised rather than failing the persist.
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _floor_unverified_tiers(
@@ -347,90 +393,93 @@ def persist_refined_specs(
             len(round_dicts),
         )
         return None
-    meta = load_store_metadata(out_dir)
-    stored_target = meta.get("target_path", "")
-    if (
-        target_path is not None
-        and stored_target
-        and str(Path(stored_target).resolve()) != str(Path(target_path).resolve())
-    ):
-        logger.debug(
-            "iris.store: refusing refined-spec merge into store for "
-            "different target (%s vs %s)", stored_target, target_path,
+    # Cross-process serialisation of the whole load-merge-save
+    # cycle — see store_lock.
+    with store_lock(out_dir):
+        meta = load_store_metadata(out_dir)
+        stored_target = meta.get("target_path", "")
+        if (
+            target_path is not None
+            and stored_target
+            and str(Path(stored_target).resolve()) != str(Path(target_path).resolve())
+        ):
+            logger.debug(
+                "iris.store: refusing refined-spec merge into store for "
+                "different target (%s vs %s)", stored_target, target_path,
+            )
+            return None
+
+        existing = _specs_from_list(meta.get("specs", []))
+        reason = _tier_floor_reason(meta, target_path=None)
+        if reason:
+            # Never launder: an unverified store's tiers must not survive
+            # into the (freshly stamped) merged envelope.
+            _floor_unverified_tiers(existing, _store_path(out_dir), reason)
+        merged = merge_specs(existing, refined)
+
+        # Drop refuted specs at merge. The refine loop demotes refuted
+        # specs in-run, but the merge above is add/upgrade-only — store
+        # copies of refuted specs used to resurrect as prior_specs on the
+        # next run, polluting prompts and burning tool cycles forever.
+        # Same floor as refine's _demote_refuted: tool-confirmed
+        # (>= XREF_BACKED) and operator-confirmed specs survive a
+        # refuted round; a later confirmation clears the refutation.
+        merged = _drop_refuted(merged, history or [])
+
+        prior_history = [
+            h for h in (meta.get("history") or []) if isinstance(h, dict)
+        ]
+        new_history = prior_history + [
+            h for h in (history or []) if isinstance(h, dict)
+        ]
+
+        from .assumptions import merge_assumptions
+
+        existing_assumptions = assumptions_from_list(meta.get("assumptions", []))
+        if reason:
+            # Same never-launder rule as the specs above: the merge is
+            # "higher tier wins" and the merged envelope re-stamps, so an
+            # unverified store's assumption tiers must floor BEFORE they
+            # can become durable under a fresh token.
+            _floor_unverified_tiers(
+                existing_assumptions, _store_path(out_dir), reason,
+                kind="assumption")
+        merged_assumptions = merge_assumptions(
+            existing_assumptions, list(assumptions or []),
         )
-        return None
 
-    existing = _specs_from_list(meta.get("specs", []))
-    reason = _tier_floor_reason(meta, target_path=None)
-    if reason:
-        # Never launder: an unverified store's tiers must not survive
-        # into the (freshly stamped) merged envelope.
-        _floor_unverified_tiers(existing, _store_path(out_dir), reason)
-    merged = merge_specs(existing, refined)
+        try:
+            prior_round = int(meta.get("round", 0) or 0)
+        except (TypeError, ValueError):
+            prior_round = 0
 
-    # Drop refuted specs at merge. The refine loop demotes refuted
-    # specs in-run, but the merge above is add/upgrade-only — store
-    # copies of refuted specs used to resurrect as prior_specs on the
-    # next run, polluting prompts and burning tool cycles forever.
-    # Same floor as refine's _demote_refuted: tool-confirmed
-    # (>= XREF_BACKED) and operator-confirmed specs survive a
-    # refuted round; a later confirmation clears the refutation.
-    merged = _drop_refuted(merged, history or [])
+        resolved_target: Path | None = None
+        if target_path is not None:
+            resolved_target = Path(target_path)
+        elif stored_target:
+            resolved_target = Path(stored_target)
 
-    prior_history = [
-        h for h in (meta.get("history") or []) if isinstance(h, dict)
-    ]
-    new_history = prior_history + [
-        h for h in (history or []) if isinstance(h, dict)
-    ]
+        # Evict specs whose file vanished from the target tree. Like the
+        # refuted drop above this used to exist with zero persistence-path
+        # callers, so deleted-file specs accumulated in the store
+        # indefinitely. Existence-derived file set: cheap (one stat per
+        # distinct spec file) and exactly what evict_stale needs.
+        if resolved_target is not None and resolved_target.is_dir():
+            current_files = {
+                s.file for s in merged
+                if s.file and (resolved_target / s.file).is_file()
+            }
+            merged = evict_stale(merged, current_files)
 
-    from .assumptions import merge_assumptions
-
-    existing_assumptions = assumptions_from_list(meta.get("assumptions", []))
-    if reason:
-        # Same never-launder rule as the specs above: the merge is
-        # "higher tier wins" and the merged envelope re-stamps, so an
-        # unverified store's assumption tiers must floor BEFORE they
-        # can become durable under a fresh token.
-        _floor_unverified_tiers(
-            existing_assumptions, _store_path(out_dir), reason,
-            kind="assumption")
-    merged_assumptions = merge_assumptions(
-        existing_assumptions, list(assumptions or []),
-    )
-
-    try:
-        prior_round = int(meta.get("round", 0) or 0)
-    except (TypeError, ValueError):
-        prior_round = 0
-
-    resolved_target: Path | None = None
-    if target_path is not None:
-        resolved_target = Path(target_path)
-    elif stored_target:
-        resolved_target = Path(stored_target)
-
-    # Evict specs whose file vanished from the target tree. Like the
-    # refuted drop above this used to exist with zero persistence-path
-    # callers, so deleted-file specs accumulated in the store
-    # indefinitely. Existence-derived file set: cheap (one stat per
-    # distinct spec file) and exactly what evict_stale needs.
-    if resolved_target is not None and resolved_target.is_dir():
-        current_files = {
-            s.file for s in merged
-            if s.file and (resolved_target / s.file).is_file()
-        }
-        merged = evict_stale(merged, current_files)
-
-    return save_specs(
-        out_dir,
-        merged,
-        cl_sha=cl_sha or meta.get("checklist_sha", ""),
-        round_num=prior_round + len(history or []),
-        history=new_history,
-        target_path=resolved_target,
-        assumptions=merged_assumptions or None,
-    )
+        return save_specs(
+            out_dir,
+            merged,
+            cl_sha=cl_sha or meta.get("checklist_sha", ""),
+            round_num=prior_round + len(history or []),
+            history=new_history,
+            target_path=resolved_target,
+            assumptions=merged_assumptions or None,
+        )
 
 
 def _drop_refuted(
