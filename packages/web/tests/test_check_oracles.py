@@ -520,6 +520,46 @@ def test_ssrf_probes_the_url_where_the_parameter_was_discovered():
     assert probed, "the probe must hit the discovered /proxy endpoint"
 
 
+def test_ssrf_probes_every_catalogued_payload():
+    """A clean target sees all payloads: the metadata-only indicators
+    (AMI id, instanceId, computeMetadata, ...) are unreachable unless
+    the cloud-metadata payloads actually ride a probe."""
+    from urllib.parse import quote
+
+    from packages.web.checks.ssrf import _SSRF_PAYLOADS
+
+    def handler(method, path, **_kw):
+        return FakeResponse(200, "<html>home</html>")
+
+    findings, client = _ssrf_param_check(
+        handler,
+        {"parameters": [], "urls": ["https://t.example/fetch?url=https://a"]},
+    )
+    assert findings == []
+    sent = [str(call[1]) for call in client.calls]
+    for payload in _SSRF_PAYLOADS:
+        assert any(quote(payload, safe="") in url for url in sent), payload
+
+
+def test_ssrf_metadata_indicator_confirms_via_metadata_payload():
+    from urllib.parse import quote
+
+    def handler(method, path, **_kw):
+        if quote("169.254.169.254", safe="") in str(path):
+            return FakeResponse(
+                200, '{"instanceId": "i-0abc", "region": "eu-west-1"}',
+            )
+        return FakeResponse(200, "<html>home</html>")
+
+    findings, _client = _ssrf_param_check(
+        handler,
+        {"parameters": [], "urls": ["https://t.example/fetch?url=https://a"]},
+    )
+    assert len(findings) == 1
+    assert findings[0].severity == "critical"
+    assert "instanceId" in findings[0].evidence
+
+
 # -- redirect legs are observable (client no longer eats the 3xx) --------------
 
 
