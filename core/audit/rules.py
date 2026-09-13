@@ -16,6 +16,7 @@ files (coccinelle).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, TYPE_CHECKING
 
 from core.json import load_json, save_json
@@ -67,7 +68,10 @@ def save_rule(
 
     ext = ".yaml" if tool == "semgrep" else ".cocci"
     rule_path = (rules_dir / f"{rule_id}{ext}").resolve()
-    if not str(rule_path).startswith(str(rules_dir.resolve())):
+    # Trailing separator keeps a sibling like "<out>/rules-evil/" from
+    # passing the prefix test — unreachable today (rule_id rejects all
+    # separators above), belt-and-braces for future callers.
+    if not str(rule_path).startswith(str(rules_dir.resolve()) + os.sep):
         msg = f"invalid rule_id {rule_id!r}: resolved path escapes rules directory"
         raise ValueError(msg)
     # Atomic like the manifest write below: rules are cross-run
