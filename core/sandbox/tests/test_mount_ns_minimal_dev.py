@@ -131,6 +131,18 @@ class TestPtsGrantIsLaneScoped:
 
         from core.sandbox import _spawn as _spawn_mod
         from core.sandbox import context as _ctx
+        from core.sandbox.landlock import check_landlock_available
+
+        if not check_landlock_available():
+            # The write-deny under test IS Landlock's: on the mountless
+            # retry there is no mount tree, so the host pty slave is
+            # only unreachable because the Landlock policy carries no
+            # /dev/pts grant there. On a Landlock-less kernel this
+            # trusted-class call degrades (floor BARE, warn-once) to
+            # the ns-only tier, which honestly promises no filesystem
+            # confinement — nothing enforces the deny being pinned.
+            pytest.skip("Landlock unavailable — the mountless /dev/pts "
+                        "write-deny under test is Landlock-enforced")
 
         real_spawn = _spawn_mod.run_sandboxed
         calls = []
