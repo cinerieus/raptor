@@ -1973,6 +1973,26 @@ class TestResolveRustc:
         monkeypatch.setenv("PATH", str(empty))
         assert ex._resolve_rustc() is None
 
+    def test_sysroot_probe_uses_safe_env(self, tmp_path, monkeypatch):
+        """The host-side probe executes the operator's toolchain, but it
+        must still run under the sanitised allowlist env like every
+        other subprocess in the module."""
+        proxy_dir, proxy = self._fake_proxy(tmp_path, "", rc=1)
+        monkeypatch.setenv("PATH", str(proxy_dir))
+        monkeypatch.setenv("LD_PRELOAD", "/nonexistent/evil.so")
+        seen: dict[str, object] = {}
+        real_run = ex.subprocess.run
+
+        def spy_run(cmd, **kwargs):
+            seen["env"] = kwargs.get("env")
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr(ex.subprocess, "run", spy_run)
+        assert ex._resolve_rustc() == str(proxy)
+        env = seen["env"]
+        assert env is not None
+        assert "LD_PRELOAD" not in env
+
 
 # ============================================================================
 # Real execution tests per language — skip when runtime unavailable

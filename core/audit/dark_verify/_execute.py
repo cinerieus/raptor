@@ -2212,9 +2212,11 @@ def _resolve_rustc() -> str | None:
         if any(resolved.startswith(p) for p in _SYSTEM_TOOLCHAIN_PREFIXES):
             return rustc
         try:
+            from core.config import RaptorConfig
             proc = subprocess.run(
                 [rustc, "--print", "sysroot"],
                 capture_output=True, text=True, timeout=_COMPILE_TIMEOUT_S,
+                env=RaptorConfig.get_safe_env(),
             )
         except (OSError, subprocess.SubprocessError):
             return rustc
