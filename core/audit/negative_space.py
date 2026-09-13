@@ -319,6 +319,10 @@ def discover_conventions(
                 continue
             key = f"{gap.get('file', '')}:{gap.get('name', '')}"
 
+            # Count the gap under EVERY matching pattern: with a
+            # first-match break, an early pattern absorbed each gap and
+            # skewed the best_pat majority vote toward list order
+            # rather than actual adoption.
             for pat in patterns_to_check:
                 try:
                     if re.search(pat, source):
@@ -326,7 +330,6 @@ def discover_conventions(
                         locs = bucket.setdefault(pat, [])
                         if key not in locs:
                             locs.append(key)
-                        break
                 except re.error:
                     continue
 

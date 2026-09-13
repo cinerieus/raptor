@@ -1445,3 +1445,22 @@ class TestContextManagerLockScoping:
         )
         titles = [x.title for x in check_lock_ordering(self._gap(source))]
         assert "Missing unlock in error path" not in titles
+
+
+class TestConventionCountsPerPattern:
+    def test_gap_counts_under_every_matching_pattern(self):
+        # Three gaps match both check_auth and require_role; a fourth
+        # matches require_role only. First-match-wins counting used to
+        # award check_auth the majority (3 vs 1) even though
+        # require_role appears in all four functions.
+        both = "check_auth(u)\nrequire_role(u, 'admin')\n"
+        only_role = "require_role(u, 'admin')\n"
+        gaps = [
+            {"file": "a.py", "name": f"f{i}", "source": both}
+            for i in range(3)
+        ] + [{"file": "a.py", "name": "f3", "source": only_role}]
+        convs = discover_conventions(gaps, framework="")
+        auth = [c for c in convs if c.concern == "auth"]
+        assert len(auth) == 1
+        assert auth[0].pattern == r"require_role"
+        assert auth[0].occurrences == 4
