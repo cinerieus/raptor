@@ -697,7 +697,7 @@ def _local_alias_escapes(
 
 
 def _grade(vocab_source: str, census: FieldCensus) -> str:
-    """Registry rule-id when the event verb is learned/pack/seed
+    """Registry rule-id when the event verb is learned/seed
     (registry vocabulary) AND the census is full-tier; naming-only
     verbs select the ``-naming`` detection variant."""
     if vocab_source in ("learned", "seed") and not census.degraded:
