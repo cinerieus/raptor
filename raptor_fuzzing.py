@@ -780,10 +780,7 @@ Examples:
         if best_strategy:
             logger.info("Found best strategy from memory: %s", best_strategy)
 
-        planner = FuzzingPlanner(
-            memory=memory,
-            sage_strategy_rows=sage_strategy_rows,
-        )
+        planner = FuzzingPlanner()
 
         # Generate autonomous corpus if no corpus provided
         if not corpus_dir:
@@ -1057,7 +1054,6 @@ Examples:
             # Create dummy state for prioritization
             dummy_state = FuzzingState(
                 start_time=time.time(),
-                current_time=time.time(),
                 total_crashes=len(crashes),
                 unique_crashes=len(crashes),
             )

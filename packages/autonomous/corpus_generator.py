@@ -558,65 +558,6 @@ class CorpusGenerator:
         # caller falls back to the content-hash dedupe path above.
         return 0
 
-    def learn_from_crash(self, crash_input: Path, crash_type: str) -> None:
-        """
-        Learn from a crash to improve future corpus generation.
-
-        Args:
-            crash_input: Input that caused crash
-            crash_type: Type of crash
-        """
-        if not self.memory:
-            return
-
-        logger.info("Learning from %s crash: %s", crash_type, crash_input.name)
-
-        # Extract patterns from crashing input.
-        #
-        # Pre-fix `crash_input.read_bytes()` had no size cap. AFL
-        # crash inputs are USUALLY tiny (KB) but no upper bound
-        # is enforced at the AFL layer either — a fuzzer that
-        # mutates large initial seeds, or a target that crashes
-        # only on multi-MB inputs (image/video parsers, archive
-        # extractors), produces multi-GB crash files. Reading
-        # them entirely into memory just to compute size +
-        # null-byte + high-byte stats is wasteful and OOM-prone.
-        #
-        # Cap the read at 1 MB (more than enough for the trio of
-        # cheap stats below). For oversized files, use the file
-        # size from stat() and stream-scan the first 1 MB for
-        # the byte-class checks. The "has_nulls" and
-        # "has_high_bytes" answers are stable: if the first 1 MB
-        # contains them, the answer is True; if it doesn't,
-        # there's only a tiny chance the rest does (and even if
-        # missed, the heuristic still works for corpus-learning).
-        _CRASH_READ_CAP = 1 * 1024 * 1024
-        try:
-            try:
-                file_size = crash_input.stat().st_size
-            except OSError:
-                file_size = 0
-            with Path(crash_input).open("rb") as fh:
-                content = fh.read(_CRASH_READ_CAP)
-
-            # Record characteristics. `size` reflects the actual
-            # file size (not the truncated read length).
-            knowledge = {
-                "size": file_size or len(content),
-                "has_nulls": b"\x00" in content,
-                "has_high_bytes": any(b > 127 for b in content),
-                "crash_type": crash_type,
-                # Flag truncated reads so future model consumers
-                # know the byte-class stats reflect a sample.
-                "truncated_read": file_size > _CRASH_READ_CAP,
-            }
-
-            # In future: use memory to store successful patterns
-            logger.debug("Crash pattern: %s", knowledge)
-
-        except Exception as e:
-            logger.warning("Failed to learn from crash: %s", e)
-
     def generate_mutated_seed(self, base_seed: bytes, mutation_type: str = "havoc") -> bytes:
         """
         Generate a mutated version of a seed.
