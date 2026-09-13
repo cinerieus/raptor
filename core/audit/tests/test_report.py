@@ -711,3 +711,12 @@ class TestEdgeObligationsBlock:
             "callee": self._edge_entry("t", "finding").edge_callee,
             "cwe": None,
         }]
+
+
+class TestFormatSummaryFallback:
+    def test_present_summary_returned_without_recompute(self):
+        # The fallback must be lazy: with "summary" present the report
+        # need not be _format_summary-shaped at all (a stats value the
+        # recompute would choke on proves the fallback never ran).
+        report = {"summary": "precomputed", "stats": ["not-a-dict"]}
+        assert format_summary(report) == "precomputed"

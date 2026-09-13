@@ -335,7 +335,12 @@ def load_phase_aborts(out_dir: Path) -> list[dict[str, Any]]:
 
 def format_summary(report: dict[str, Any]) -> str:
     """Format a report dict as a human-readable summary."""
-    return report.get("summary", _format_summary(report))
+    # Lazy fallback: dict.get's default argument would recompute the
+    # summary on EVERY call even when the report already carries one.
+    summary = report.get("summary")
+    if summary is not None:
+        return summary
+    return _format_summary(report)
 
 
 def _load_edge_obligations(out_dir: Path) -> dict[str, Any] | None:
