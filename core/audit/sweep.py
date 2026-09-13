@@ -2834,8 +2834,10 @@ def run_codeql_sweep(
         file_path: Relative path to the source file being audited.
         function_name: Function being audited.
         query_path: Path to the .ql query file.
-        database_path: Path to the CodeQL database. If None, attempts
-            to find one under ``target_path``.
+        database_path: Path to the CodeQL database. Required in
+            practice: None returns an error outcome (in-target DB
+            auto-discovery was removed — a database committed inside
+            the scanned repo is untrusted).
         line_start: Function start line (for match filtering).
         line_end: Function end line.
         memo: Whole-DB result memo. The orchestrator passes its run's
@@ -2862,22 +2864,29 @@ def run_codeql_sweep(
 
         db = database_path
         if not db:
-            for candidate in (
-                target_path / "codeql-db",
-                target_path / ".codeql" / "db",
-                target_path / "codeql-database",
-            ):
-                if candidate.is_dir():
-                    db = str(candidate)
-                    break
-
-        if not db:
+            # No in-target auto-discovery: a database committed inside
+            # the scanned repo (target/codeql-db etc.) has untrusted
+            # provenance — a hostile tree can plant a crafted or empty
+            # DB that steers every sweep verdict toward refuted or
+            # confirmed. Callers must pass a database they provisioned
+            # themselves (the orchestrator always does).
+            logger.warning(
+                "codeql sweep: no database_path given — in-target DB "
+                "auto-discovery (codeql-db/.codeql/db/codeql-database "
+                "under the target) is disabled because a repo-committed "
+                "database is untrusted; provision a database and pass "
+                "it explicitly",
+            )
             return SweepResult(
                 tool="codeql",
                 file_path=file_path,
                 function_name=function_name,
                 outcome="error",
-                errors=["no CodeQL database found; build one first"],
+                errors=[
+                    "no CodeQL database provided; in-target "
+                    "auto-discovery is disabled (untrusted provenance) "
+                    "— build one and pass database_path",
+                ],
             )
 
         def _analyze_whole_db() -> list[dict[str, Any]]:

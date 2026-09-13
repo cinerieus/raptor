@@ -474,6 +474,35 @@ class TestRunCodeqlSweep:
         assert result.outcome == "error"
         assert result.tool == "codeql"
 
+    def test_planted_target_tree_db_is_not_discovered(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """A codeql-db directory committed inside the scanned target
+        must never be auto-discovered: a repo-committed database has
+        untrusted provenance — a hostile tree can plant a crafted or
+        empty DB that steers sweep verdicts. No database_path means
+        an error outcome, never an in-target fallback."""
+        query = self._setup(tmp_path)  # creates tmp_path/codeql-db
+        calls: list = []
+        import core.dataflow.codeql_augmented_run as car
+
+        def fake(db_path, queries, output_path, **kw):
+            calls.append(db_path)
+            raise AssertionError(
+                "planted in-target DB must not be analysed"
+            )
+
+        monkeypatch.setattr(car, "analyze", fake)
+        result = run_codeql_sweep(
+            target_path=tmp_path,
+            file_path="a.c",
+            function_name="foo",
+            query_path=str(query),
+        )
+        assert result.outcome == "error"
+        assert any("database" in e.lower() for e in result.errors)
+        assert calls == []
+
     @staticmethod
     def _fake_analyze(results):
         """Stand-in for codeql_augmented_run.analyze with its real
@@ -516,6 +545,10 @@ class TestRunCodeqlSweep:
         query.write_text("select 1")
         return query
 
+    @staticmethod
+    def _db(tmp_path: Path) -> str:
+        return str(tmp_path / "codeql-db")
+
     def test_match_in_function_confirmed(self, tmp_path: Path, monkeypatch):
         query = self._setup(tmp_path)
         import core.dataflow.codeql_augmented_run as car
@@ -528,6 +561,7 @@ class TestRunCodeqlSweep:
             file_path="a.c",
             function_name="foo",
             query_path=str(query),
+            database_path=self._db(tmp_path),
             line_start=10,
             line_end=20,
         )
@@ -546,6 +580,7 @@ class TestRunCodeqlSweep:
             file_path="a.c",
             function_name="foo",
             query_path=str(query),
+            database_path=self._db(tmp_path),
             line_start=10,
             line_end=20,
         )
@@ -585,6 +620,7 @@ class TestRunCodeqlSweep:
                 file_path="a.c",
                 function_name="foo",
                 query_path=str(query),
+                database_path=self._db(tmp_path),
             )
         assert result.outcome == "error"
         assert result.tool == "codeql"
@@ -608,6 +644,7 @@ class TestRunCodeqlSweep:
             file_path="a.c",
             function_name="foo",
             query_path=str(query),
+            database_path=self._db(tmp_path),
         )
         assert result.outcome == "error"
         assert any("exited 2" in e for e in result.errors)
