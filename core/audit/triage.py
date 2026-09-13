@@ -384,6 +384,12 @@ def classify_all(
         line_start = gap.get("line_start", 0)
         key = f"{bare_key}:{line_start}"
         sloc = gap.get("sloc", (gap.get("line_end", 0) or 0) - (gap.get("line_start", 0) or 0))
+        # Clamp BEFORE the veto gate below: a malformed record with a
+        # negative sloc still classifies as small (skip-eligible), so
+        # its source must be read for the stack-buffer veto — an
+        # unclamped negative value failed the 0 <= sloc gate and
+        # bypassed the read while the function went on to SKIP.
+        sloc = max(sloc, 0)
         caller_count = len(gap.get("callers", []))
 
         source = gap.get("source", "") or ""
@@ -411,7 +417,7 @@ def classify_all(
         results[key] = classify_function(
             file=gap["file"],
             function=gap["name"],
-            sloc=max(sloc, 0),
+            sloc=sloc,
             source=source,
             priority_score=scores.get(bare_key, 0.0),
             is_entry_point=bare_key in entry_points,

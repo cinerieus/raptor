@@ -376,6 +376,28 @@ class TestStackBufferSkipVeto:
         (only,) = results.values()
         assert only.bucket == TriageBucket.INVESTIGATE
 
+    def test_negative_sloc_gap_still_reads_source_for_veto(
+        self, tmp_path,
+    ):
+        """A gap carrying an explicit negative sloc (malformed
+        inventory record) classifies as small (clamped to 0, so
+        skip-eligible) — its source must still be read so the
+        stack-buffer veto can fire; the unclamped negative used to
+        bypass the read while the function went on to SKIP."""
+        src_file = tmp_path / "t.c"
+        src_file.write_text(_TRACE_STRING_SHAPE)
+        gaps = [{
+            "name": "trace_string", "file": "t.c",
+            "line_start": 1, "line_end": 21, "sloc": -3,
+        }]
+        results = classify_all(
+            gaps,
+            sink_unreachable_keys=frozenset({"t.c:trace_string"}),
+            target_path=tmp_path,
+        )
+        (only,) = results.values()
+        assert only.bucket == TriageBucket.INVESTIGATE
+
     def test_classify_all_without_target_path_unchanged(self):
         gaps = [{
             "name": "trace_string", "file": "t.c",
