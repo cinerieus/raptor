@@ -295,13 +295,18 @@ def _call_re(names: tuple[str, ...] | list[str]) -> re.Pattern:
 
 
 def _read_source(target_path: Path, file_path: str) -> str | None:
-    try:
-        p = Path(target_path) / file_path
-        if p.is_file():
-            return p.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        pass
-    return None
+    """Containment-checked, size-capped read of a hypothesis file path.
+
+    ``file_path`` arrives from review-outcome / checklist artifacts
+    (LLM-writable): a bare join lets an absolute value discard
+    ``target_path`` under ``/`` semantics and a ``..`` segment escape
+    the analysed root, pulling arbitrary host files into adjudication.
+    Escaping, unreadable, and pathological paths all read as None —
+    the caller's hypothesis-unbindable inconclusive, never a verdict.
+    """
+    from core.source import read_contained
+
+    return read_contained(target_path, file_path)
 
 
 def _function_segment(

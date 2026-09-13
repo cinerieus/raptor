@@ -440,6 +440,32 @@ int f(BIO *cms)
     def test_all_reasons_enumerated(self):
         assert len(INCONCLUSIVE_REASONS) == 7
 
+    def test_traversal_path_reads_as_unbindable(self, tmp_path):
+        # file_path is LLM-writable: a ../ segment must not escape the
+        # analysed root and pull host files into adjudication.
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text(EFAIL, encoding="utf-8")
+        res = run_release_order_check(
+            target, "../outside.c", "cms_copy_content", HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert res.reason.startswith(REASON_HYPOTHESIS_UNBINDABLE)
+
+    def test_absolute_path_reads_as_unbindable(self, tmp_path):
+        # An absolute file_path discards target_path entirely under
+        # Path "/" join semantics — must refuse, never read.
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text(EFAIL, encoding="utf-8")
+        res = run_release_order_check(
+            target, str(outside), "cms_copy_content", HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert res.reason.startswith(REASON_HYPOTHESIS_UNBINDABLE)
+
 
 class TestPrepass:
     def test_prepass_pairs(self, tmp_path):
