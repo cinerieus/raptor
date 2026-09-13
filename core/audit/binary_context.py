@@ -369,14 +369,40 @@ def _read_binary_source(func, target_path=None, out_dir=None):
     )
 
 
+def _xref_call_adjacency(db) -> tuple[Dict[Any, list], Dict[Any, list]]:
+    """Call-edge adjacency: (to_addr -> [xref], caller_addr -> [xref]).
+
+    Both renderers below used to walk ``db.xrefs`` in full for EVERY
+    reviewed function — N functions x X xrefs per gap loop.  Built
+    once per database object and memoised on it (same count-based
+    invalidation discipline as the model's ``_addr_index``: the
+    enrich path appends xrefs).  The memo dies with the db object,
+    so the (path, mtime)-keyed ``_REDB_CACHE`` carries it across the
+    whole run and a changed re-database.json starts fresh.
+    """
+    cached = getattr(db, "_audit_xref_adjacency", None)
+    if cached is not None and cached[0] == len(db.xrefs):
+        return cached[1], cached[2]
+    by_callee: Dict[Any, list] = {}
+    by_caller: Dict[Any, list] = {}
+    for xref in db.xrefs:
+        if xref.kind != "call":
+            continue
+        by_callee.setdefault(xref.to_addr, []).append(xref)
+        caller = db.function_containing_address(xref.from_addr)
+        if caller is not None:
+            by_caller.setdefault(caller.address, []).append(xref)
+    db._audit_xref_adjacency = (len(db.xrefs), by_callee, by_caller)
+    return by_callee, by_caller
+
+
 def _binary_callers(db, func) -> List[Dict[str, Any]]:
     if db is None or func is None:
         return []
     callers = []
     seen = set()
-    for xref in db.xrefs:
-        if xref.to_addr != func.address or xref.kind != "call":
-            continue
+    by_callee, _ = _xref_call_adjacency(db)
+    for xref in by_callee.get(func.address, []):
         caller = db.function_containing_address(xref.from_addr)
         if caller and caller.address not in seen:
             seen.add(caller.address)
@@ -398,12 +424,8 @@ def _binary_callees(db, func) -> List[Dict[str, Any]]:
         return []
     callees = []
     seen = set()
-    for xref in db.xrefs:
-        if xref.kind != "call":
-            continue
-        caller = db.function_containing_address(xref.from_addr)
-        if caller is None or caller.address != func.address:
-            continue
+    _, by_caller = _xref_call_adjacency(db)
+    for xref in by_caller.get(func.address, []):
         callee = db.function_by_address(xref.to_addr)
         if callee and callee.address not in seen:
             seen.add(callee.address)
