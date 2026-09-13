@@ -574,7 +574,16 @@ function getLabels() {
         assert funcs == []
 
     def test_cross_language_mismatch(self):
-        """Go producer + Python consumer should detect gap."""
+        """Go producer + Python consumer should detect gap.
+
+        The producer and consumer live in different files, so the pair
+        needs an explicit call-graph edge (the intra-module heuristic
+        links only within one file, and there is no shared field name
+        for the field heuristic). Availability is probed explicitly so
+        the assertion stays load-bearing when tree-sitter is present —
+        a skip on ``match is None`` would also mask a real regression
+        in cross-language linking or gap computation.
+        """
         go_src = '''\
 package main
 
@@ -589,13 +598,24 @@ def apply_mode(m):
     elif m == "slow":
         pass
 '''
-        results = detect_value_space_mismatches({
-            "mode.go": go_src,
-            "handler.py": py_src,
-        })
+        from core.audit.ts_extract import extract_string_literals
+        if extract_string_literals("mode.go", go_src) is None:
+            pytest.skip("tree-sitter (go grammar) not available")
+        results = detect_value_space_mismatches(
+            {
+                "mode.go": go_src,
+                "handler.py": py_src,
+            },
+            call_graphs={
+                "handler.py": FakeCallGraph(calls=[
+                    FakeCall(caller="apply_mode", chain=["getMode"]),
+                ]),
+            },
+        )
         match = _find_mismatch(results, "getMode", "apply_mode")
-        if match is None:
-            pytest.skip("tree-sitter not available or no intra-module link")
+        assert match is not None, (
+            f"Expected getMode→apply_mode mismatch, got {results}"
+        )
         assert "slow" in match.dead_branches
 
 
