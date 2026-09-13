@@ -676,8 +676,16 @@ def import_validate_evidence(
     if findings_path.is_file():
         data = _normalised_findings(_load_json(findings_path))
         if data and data.get("findings"):
-            first = data["findings"][0]
-            if first.get("feasibility") or first.get("ruling"):
+            # Probe a bounded prefix, not only findings[0]: a genuine
+            # /validate dir whose first finding happens to lack both
+            # keys (e.g. an unruled record prepended by a post-pass)
+            # must still read as validate output. Bounded because the
+            # gate decides provenance, not content — scanning a huge
+            # list buys nothing.
+            if any(
+                f.get("feasibility") or f.get("ruling")
+                for f in data["findings"][:20]
+            ):
                 own_command = _run_command(audit_output_dir)
                 if own_command not in ("", "validate", "exploitability-validation"):
                     # This dir is an audit (or other non-validate) run

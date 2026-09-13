@@ -941,3 +941,30 @@ class TestTargetMatchResolution:
             audit_dir, real, project_dir=project_dir,
         )
         assert result.source_command == "validate (project sibling)"
+
+
+class TestColocatedGatePrefix:
+    """The co-located gate must probe a prefix of the findings list,
+    not only findings[0]: a genuine /validate dir whose first finding
+    lacks both feasibility and ruling is still validate output."""
+
+    def test_gate_scans_beyond_first_finding(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAPTOR_DIR", str(tmp_path))
+        audit_dir = tmp_path / "out-dir"
+        audit_dir.mkdir()
+        findings = [
+            {"id": "F0", "function": "helper", "file": "src/util.c"},
+            {
+                "id": "F1", "function": "parse_header", "file": "src/http.c",
+                "feasibility": {
+                    "verdict": "likely_exploitable", "chain_breaks": [],
+                },
+                "final_status": "exploitable",
+            },
+        ]
+        (audit_dir / "findings.json").write_text(
+            json.dumps({"findings": findings}),
+        )
+        result = import_validate_evidence(audit_dir, tmp_path / "src")
+        assert result.source_command == "validate (co-located)"
+        assert result.feasibility_verdicts
