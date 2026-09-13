@@ -3777,8 +3777,11 @@ def run_joern_pre_sweep(
             # The taint query ran through to a flow set — distinguishes
             # a genuinely empty sweep (cacheable) from the early-return
             # skip cases above (joern missing, no script), which leave
-            # status_out untouched.
-            status_out["completed"] = True
+            # status_out untouched. Residual errors (a lost window, a
+            # query failure) block the marker: an errored sweep's
+            # zero/partial flows must never read as a genuinely empty
+            # ("not tainted") result.
+            status_out["completed"] = not result.errors
         return flows_by_key
 
     build_kwargs: dict[str, Any] = {
@@ -3814,9 +3817,15 @@ def run_joern_pre_sweep(
             substitutions=sink_subst,
         )
         if result.errors:
-            logger.warning("joern pre-sweep errors: %s", result.errors)
+            logger.warning(
+                "joern pre-sweep errors: %s — flow set is incomplete; "
+                "this sweep will not read as completed (missing flows "
+                "mean 'not swept', not 'no flows')", result.errors,
+            )
         if status_out is not None:
             status_out["errors"] = [str(e) for e in (result.errors or [])]
+            if result.errors:
+                status_out["errors_fatal"] = True
 
         flows_by_key: dict[str, list] = {}
         for flow in result.flows:
@@ -3829,7 +3838,14 @@ def run_joern_pre_sweep(
                 flows_by_key.setdefault(key, []).append(flow)
 
         if status_out is not None:
-            status_out["completed"] = True
+            # completed marks a query that ran through cleanly. An
+            # errored query's zero/partial flows must stay
+            # distinguishable from a genuinely empty sweep — "no
+            # flows" from a degraded run means "not swept", never
+            # "not tainted" — so errors block the completed marker
+            # (the flow-cache gate treats not-completed as
+            # uncacheable).
+            status_out["completed"] = not result.errors
         return flows_by_key
     finally:
         cleanup_cpg(cpg)

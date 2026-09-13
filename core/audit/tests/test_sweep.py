@@ -1162,6 +1162,63 @@ class TestRunJoernPreSweep:
         assert result == {}  # fake CPG doesn't exist → empty
         assert captured.get("languages") == {"c"}
 
+    def _run_with_query_result(self, monkeypatch, tmp_path, joern_result):
+        """Non-server pre-sweep with the taint query stubbed."""
+        from core.audit.sweep import run_joern_pre_sweep
+        from packages.joern import prereqs, runner
+        from packages.joern.models import JoernCPG
+
+        (tmp_path / "main.c").write_text("int main() { return 0; }")
+        cpg_path = tmp_path / "cpg.bin"
+        cpg_path.write_bytes(b"")
+
+        monkeypatch.setattr(prereqs, "is_available", lambda: True)
+        monkeypatch.setattr(
+            runner, "build_cpg",
+            lambda target, **kw: JoernCPG(path=cpg_path, target=target),
+        )
+        monkeypatch.setattr(
+            runner, "run_query", lambda *a, **kw: joern_result,
+        )
+        monkeypatch.setattr(runner, "cleanup_cpg", lambda cpg: None)
+
+        status: dict = {}
+        flows = run_joern_pre_sweep(tmp_path, {}, status_out=status)
+        return flows, status
+
+    def test_errored_query_is_not_completed(
+        self, monkeypatch, tmp_path: Path,
+    ):
+        """An errored taint query returning zero flows must not mark
+        the sweep completed: 'no flows' from a degraded run means
+        'not swept', never 'not tainted' (and must stay uncacheable)."""
+        from packages.joern.models import JoernResult
+
+        flows, status = self._run_with_query_result(
+            monkeypatch, tmp_path, JoernResult(
+                query="q", flows=[],
+                errors=["query timed out after 300s"],
+            ),
+        )
+        assert flows == {}
+        assert status.get("completed") is False
+        assert status.get("errors")
+        assert status.get("errors_fatal") is True
+
+    def test_clean_query_is_completed(self, monkeypatch, tmp_path: Path):
+        """Guard for the other direction: a clean query with zero
+        flows is a genuinely empty (cacheable) sweep."""
+        from packages.joern.models import JoernResult
+
+        flows, status = self._run_with_query_result(
+            monkeypatch, tmp_path, JoernResult(
+                query="q", flows=[], errors=[],
+            ),
+        )
+        assert flows == {}
+        assert status.get("completed") is True
+        assert "errors_fatal" not in status
+
 
 class TestMechanicalCheckToSemgrep:
     def test_unchecked_return_maps(self):
