@@ -173,34 +173,41 @@ def load_jsonl(
         try:
             oversize_lines = 0
             invalid_lines = 0
+            # File iteration splits on ``\n`` only; ``splitlines`` on
+            # each chunk restores the bare-``\r`` separators the old
+            # text-mode universal-newlines read accepted (foreign
+            # writers only — no RAPTOR writer emits them). CRLF and
+            # plain-``\n`` chunks yield exactly one segment each.
             for raw_bytes in f:
-                if (
-                    max_line_bytes is not None
-                    and len(raw_bytes) > max_line_bytes
-                ):
-                    oversize_lines += 1
-                    continue
-                try:
-                    raw = raw_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    invalid_lines += 1
-                    continue
-                line = raw.strip()
-                if not line:
-                    continue
-                try:
-                    records.append(
-                        _loads(line, parse_constant=_reject_non_finite))
-                except ValueError:
-                    # json.JSONDecodeError (both backends) and the
-                    # non-finite rejection are ValueError subclasses.
-                    continue
-                except RecursionError:
-                    # Python <= 3.13's stdlib parser is recursive, so a
-                    # deeply-nested line raises RecursionError instead
-                    # of a decode error — same best-effort skip, or the
-                    # foreign writer's bomb line kills the whole trail.
-                    continue
+                for line_bytes in raw_bytes.splitlines():
+                    if (
+                        max_line_bytes is not None
+                        and len(line_bytes) > max_line_bytes
+                    ):
+                        oversize_lines += 1
+                        continue
+                    try:
+                        raw = line_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        invalid_lines += 1
+                        continue
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(
+                            _loads(line, parse_constant=_reject_non_finite))
+                    except ValueError:
+                        # json.JSONDecodeError (both backends) and the
+                        # non-finite rejection are ValueError subclasses.
+                        continue
+                    except RecursionError:
+                        # Python <= 3.13's stdlib parser is recursive,
+                        # so a deeply-nested line raises RecursionError
+                        # instead of a decode error — same best-effort
+                        # skip, or the foreign writer's bomb line kills
+                        # the whole trail.
+                        continue
         except OSError:
             logger.debug("load_jsonl: read failed for %s", path, exc_info=True)
         if oversize_lines:

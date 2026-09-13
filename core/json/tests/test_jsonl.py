@@ -336,3 +336,26 @@ class TestAppendNonFiniteParity:
         p = tmp_path / "trail.jsonl"
         append_jsonl(p, {"score": 0.5})
         assert load_jsonl(p) == [{"score": 0.5}]
+
+
+class TestLineSeparators:
+    """The byte-mode read iterates on ``\\n`` only; foreign-writer
+    files delimited by bare ``\\r`` parsed under the old text-mode
+    universal-newlines read and must keep parsing."""
+
+    def test_bare_cr_separators_still_load(self, tmp_path: Path):
+        p = tmp_path / "trail.jsonl"
+        p.write_bytes(b'{"a": 1}\r{"b": 2}')
+        assert load_jsonl(p) == [{"a": 1}, {"b": 2}]
+
+    def test_crlf_separators_still_load(self, tmp_path: Path):
+        p = tmp_path / "trail.jsonl"
+        p.write_bytes(b'{"a": 1}\r\n{"b": 2}\r\n')
+        assert load_jsonl(p) == [{"a": 1}, {"b": 2}]
+
+    def test_oversize_line_gate_applies_per_cr_segment(self, tmp_path: Path):
+        """A bare-CR file is ONE ``\\n``-iteration chunk; the byte
+        budget must gate each record, not the whole chunk."""
+        p = tmp_path / "trail.jsonl"
+        p.write_bytes(b'{"a": 1}\r{"pad": "' + b"x" * 64 + b'"}\r{"b": 2}')
+        assert load_jsonl(p, max_line_bytes=32) == [{"a": 1}, {"b": 2}]
