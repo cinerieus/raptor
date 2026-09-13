@@ -894,7 +894,7 @@ Named workspaces that corral analysis runs into a shared directory.
 | `sessions` | Show live sessions and their project bindings |
 | `none` | Clear this session's project (the default is untouched) |
 | `delete` | Delete a project (`--purge` removes output directory, `--yes` skips confirmation) |
-| `rename` | Rename a project |
+| `rename` | Rename a project (a name-derived default output dir moves with it; custom dirs never move; existing/claimed destination refused; `--force` past live runs keeps the old path, warning) |
 | `notes` | View or set project notes (inline text or `--file`) |
 | `add` | Add a run directory to the project |
 | `remove` | Remove a run, moving it to `--to <path>` |

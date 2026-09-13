@@ -35,7 +35,7 @@ Manage projects — named workspaces that corral analysis runs into one director
 | `none` | Clear THIS SESSION's project (the last-activated default is untouched; from a bare shell it clears the default, loudly labelled) |
 | `use [<name>]` | Bind this session to a project AND update the last-activated default (no arg = report both layers, `none` = session-only clear) |
 | `delete <name> [--purge] [--yes] [--force]` | Remove project (--purge also deletes output; refused while live runs exist under it unless --force) |
-| `rename <old> <new>` | Rename a project |
+| `rename <old> <new>` | Rename a project (a name-derived default output dir moves to the new name and the record updates; operator-chosen custom dirs never move; refused when the destination dir already exists or belongs to another project; `--force` past live runs keeps the old path with a warning — a live run's directory never moves) |
 | `notes <name> [<text>] [--file <path>]` | View or update notes |
 | `add <name> <dir> [--target <path>]` | Add existing runs to a project (target-validated; journal index + coverage projections re-run) |
 | `adopt <name> <run-or-dir>... [--target <path>]` | Retro-create a project around existing run(s) — create-if-missing + add; target inferred from the run's metadata |
@@ -73,12 +73,12 @@ libexec/raptor-project-manager <subcommand> [args]
 **`create` over an existing directory** — before creating, check whether the output directory (`--output-dir`, or the default `out/projects/<name>`) already exists and is non-empty. If it does, ask — options:
 
 1. **Choose a different name/dir (Recommended)** — pick a fresh directory; nothing is adopted.
-2. **Adopt the existing directory** — proceed; `create` reuses the directory, and existing run dirs inside it join the project's views (`status`, `findings`, `report`). Preview: list the directory's existing contents.
+2. **Adopt the existing directory** — proceed; `create` reuses the directory, and existing run dirs inside it join the project's views (`status`, `findings`, `report`). Preview: list the directory's existing contents. Note: this only works for a directory no project owns — `create` refuses an output dir already registered to another project (two projects must never share one; clean/purge on one would delete the other's runs).
 3. **Cancel** — do not create the project.
 
 **`merge` / `delete --purge`** — same pattern: show exactly what will be merged or removed (from `/project status`), ask with a Cancel-first option, and pass `--yes` only after an explicit selection.
 
-**Non-interactive fallback:** current behavior — never pass `--yes`. For `clean`/`merge`/`delete --purge`, run at most the `--dry-run` / read-only preview, report what would be deleted, and stop — deletion requires an interactive confirmation or an operator-supplied `--yes`. For `create`, proceed as today (the existing directory is reused); note the adoption in your output.
+**Non-interactive fallback:** current behavior — never pass `--yes`. For `clean`/`merge`/`delete --purge`, run at most the `--dry-run` / read-only preview, report what would be deleted, and stop — deletion requires an interactive confirmation or an operator-supplied `--yes`. For `create`, proceed as today (an existing unowned directory is reused; a directory registered to another project is refused with an error — report it, do not retry with a different name on the operator's behalf); note any adoption in your output.
 
 ## Output
 
