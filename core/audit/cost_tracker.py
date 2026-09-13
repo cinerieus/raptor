@@ -493,9 +493,14 @@ def format_cost_summary(result: Any) -> str | None:
     if prior_spend >= 0.005:
         detail.append(f"${prior_spend:.2f} booked from prior segments")
     if support_spend >= 0.005:
+        # This bucket is every ledger phase that is not review /
+        # re_review / refinement / prior_segments — triage, sweeps,
+        # dynamic verification, spec inference, summaries, study —
+        # so the label must not name only a subset of them.
         detail.append(
-            f"${support_spend:.2f} on support phases "
-            f"(summaries/spec inference/study)"
+            f"${support_spend:.2f} on non-review phases "
+            f"(triage/sweeps/verification/study — see "
+            f"cost-breakdown.json)"
         )
     if unattributed >= 0.005:
         detail.append(

@@ -474,7 +474,7 @@ class TestCostSummaryAttribution:
         from core.audit.cost_tracker import format_cost_summary
         line = format_cost_summary(self._result())
         assert "booked from prior segments" in line
-        assert "support phases" in line
+        assert "non-review phases" in line
         assert "unattributed" not in line, (
             "ledger-attributed spend must not print as unattributed"
         )
