@@ -211,6 +211,69 @@ class TestSageClientWithMock(unittest.TestCase):
             _restore_sdk(client_mod, snapshot)
 
 
+class TestQueryCacheBoundAndRace(unittest.TestCase):
+    """The per-instance query cache is FIFO-bounded (256, insertion
+    order — not LRU), and its eviction tolerates the concurrent-pop
+    race hook consumers can hit from ThreadPoolExecutor workers."""
+
+    def _client_with_mock(self, client_mod):
+        _, mock_instance = _install_mock_sdk(client_mod)
+        from core.sage.config import SageConfig
+        from core.sage.client import SageClient
+
+        sc = SageClient(SageConfig(enabled=True))
+        mock_instance.embed.return_value = [0.1]
+        mock_instance.query.return_value = SimpleNamespace(results=[])
+        return sc
+
+    @patch("core.sage.client._use_direct_embed", return_value=False)
+    def test_cache_is_fifo_bounded_at_256(self, _mock_direct):
+        import core.sage.client as client_mod
+
+        snapshot = _snapshot_sdk(client_mod)
+        try:
+            sc = self._client_with_mock(client_mod)
+            for i in range(257):
+                sc.query(f"q{i}")
+            self.assertEqual(len(sc._query_cache), 256)
+            keys = {k[0] for k in sc._query_cache}
+            self.assertNotIn("q0", keys)      # first inserted evicted
+            self.assertIn("q256", keys)
+        finally:
+            _restore_sdk(client_mod, snapshot)
+
+    @patch("core.sage.client._use_direct_embed", return_value=False)
+    def test_lost_eviction_race_does_not_escape_query(self, _mock_direct):
+        # Simulate the loser of a concurrent eviction: the key picked
+        # by next(iter(...)) was already popped by another thread, so
+        # pop raises KeyError. That must be absorbed like
+        # StopIteration — pre-fix it escaped query() and the caller's
+        # broad except silently dropped the recall.
+        import core.sage.client as client_mod
+
+        class _RacingDict(dict):
+            raced = False
+
+            def pop(self, key, *default):
+                if not self.raced:
+                    self.raced = True
+                    raise KeyError(key)
+                return super().pop(key, *default)
+
+        snapshot = _snapshot_sdk(client_mod)
+        try:
+            sc = self._client_with_mock(client_mod)
+            racing = _RacingDict(
+                {(f"q{i}", "general", 5, None): () for i in range(256)}
+            )
+            sc._query_cache = racing
+            self.assertEqual(sc.query("fresh"), [])   # must not raise
+            self.assertTrue(racing.raced)
+            self.assertIn(("fresh", "general", 5, None), racing)
+        finally:
+            _restore_sdk(client_mod, snapshot)
+
+
 class TestSageClientTagsAndMinConfidence(unittest.TestCase):
     """SAGE 11.9.2 features: tags on propose, min_confidence on query."""
 

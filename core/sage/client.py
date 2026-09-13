@@ -190,6 +190,11 @@ class SageClient:
         self._config = config or SageConfig.from_env()
         self._client = None
         self._query_cache: dict[tuple[str, str, int, float | None], tuple[tuple[str, float, str], ...]] = {}
+        # Guards the eviction+insert pair: hook consumers query this
+        # client from ThreadPoolExecutor workers (e.g.
+        # recall_concepts_for_study), and two racing evictions of the
+        # same oldest key would KeyError out of query().
+        self._query_cache_lock = threading.Lock()
         self._register_with_egress_proxy()
 
     def _register_with_egress_proxy(self) -> None:
@@ -392,7 +397,8 @@ class SageClient:
         Query SAGE for semantically similar memories.
         Returns a list of dicts with content, confidence, and domain keys.
 
-        Results are LRU-cached (256 entries) keyed on
+        Results are FIFO-bounded-cached (256 entries, insertion-order
+        eviction — no recency update) keyed on
         (text, domain_tag, top_k, min_confidence) so repeated queries
         for the same identifier skip both embedding and vector search.
         """
@@ -434,12 +440,19 @@ class SageClient:
         except Exception as e:
             logger.warning("SAGE query failed: %s", e)
             return ()
-        if len(self._query_cache) >= 256:
-            # Evict oldest entry (first inserted) to bound memory.
-            try:
-                self._query_cache.pop(next(iter(self._query_cache)))
-            except StopIteration:
-                pass
-        self._query_cache[key] = result
+        with self._query_cache_lock:
+            if len(self._query_cache) >= 256:
+                # Evict oldest entry (first inserted) to bound memory
+                # (FIFO, not LRU). KeyError joins StopIteration: two
+                # threads racing past the lock-free .get() above can
+                # both reach here, and without the guard the loser's
+                # pop of the already-evicted key escaped query() and
+                # silently dropped that recall in the caller's broad
+                # except.
+                try:
+                    self._query_cache.pop(next(iter(self._query_cache)))
+                except (StopIteration, KeyError):
+                    pass
+            self._query_cache[key] = result
         return result
 
