@@ -565,3 +565,62 @@ class TestPackCollectionVerbsCache:
         # Cache must serve the second call — the file is gone.
         (pack_dir / "linux_kernel.json").unlink()
         assert rb._pack_collection_verbs(tmp_path) == first
+
+
+class TestSanitizedViewMatching:
+    """Lexical witnesses are earned on the sanitized view (comments/
+    strings blanked) — both directions are hostile-repo steerable:
+    a comment clamp mints a refutation, a comment insert mints a
+    site."""
+
+    _CLAMP_SEG = [
+        "void f(struct list *l, int count) {",
+        "    {CLAMP}",
+        "    for (i = 0; i < n; i++) {",
+        "        p = malloc(64);",
+        "    }",
+        "}",
+    ]
+
+    def _clamp(self, clamp_line):
+        from core.audit.resource_bounds import _clamp_witness
+        seg = [ln.replace("{CLAMP}", clamp_line) for ln in self._CLAMP_SEG]
+        return _clamp_witness(
+            seg, 1, 4, None, frozenset(), file_path="src/a.c",
+        )
+
+    def test_comment_clamp_does_not_refute(self):
+        assert self._clamp("/* n = min(count, MAX_CONN) */") is None
+
+    def test_real_clamp_still_witnesses(self):
+        w = self._clamp("n = min(count, MAX_CONN);")
+        assert w is not None
+        assert w["bound"] == "MAX_CONN"
+
+    def test_comment_insert_does_not_mint_site(self):
+        from core.audit.resource_bounds import _enumerate_sites
+        seg = [
+            "void g(struct list *l, struct conn *c) {",
+            "    /* list_add(&c->node, l); */",
+            "}",
+        ]
+        sites = _enumerate_sites(
+            seg, 1, {"list_add": ("seed", "seed")}, {},
+            file_path="src/a.c",
+        )
+        assert sites == []
+
+    def test_real_insert_still_mints_site(self):
+        from core.audit.resource_bounds import _enumerate_sites
+        seg = [
+            "void g(struct list *l, struct conn *c) {",
+            "    list_add(&c->node, l);",
+            "}",
+        ]
+        sites = _enumerate_sites(
+            seg, 1, {"list_add": ("seed", "seed")}, {},
+            file_path="src/a.c",
+        )
+        assert [s.verb for s in sites] == ["list_add"]
+        # Receipt shows the ORIGINAL line, not the blanked view.
+        assert "list_add(&c->node, l);" in sites[0].code

@@ -426,6 +426,24 @@ _STEM_VOCAB_SOURCE = "naming"
 _STEM_PROVENANCE = "naming-stem"
 
 
+def _segment_view_lines(
+    segment_lines: list[str], file_path: str,
+) -> list[str]:
+    """Sanitized view of *segment_lines* (comments and string literals
+    blanked, line count preserved). Lexical witnesses are earned on
+    the view; receipts report the ORIGINAL lines — the sibling
+    checkers' doctrine (see release_order): raw-text matching is
+    hostile-repo steerable in both directions (a block-comment clamp
+    mints a refutation, a block-comment insert mints a site)."""
+    from .source_view import sanitized_view
+    view = sanitized_view(
+        "\n".join(segment_lines), file_path,
+    ).splitlines()
+    while len(view) < len(segment_lines):
+        view.append("")
+    return view
+
+
 def _loop_lines(lines: list[str], start: int) -> set[int]:
     """1-based (relative to *start*) line numbers inside a loop body —
     a brace-depth scan sufficient for the alloc-in-loop candidate
@@ -459,13 +477,16 @@ def _enumerate_sites(
     span_start: int,
     insert_vocab: dict[str, tuple[str, str]],
     alloc_vocab: dict[str, tuple[str, str]],
+    *,
+    file_path: str = "",
 ) -> list[_Site]:
     sites: list[_Site] = []
     insert_re = _call_re(tuple(insert_vocab)) if insert_vocab else None
     alloc_re = _call_re(tuple(alloc_vocab)) if alloc_vocab else None
-    loop_set = _loop_lines(segment_lines, span_start)
+    view_lines = _segment_view_lines(segment_lines, file_path)
+    loop_set = _loop_lines(view_lines, span_start)
     for idx, raw in enumerate(segment_lines):
-        code = raw.split("//", 1)[0]
+        code = view_lines[idx]
         line_no = span_start + idx
         if insert_re is not None:
             m = insert_re.search(code)
@@ -571,6 +592,8 @@ def _clamp_witness(
     site_line: int,
     constants: dict[str, int] | None,
     limit_names: frozenset[str],
+    *,
+    file_path: str = "",
 ) -> dict[str, Any] | None:
     """``min(count, MAX)``-style clamp witness for alloc-in-loop
     sites: a loop header before the site iterates over a variable that
@@ -586,12 +609,14 @@ def _clamp_witness(
             or _LIMITISH_RE.search(tail),
         )
 
+    view_lines = _segment_view_lines(segment_lines, file_path)
     clamp_map: dict[str, dict[str, Any]] = {}
     for idx, raw in enumerate(segment_lines):
         line_no = span_start + idx
         if line_no >= site_line:
             break
-        for m in _CLAMP_RE.finditer(raw.split("//", 1)[0]):
+        # Match on the sanitized view; the receipt keeps the original.
+        for m in _CLAMP_RE.finditer(view_lines[idx]):
             var, a, b = m.group(1), m.group(2), m.group(3)
             for bound in (a, b):
                 if _is_limit(bound):
@@ -604,13 +629,13 @@ def _clamp_witness(
         return None
     # Nearest loop header before the site that mentions a clamped var.
     for idx in range(site_line - span_start - 1, -1, -1):
-        code = segment_lines[idx].split("//", 1)[0]
+        code = view_lines[idx]
         if not _LOOP_RE.search(code):
             continue
         for var, info in clamp_map.items():
             if re.search(rf"\b{re.escape(var)}\b", code):
                 return {
-                    "condition": code.strip()[:200],
+                    "condition": segment_lines[idx].strip()[:200],
                     "count": var,
                     "bound": info["bound"],
                     "bound_source": "clamp-min",
@@ -762,11 +787,22 @@ def _caller_bound_search(
     searched set."""
     per_caller: list[dict[str, Any]] = []
     spans_cache: dict[str, list[tuple[str, int, int]]] = {}
+    views_cache: dict[str, list[str]] = {}
 
     def _spans(fp: str) -> list[tuple[str, int, int]]:
         if fp not in spans_cache:
             spans_cache[fp] = _c_function_spans(source_texts.get(fp, ""))
         return spans_cache[fp]
+
+    def _view(fp: str) -> list[str]:
+        # Call sites are matched on the sanitized view — a
+        # block-comment mention of the callee must not mint a caller
+        # whose dominating guards then refute.
+        if fp not in views_cache:
+            views_cache[fp] = _segment_view_lines(
+                source_texts.get(fp, "").splitlines(), fp,
+            )
+        return views_cache[fp]
 
     frontier = {function_name.rsplit(".", 1)[-1]}
     visited: set[str] = set(frontier)
@@ -780,10 +816,8 @@ def _caller_bound_search(
                     return None, per_caller
                 if callee not in source:
                     continue
-                for m_line, raw in enumerate(
-                    source.splitlines(), start=1,
-                ):
-                    if not call_re.search(raw.split("//", 1)[0]):
+                for m_line, raw in enumerate(_view(fp), start=1):
+                    if not call_re.search(raw):
                         continue
                     enclosing = next(
                         (
@@ -934,7 +968,7 @@ def _adjudicate_site(
             and segment_lines is not None:
         clamp = _clamp_witness(
             segment_lines, span_start, site.line, constants,
-            limit_names,
+            limit_names, file_path=file_path,
         )
         if clamp is not None:
             bound_search["local"] = clamp
@@ -1140,6 +1174,7 @@ def run_resource_bounds_check(
     alloc_vocab = _alloc_vocabulary(domain_model)
     sites = _enumerate_sites(
         segment_lines, span_start, insert_vocab, alloc_vocab,
+        file_path=file_path,
     )
 
     if not sites:
@@ -1278,6 +1313,7 @@ def run_resource_bounds_prepass(
         segment_lines = lines[start - 1:end]
         sites = _enumerate_sites(
             segment_lines, start, insert_vocab, alloc_vocab,
+            file_path=fp,
         )
         # Language from the file's extension, not a hardcoded "c":
         # _SOURCE_SUFFIXES admits C++ files, and the C guard walk on
