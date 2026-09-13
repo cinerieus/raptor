@@ -36,6 +36,11 @@ def _findings_lock(out_dir: Path):
     rename prevents torn files but not lost updates. Best-effort:
     platforms without ``fcntl`` proceed unlocked (the previous
     behaviour), never fail the emit.
+
+    The ``.lock`` file is deliberately left behind (the
+    ``core.project`` locking precedent): unlinking after unlock races
+    — a locker that opened the old inode holds a lock nobody else
+    sees. The empty leftover is cosmetic.
     """
     lock_path = out_dir / "findings.json.lock"
     fh = None
