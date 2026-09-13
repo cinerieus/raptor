@@ -96,6 +96,107 @@ _ANALYSE_ENV_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
+
+class R2CommandTimeout(TimeoutError):
+    """One r2 command exceeded its budget; the r2 child was killed.
+
+    Distinct from a bare TimeoutError so per-function isolation
+    handlers can recognise "the r2 session just died" and route it
+    through recorded degradation + session restart instead of
+    swallowing it like ordinary hostile-output parse failures.
+    """
+
+
+class R2SessionLost(RuntimeError):
+    """The r2 session died and could not be restarted within budget.
+
+    Raised out of the extraction helpers so ``analyse()`` can stop
+    issuing commands at a dead pipe, stamp the context map as partial,
+    and surface a loud note — a hollow-but-"successful" context map
+    is indistinguishable from "binary has no sinks" downstream.
+    """
+
+
+class _R2Session:
+    """Owns the sandboxed r2pipe handle, allowing bounded restarts.
+
+    A per-command timeout (:class:`R2CommandTimeout`) kills the r2
+    subprocess to unblock the pipe read — every later command on the
+    same handle would fail fast on the dead pipe. This wrapper lets
+    the analysis respawn r2 (re-running ``aaa`` when the original
+    session had it) and continue, instead of silently completing with
+    a truncated context map.
+
+    ``_MAX_RESTARTS`` bounds the cost: each restart replays ``aaa``
+    (seconds to minutes), and a binary that keeps wedging r2 is not
+    going to yield more data on the Nth respawn. After the budget is
+    spent the session is ``dead`` and restart() refuses.
+    """
+
+    _MAX_RESTARTS = 2
+
+    def __init__(self, spawn, *, reanalyse_timeout_s: float) -> None:
+        self._spawn = spawn
+        self._reanalyse_timeout_s = reanalyse_timeout_s
+        self._handle: Any = None
+        #: True once ``aaa`` ran on the live handle — restart() then
+        #: replays it so function-level commands keep working.
+        self.analysed = False
+        self.restarts_used = 0
+        self.dead = False
+
+    def open(self) -> None:
+        self._handle = self._spawn()
+
+    @property
+    def process(self):
+        """The r2 child process handle (used by ``_cmd_t`` to kill a
+        wedged r2)."""
+        return getattr(self._handle, "process", None)
+
+    def cmd(self, command: str):
+        if self._handle is None:
+            msg = "r2 session is not open"
+            raise R2SessionLost(msg)
+        return self._handle.cmd(command)
+
+    def quit(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is not None:
+            handle.quit()
+
+    def restart(self) -> bool:
+        """Respawn r2 after a timeout killed it. True when the new
+        session is usable (``aaa`` replayed if the old session had
+        it); False when the restart budget is spent or the respawn
+        itself failed — the session is then permanently ``dead``."""
+        if self.dead or self.restarts_used >= self._MAX_RESTARTS:
+            self.dead = True
+            return False
+        self.restarts_used += 1
+        old, self._handle = self._handle, None
+        if old is not None:
+            try:
+                old.quit()
+            except Exception:  # noqa: BLE001, S110 — the old handle's process was already killed by _cmd_t; quit() failure surface is uncontracted r2pipe internals
+                pass
+        try:
+            handle = self._spawn()
+            if self.analysed:
+                BinaryUnderstand._cmd_t(
+                    handle, "aaa", self._reanalyse_timeout_s,
+                )
+        except Exception:  # noqa: BLE001 — any respawn/reanalyse failure means the session is unrecoverable
+            logger.warning("r2 session restart failed", exc_info=True)
+            self.dead = True
+            return False
+        self._handle = handle
+        logger.info(
+            "r2 session restarted after command timeout (%d/%d)",
+            self.restarts_used, self._MAX_RESTARTS,
+        )
+        return True
+
 # Functions that are high-value sinks for fuzzing — if the binary
 # imports any of these, they are interesting to trace flows toward.
 # Composed from the shared taxonomy; the union here defines what
@@ -425,9 +526,10 @@ class BinaryUnderstand:
         minutes rather than 30 minutes wasted.
 
         On timeout the r2 subprocess is killed via r2pipe's `process`
-        handle, the pipe read unblocks with EOF, and TimeoutError
-        propagates. After timeout r2 is dead; the analyse() try/finally
-        skips r2.quit() (already gone) and cleans up env/scratch.
+        handle, the pipe read unblocks with EOF, and R2CommandTimeout
+        (a TimeoutError) propagates. After timeout r2 is dead; callers
+        going through _cmd_deg record the degradation and restart the
+        session; the analyse() try/finally cleans up env/scratch.
 
         Threaded rather than signal-based because signals can only fire
         in the main thread, and radare2_understand may be called from
@@ -463,12 +565,49 @@ class BinaryUnderstand:
             t.join(2)
             msg = (
                 f"r2 command {command!r} exceeded {timeout_s}s — likely "
-                f"a malicious binary or r2 parser bug; analysis aborted."
+                f"a malicious binary or r2 parser bug; r2 was killed."
             )
-            raise TimeoutError(msg)
+            raise R2CommandTimeout(msg)
         if exc_holder[0] is not None:
             raise exc_holder[0]
         return result_holder[0]
+
+    def _cmd_deg(
+        self,
+        r2,
+        ctx: "BinaryContextMap",
+        command: str,
+        timeout_s: float,
+        *,
+        what: str,
+    ) -> str | None:
+        """Run one r2 command with recorded degradation on timeout.
+
+        A timeout kills r2 (see ``_cmd_t``); pre-fix the per-function
+        ``except Exception`` isolation swallowed the TimeoutError and
+        every later command failed fast on the dead pipe — the
+        analysis "completed" with a silently hollow context map. Here
+        the timeout is recorded as a ``ctx.notes`` degradation entry,
+        the session is restarted (bounded — ``_R2Session.restart``),
+        and ``None`` is returned so the caller skips just this one
+        result. When r2 cannot be revived, ``R2SessionLost``
+        propagates so ``analyse()`` stops issuing commands and stamps
+        the map as partial instead of hollow.
+        """
+        try:
+            return self._cmd_t(r2, command, timeout_s)
+        except R2CommandTimeout as e:
+            note = (
+                f"radare2 timeout: {what} exceeded {timeout_s:.0f}s — "
+                f"r2 killed and restarted; this result is missing"
+            )
+            ctx.notes.append(note)
+            logger.warning("%s", note)
+            restart = getattr(r2, "restart", None)
+            if restart is not None and restart():
+                return None
+            msg = f"r2 session unrecoverable after {what} timed out"
+            raise R2SessionLost(msg) from e
 
     # Per-command timeout budgets. Real `aaa` on typical binaries
     # completes in seconds to a couple of minutes; 10 min is generous.
@@ -526,9 +665,6 @@ class BinaryUnderstand:
         pipeline.
         """
         import contextlib as _contextlib
-        import os as _os
-
-        import r2pipe
 
         from core.run.scratch import scratch_dir
 
@@ -564,24 +700,11 @@ class BinaryUnderstand:
         # r2-sandbox- prefix is in the reaper's static tuple, so a
         # SIGKILLed analysis strands nothing past the age floor).
         _r2_stack = _contextlib.ExitStack()
-        # Single try/finally guarding env-restore + scratch cleanup —
-        # MUST wrap r2pipe.open() itself, not just the post-open
-        # analysis. A failure in r2pipe.open (wrapper crash, mount-ns
-        # unavailable, r2 binary missing) would otherwise leak the
-        # wrapper-only env vars into the rest of the parent process.
-        #
-        # _ANALYSE_ENV_LOCK serialises the env-set + r2pipe.open
-        # window across threads — after r2pipe.open() returns, the
-        # wrapper has snapshotted its env and the parent can mutate
-        # freely. We hold the lock just long enough to spawn, then
-        # release before the slow analysis runs (otherwise concurrent
-        # analyse() calls would serialise end-to-end).
-        r2 = None
         ctx = BinaryContextMap(binary_path=self.binary)
         ctx.analysis_depth = "metadata_only" if quick else "full"
         ctx.decompiler = str(self.cap.get("decompiler") or "")
         ctx.decompilation_limit = max_decompile
-        _saved_env: dict[str, str | None] = {}
+        session: _R2Session | None = None
         try:
             # Scratch entered inside the try — pre-fix this ran
             # outside, so KeyboardInterrupt / MemoryError between
@@ -589,84 +712,82 @@ class BinaryUnderstand:
             # behind.
             _r2_scratch = str(
                 _r2_stack.enter_context(scratch_dir("r2-sandbox-")))
-            _env_overrides = {
-                "R2PIPE_R2": str(_wrapper),
-                "OUTPUT_DIR": _r2_scratch,
-                "R2_TARGET_DIR": str(self.binary.parent),
-                # The wrapper's trust-marker gate refuses to run
-                # without one of these env vars present — set it
-                # explicitly so operators running outside Claude
-                # Code (e.g. CI) still get the sandboxed path.
-                "_RAPTOR_TRUSTED": "1",
-            }
-            with _ANALYSE_ENV_LOCK:
-                _saved_env = {k: _os.environ.get(k) for k in _env_overrides}
-                _os.environ.update(_env_overrides)
-                logger.info(
-                    "radare2 analysis: opening %s (sandboxed)", self.binary
+            # The session wrapper owns the r2pipe handle so a
+            # per-command timeout (which kills r2 to unblock the
+            # pipe) can respawn the sandboxed session and the
+            # analysis continues with recorded degradation instead
+            # of silently hollowing out (see _cmd_deg).
+            session = _R2Session(
+                lambda: self._spawn_r2(_wrapper, _r2_scratch),
+                reanalyse_timeout_s=self._T_AAA,
+            )
+            session.open()
+            r2 = session
+            try:
+                if quick:
+                    # Fast path: metadata + imports only. Both queries
+                    # (``ij`` / ``iij``) read the static binary headers
+                    # without needing radare2's analysis pass. Skip
+                    # ``aaa`` and every downstream step that depends
+                    # on the call graph or function inventory.
+                    self._extract_metadata(r2, ctx)
+                    self._extract_imports_exports(r2, ctx)
+                else:
+                    self._cmd_t(r2, "aaa", self._T_AAA)
+                    # aaa succeeded once — a session restart replays
+                    # it so function-level commands keep working.
+                    session.analysed = True
+                    self._extract_metadata(r2, ctx)
+                    self._extract_imports_exports(r2, ctx)
+                    self._extract_functions(r2, ctx)
+                    self._extract_classes(r2, ctx)
+                    self._extract_entry_points(ctx)
+                    self._extract_strings(r2, ctx, limit=max_strings)
+                    self._tag_dangerous_callers(r2, ctx)
+                    # Transitive analysis MUST follow _tag_dangerous_
+                    # callers because it reads ctx.dangerous_sinks for
+                    # the BFS seed set, and adds transitively_reaches_
+                    # dangerous / transitive_distance fields used by
+                    # the prioritise step.
+                    self._tag_transitive_callers(r2, ctx)
+                    # Opt-in per-function basic-block CFG extraction +
+                    # cyclomatic complexity. Off by default so standard
+                    # runs pay no extra r2 cost. Must follow
+                    # _extract_functions (needs interesting_functions).
+                    if extract_cfgs:
+                        self._extract_function_cfgs(r2, ctx)
+                    self._decompile_priorities(
+                        r2, ctx, limit=max_decompile,
+                    )
+            except R2SessionLost as e:
+                # r2 died (repeated command timeouts) and the restart
+                # budget is spent. Keep everything extracted so far,
+                # but stamp the map partial and say so LOUDLY —
+                # downstream consumers must be able to distinguish
+                # "binary has no sinks" from "r2 died at function 37".
+                ctx.analysis_depth = "partial"
+                note = (
+                    f"WARNING: radare2 session lost mid-analysis ({e}); "
+                    "remaining extraction steps were skipped — empty "
+                    "sink / reachability / decompilation results may "
+                    "reflect the dead session, not the binary."
                 )
-                r2 = r2pipe.open(str(self.binary), flags=self._r2_open_flags())  # -2: silence stderr
-                # Wrapper has spawned + read env. Restore parent env
-                # now so concurrent analyse() callers can proceed.
-                for k, v in _saved_env.items():
-                    if v is None:
-                        _os.environ.pop(k, None)
-                    else:
-                        _os.environ[k] = v
-                _saved_env = {}  # already restored — finally skips re-restore
-            if quick:
-                # Fast path: metadata + imports only. Both queries
-                # (``ij`` / ``iij``) read the static binary headers
-                # without needing radare2's analysis pass. Skip
-                # ``aaa`` and every downstream step that depends
-                # on the call graph or function inventory.
-                self._extract_metadata(r2, ctx)
-                self._extract_imports_exports(r2, ctx)
-            else:
-                self._cmd_t(r2, "aaa", self._T_AAA)
-                self._extract_metadata(r2, ctx)
-                self._extract_imports_exports(r2, ctx)
-                self._extract_functions(r2, ctx)
-                self._extract_classes(r2, ctx)
-                self._extract_entry_points(ctx)
-                self._extract_strings(r2, ctx, limit=max_strings)
-                self._tag_dangerous_callers(r2, ctx)
-                # Transitive analysis MUST follow _tag_dangerous_
-                # callers because it reads ctx.dangerous_sinks for
-                # the BFS seed set, and adds transitively_reaches_
-                # dangerous / transitive_distance fields used by
-                # the prioritise step.
-                self._tag_transitive_callers(r2, ctx)
-                # Opt-in per-function basic-block CFG extraction +
-                # cyclomatic complexity. Off by default so standard
-                # runs pay no extra r2 cost. Must follow
-                # _extract_functions (needs interesting_functions).
-                if extract_cfgs:
-                    self._extract_function_cfgs(r2, ctx)
-                self._decompile_priorities(
-                    r2, ctx, limit=max_decompile,
-                )
+                ctx.notes.append(note)
+                logger.warning("%s", note)
+            if not quick:
+                # Prioritisation runs on whatever was extracted —
+                # partial data still ranks (and the partial stamp +
+                # notes ride along in the output).
                 if self.llm:
                     self._llm_prioritise(ctx)
                 else:
                     self._heuristic_prioritise(ctx)
         finally:
-            if r2 is not None:
+            if session is not None:
                 try:
-                    r2.quit()
+                    session.quit()
                 except Exception:  # noqa: BLE001, S110 — broad by design: r2pipe.quit()'s failure surface is uncontracted third-party code (dead-pipe OSError, closed-file ValueError, post-kill internal state); last-resort session close
                     pass
-            # Env restore — _saved_env is non-empty only if the lock
-            # block exited before its inline restore (e.g. r2pipe.open
-            # raised). Defensive double-restore: this is a no-op when
-            # the inline restore already ran.
-            if _saved_env:
-                with _ANALYSE_ENV_LOCK:
-                    for k, v in _saved_env.items():
-                        if v is None:
-                            _os.environ.pop(k, None)
-                        else:
-                            _os.environ[k] = v
             # Best-effort scratch cleanup (scratch_dir's exit). The
             # wrapper bind-mounted this dir into the sandbox so r2
             # could write any incidental output; on exit the binds
@@ -680,33 +801,86 @@ class BinaryUnderstand:
         )
         return ctx
 
+    def _spawn_r2(self, wrapper: Path, scratch: str):
+        """Spawn one sandboxed r2pipe handle.
+
+        _ANALYSE_ENV_LOCK serialises the env-set + r2pipe.open
+        window across threads — after r2pipe.open() returns, the
+        wrapper has snapshotted its env and the parent can mutate
+        freely. We hold the lock just long enough to spawn (env is
+        restored inside the lock on every path, including an
+        r2pipe.open failure — a wrapper crash must not leak the
+        wrapper-only env vars into the rest of the parent process),
+        so concurrent analyse() calls don't serialise end-to-end.
+        """
+        import os as _os
+
+        import r2pipe
+
+        env_overrides = {
+            "R2PIPE_R2": str(wrapper),
+            "OUTPUT_DIR": scratch,
+            "R2_TARGET_DIR": str(self.binary.parent),
+            # The wrapper's trust-marker gate refuses to run
+            # without one of these env vars present — set it
+            # explicitly so operators running outside Claude
+            # Code (e.g. CI) still get the sandboxed path.
+            "_RAPTOR_TRUSTED": "1",
+        }
+        with _ANALYSE_ENV_LOCK:
+            saved_env = {k: _os.environ.get(k) for k in env_overrides}
+            try:
+                _os.environ.update(env_overrides)
+                logger.info(
+                    "radare2 analysis: opening %s (sandboxed)", self.binary
+                )
+                return r2pipe.open(str(self.binary), flags=self._r2_open_flags())  # -2: silence stderr
+            finally:
+                for k, v in saved_env.items():
+                    if v is None:
+                        _os.environ.pop(k, None)
+                    else:
+                        _os.environ[k] = v
+
     def _extract_metadata(self, r2, ctx: BinaryContextMap) -> None:
         try:
-            info = json.loads(self._cmd_t(r2, "ij", self._T_QUERY) or "{}")
+            info = json.loads(
+                self._cmd_deg(r2, ctx, "ij", self._T_QUERY,
+                              what="binary metadata (ij)") or "{}")
             bin_info = info.get("bin", {})
             ctx.arch = str(bin_info.get("arch", ""))
             ctx.bits = int(bin_info.get("bits", 0) or 0)
             fmt = str(bin_info.get("bintype", "")).lower()
             ctx.binary_format = fmt
             ctx.image_base = int(bin_info.get("baddr", 0) or 0)
+        except R2SessionLost:
+            raise
         except Exception as e:  # noqa: BLE001 — r2 output is hostile; degrade
             logger.debug("metadata extraction failed: %s", e)
 
     def _extract_imports_exports(self, r2, ctx: BinaryContextMap) -> None:
         try:
-            imports_raw = json.loads(self._cmd_t(r2, "iij", self._T_QUERY) or "[]")
+            imports_raw = json.loads(
+                self._cmd_deg(r2, ctx, "iij", self._T_QUERY,
+                              what="import table (iij)") or "[]")
             ctx.imports = [
                 str(i.get("name", "")) for i in imports_raw if i.get("name")
             ]
+        except R2SessionLost:
+            raise
         except Exception as e:  # noqa: BLE001 — r2 output is hostile; degrade
             logger.debug("imports extraction failed: %s", e)
             ctx.imports = []
 
         try:
-            exports_raw = json.loads(self._cmd_t(r2, "iEj", self._T_QUERY) or "[]")
+            exports_raw = json.loads(
+                self._cmd_deg(r2, ctx, "iEj", self._T_QUERY,
+                              what="export table (iEj)") or "[]")
             ctx.exports = [
                 str(e.get("name", "")) for e in exports_raw if e.get("name")
             ]
+        except R2SessionLost:
+            raise
         except Exception as e:  # noqa: BLE001 — r2 output is hostile; degrade
             logger.debug("exports extraction failed: %s", e)
             ctx.exports = []
@@ -715,7 +889,11 @@ class BinaryUnderstand:
 
     def _extract_functions(self, r2, ctx: BinaryContextMap) -> None:
         try:
-            fns = json.loads(self._cmd_t(r2, "aflj", self._T_QUERY) or "[]")
+            fns = json.loads(
+                self._cmd_deg(r2, ctx, "aflj", self._T_QUERY,
+                              what="function inventory (aflj)") or "[]")
+        except R2SessionLost:
+            raise
         except Exception as e:  # noqa: BLE001 — r2 output is hostile; degrade
             logger.warning("function list extraction failed: %s", e)
             return
@@ -790,7 +968,11 @@ class BinaryUnderstand:
         bind a method to a function when the start address matches exactly.
         """
         try:
-            raw_classes = json.loads(self._cmd_t(r2, "icj", self._T_QUERY) or "[]")
+            raw_classes = json.loads(
+                self._cmd_deg(r2, ctx, "icj", self._T_QUERY,
+                              what="class metadata (icj)") or "[]")
+        except R2SessionLost:
+            raise
         except Exception as e:  # noqa: BLE001 — r2 output is hostile; degrade
             logger.warning("class metadata extraction failed: %s", e)
             return
@@ -911,8 +1093,11 @@ class BinaryUnderstand:
     def _extract_strings(self, r2, ctx: BinaryContextMap, limit: int) -> None:
         try:
             strings_raw = json.loads(
-                self._cmd_t(r2, "izj", self._T_QUERY) or "[]",
+                self._cmd_deg(r2, ctx, "izj", self._T_QUERY,
+                              what="string sample (izj)") or "[]",
             )
+        except R2SessionLost:
+            raise
         except Exception:  # noqa: BLE001 — r2 output is hostile; degrade
             strings_raw = []
         if not isinstance(strings_raw, list):
@@ -965,9 +1150,13 @@ class BinaryUnderstand:
         for fn in ctx.interesting_functions:
             try:
                 refs = json.loads(
-                    self._cmd_t(r2, f"axffj @ {fn.address}", self._T_XREF)
+                    self._cmd_deg(r2, ctx, f"axffj @ {fn.address}",
+                                  self._T_XREF,
+                                  what=f"xrefs for {fn.name}")
                     or "[]"
                 )
+            except R2SessionLost:
+                raise
             except Exception:  # noqa: BLE001 — r2 output is hostile; degrade
                 refs = []
             if not isinstance(refs, list):
@@ -1041,8 +1230,11 @@ class BinaryUnderstand:
         for cmd in ("aflcj", "afllj"):
             try:
                 raw = json.loads(
-                    self._cmd_t(r2, cmd, self._T_CALLGRAPH) or "[]"
+                    self._cmd_deg(r2, ctx, cmd, self._T_CALLGRAPH,
+                                  what=f"call graph ({cmd})") or "[]"
                 )
+            except R2SessionLost:
+                raise
             except Exception as e:  # noqa: BLE001 — per-command isolation
                 logger.debug("call-graph %s failed: %s", cmd, e)
                 continue
@@ -1226,11 +1418,15 @@ class BinaryUnderstand:
             if cfg is None:
                 try:
                     blocks = json.loads(
-                        self._cmd_t(
-                            r2, f"afbj @ {fn.address}", self._T_BLOCKS)
+                        self._cmd_deg(
+                            r2, ctx, f"afbj @ {fn.address}",
+                            self._T_BLOCKS,
+                            what=f"basic blocks for {fn.name}")
                         or "[]"
                     )
                     cfg = parse_afbj(blocks, entry_addr=fn.address)
+                except R2SessionLost:
+                    raise
                 except Exception as e:  # noqa: BLE001 — r2 output is hostile; per-function isolation
                     logger.debug(
                         "afbj failed for %s @ %#x: %s",
@@ -1290,10 +1486,14 @@ class BinaryUnderstand:
         for fn in candidates[:limit]:
             ctx.decompilation_attempted += 1
             try:
-                src = self._cmd_t(
-                    r2, f"{decompile_cmd} @ {fn.address}", self._T_DECOMPILE,
+                src = self._cmd_deg(
+                    r2, ctx, f"{decompile_cmd} @ {fn.address}",
+                    self._T_DECOMPILE,
+                    what=f"decompilation of {fn.name}",
                 ) or ""
                 fn.decompiled = src.strip()[:8192]
+            except R2SessionLost:
+                raise
             except Exception as e:  # noqa: BLE001 — per-function isolation
                 logger.debug("decompile %s failed: %s", fn.name, e)
                 fn.decompiled = ""

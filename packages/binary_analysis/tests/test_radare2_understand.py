@@ -12,6 +12,8 @@ from packages.binary_analysis.radare2_understand import (
     BinaryContextMap,
     BinaryUnderstand,
     FunctionInfo,
+    R2CommandTimeout,
+    R2SessionLost,
     analyse_binary_context,
     probe_capability,
 )
@@ -488,6 +490,165 @@ class TestCmdTimeout(unittest.TestCase):
         self.assertLess(BinaryUnderstand._T_QUERY, 300)
         self.assertGreater(BinaryUnderstand._T_XREF, 1)
         self.assertLess(BinaryUnderstand._T_XREF, 300)
+
+
+def _timeout_base_response(command: str) -> str:
+    """Canned r2 responses for the timeout-degradation pipeline tests."""
+    responses = {
+        "aaa": "",
+        "ij": json.dumps(
+            {"bin": {"arch": "x86", "bits": 64, "bintype": "elf"}}),
+        "iij": json.dumps([{"name": "sym.imp.strcpy"}]),
+        "iEj": "[]",
+        "aflj": json.dumps([
+            {"name": "parse_a", "offset": 0x1000, "size": 64},
+            {"name": "parse_b", "offset": 0x1100, "size": 64},
+            {"name": "parse_c", "offset": 0x1200, "size": 64},
+            {"name": "sym.imp.strcpy", "offset": 0x2000, "size": 16},
+        ]),
+        "icj": "[]",
+        "izj": "[]",
+    }
+    if command in responses:
+        return responses[command]
+    if command.startswith("axffj"):
+        return json.dumps([{"type": "CALL", "name": "sym.imp.strcpy"}])
+    if command.startswith(("aflcj", "afllj")):
+        return "[]"
+    if command.startswith(("pdc", "pdg")):
+        return "int f() { return 0; }"
+    return ""
+
+
+class TestTimeoutDegradation(unittest.TestCase):
+    """A per-function r2 command timeout kills radare2; the analysis
+    must record the degradation (per-function ctx.notes entry) and
+    continue on a restarted session — pre-fix the per-function
+    `except Exception` isolation swallowed the TimeoutError and every
+    later command failed fast on the dead pipe, so the analysis
+    'completed' with a silently hollow context map."""
+
+    def _make_understand(self):
+        return _make_understand_for("r2-deg-", self.addCleanup)
+
+    def _analyse_with(self, fake_cmd_t, spawn_counter=None):
+        understand = self._make_understand()
+        fake_r2pipe = MagicMock()
+
+        def fake_open(path, flags=None):
+            if spawn_counter is not None:
+                spawn_counter.append(1)
+            handle = MagicMock()
+            handle.cmd.return_value = "[]"
+            return handle
+
+        fake_r2pipe.open = fake_open
+        with patch.object(
+            BinaryUnderstand, "_cmd_t", new=staticmethod(fake_cmd_t),
+        ), patch.dict("sys.modules", {"r2pipe": fake_r2pipe}):
+            return understand.analyse(max_decompile=0, max_strings=0)
+
+    def test_single_timeout_recorded_and_analysis_continues(self):
+        """One pathological function must cost exactly its own result:
+        a degradation note is recorded, r2 restarts, and the remaining
+        functions still get their xref tagging."""
+        state = {"axffj_calls": 0}
+        spawns: list = []
+
+        def fake_cmd_t(r2, command, timeout_s):
+            if command.startswith("axffj"):
+                state["axffj_calls"] += 1
+                if state["axffj_calls"] == 1:
+                    raise R2CommandTimeout(
+                        f"r2 command {command!r} exceeded {timeout_s}s")
+            return _timeout_base_response(command)
+
+        ctx = self._analyse_with(fake_cmd_t, spawn_counter=spawns)
+
+        # The timeout is a recorded degradation, not a silent gap.
+        timeout_notes = [n for n in ctx.notes if "radare2 timeout" in n]
+        self.assertEqual(len(timeout_notes), 1)
+        self.assertIn("xrefs for parse_a", timeout_notes[0])
+        # The session was restarted (initial spawn + one respawn)...
+        self.assertEqual(len(spawns), 2)
+        # ...and the analysis carried on: later functions still got
+        # their dangerous-call tagging.
+        by_name = {f.name: f for f in ctx.interesting_functions}
+        self.assertEqual(by_name["parse_a"].calls_dangerous, [])
+        self.assertEqual(by_name["parse_b"].calls_dangerous, ["strcpy"])
+        self.assertEqual(by_name["parse_c"].calls_dangerous, ["strcpy"])
+        # A recovered run is still a full-depth analysis.
+        self.assertEqual(ctx.analysis_depth, "full")
+
+    def test_session_lost_stamps_partial_with_loud_warning(self):
+        """When r2 keeps dying past the restart budget, the analysis
+        must complete with analysis_depth='partial' and a WARNING note
+        — never raise, and never pretend the hollow map is complete."""
+        def fake_cmd_t(r2, command, timeout_s):
+            if command.startswith("axffj"):
+                raise R2CommandTimeout(
+                    f"r2 command {command!r} exceeded {timeout_s}s")
+            return _timeout_base_response(command)
+
+        ctx = self._analyse_with(fake_cmd_t)
+
+        self.assertEqual(ctx.analysis_depth, "partial")
+        warnings = [n for n in ctx.notes if n.startswith("WARNING:")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("session lost", warnings[0])
+        # Per-timeout notes are bounded by the restart budget
+        # (_R2Session._MAX_RESTARTS attempts + the final fatal one).
+        timeout_notes = [n for n in ctx.notes if "radare2 timeout" in n]
+        self.assertEqual(len(timeout_notes), 3)
+        # Everything extracted before the death is preserved.
+        self.assertEqual(ctx.arch, "x86")
+        self.assertEqual(
+            [f.name for f in ctx.interesting_functions],
+            ["parse_a", "parse_b", "parse_c"],
+        )
+
+    def test_aaa_timeout_still_aborts_analysis(self):
+        """The initial full auto-analysis timing out means there is no
+        session to degrade gracefully from — the abort contract is
+        unchanged."""
+        def fake_cmd_t(r2, command, timeout_s):
+            if command == "aaa":
+                raise R2CommandTimeout(
+                    f"r2 command {command!r} exceeded {timeout_s}s")
+            return _timeout_base_response(command)
+
+        with self.assertRaises(TimeoutError):
+            self._analyse_with(fake_cmd_t)
+
+    def test_cmd_deg_returns_none_after_successful_restart(self):
+        understand = self._make_understand()
+        ctx = BinaryContextMap(binary_path=understand.binary)
+        session = MagicMock()
+        session.restart.return_value = True
+        with patch.object(
+            BinaryUnderstand, "_cmd_t",
+            new=staticmethod(MagicMock(side_effect=R2CommandTimeout("t"))),
+        ):
+            result = understand._cmd_deg(
+                session, ctx, "axffj @ 4096", 30.0, what="xrefs for f")
+        self.assertIsNone(result)
+        session.restart.assert_called_once()
+        self.assertEqual(len(ctx.notes), 1)
+        self.assertIn("xrefs for f", ctx.notes[0])
+
+    def test_cmd_deg_raises_session_lost_when_restart_fails(self):
+        understand = self._make_understand()
+        ctx = BinaryContextMap(binary_path=understand.binary)
+        session = MagicMock()
+        session.restart.return_value = False
+        with patch.object(
+            BinaryUnderstand, "_cmd_t",
+            new=staticmethod(MagicMock(side_effect=R2CommandTimeout("t"))),
+        ), self.assertRaises(R2SessionLost):
+            understand._cmd_deg(
+                session, ctx, "axffj @ 4096", 30.0, what="xrefs for f")
+        # The degradation note is recorded even on the fatal path.
+        self.assertEqual(len(ctx.notes), 1)
 
 
 class TestTransitiveCallers(unittest.TestCase):
