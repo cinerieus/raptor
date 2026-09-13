@@ -1183,3 +1183,48 @@ def test_reset_bare_invocation_prints_error_not_traceback(tmp_path):
     assert "filter" in err
     # Nothing was deleted.
     assert ModelScorecard(path).get_stats()
+
+
+def test_summary_policy_breakdown_excludes_bookkeeping_cells(tmp_path):
+    """Underscore-prefixed cells (_usage, _structured) are bookkeeping,
+    not policy cells — they must not inflate the "learning" count."""
+    import json as _json
+    path = tmp_path / "sc.json"
+    sc = ModelScorecard(path, shadow_rate=0.0)
+    sc.record_event("codeql:py/sqli", "haiku",
+                    EventType.CHEAP_SHORT_CIRCUIT, "correct")
+    sc.register_uses([
+        {"model": "haiku", "decision_class": "_usage",
+         "calls": 10, "cost_usd": 0.25},
+        {"model": "haiku", "decision_class": "_structured",
+         "calls": 6, "schema_valid_pass": 6},
+    ])
+    rc, out, _ = _capture(
+        cli_mod.cmd_summary, _make_args(path=path, json=True))
+    assert rc == 0
+    parsed = _json.loads(out)
+    bd = parsed["policy_breakdown"]
+    # One real cell (learning at n=1); the two bookkeeping cells
+    # contribute nothing to any policy bucket.
+    assert bd["learning"] == 1
+    assert (bd["learning"] + bd["short_circuit"] + bd["fall_through"]) == 1
+
+
+def test_render_samples_defangs_control_bytes(tmp_path):
+    """Persisted reasoning can quote analysed-repo tool output; ANSI
+    escapes must not reach the operator's terminal raw."""
+    sc = ModelScorecard(tmp_path / "sc.json", shadow_rate=0.0)
+    sc.retain_samples = True
+    sc.record_event(
+        "agentic:r", "haiku", EventType.CHEAP_SHORT_CIRCUIT, "incorrect",
+        sample={
+            "this_reasoning": "before \x1b[31mred\x1b[0m after",
+            "other_reasoning": "plain",
+            "custom_field": "x\x1b]0;title\x07y",
+        },
+    )
+    stat = sc.get_stat("agentic:r", "haiku")
+    rendered = cli_mod._render_samples(stat)
+    assert "\x1b" not in rendered
+    assert "\x07" not in rendered
+    assert "red" in rendered  # content survives, escapes defang

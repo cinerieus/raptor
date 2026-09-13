@@ -424,11 +424,19 @@ def _render_samples(stat: DecisionClassStats) -> str:
         f"trust math: cheap claimed FP and was actually wrong_",
         "",
     ]
+    # Persisted reasoning text originates from LLM output that can
+    # quote analysed-repo tool output — escape control/ANSI bytes so a
+    # planted escape sequence can't rewrite the operator's terminal.
+    from core.security.log_sanitisation import escape_nonprintable
+
+    def _esc(s: str) -> str:
+        return escape_nonprintable(s, preserve_newlines=True)
+
     for i, sample in enumerate(stat.disagreement_samples, 1):
-        lines.append(f"## Sample {i} — {sample.get('ts', '?')} ({sample.get('event_type', '?')})")
-        cheap_r = sample.get("this_reasoning", "")
-        full_r = sample.get("other_reasoning", "")
-        note = sample.get("note", "")
+        lines.append(f"## Sample {i} — {_esc(str(sample.get('ts', '?')))} ({_esc(str(sample.get('event_type', '?')))})")
+        cheap_r = _esc(sample.get("this_reasoning", ""))
+        full_r = _esc(sample.get("other_reasoning", ""))
+        note = _esc(sample.get("note", ""))
         if cheap_r:
             lines.append("**Cheap (clear_fp):**")
             lines.append(cheap_r)
@@ -454,8 +462,8 @@ def _render_samples(stat: DecisionClassStats) -> str:
                 continue
             value = sample.get(key)
             if isinstance(value, str) and value:
-                lines.append(f"**{key}:**")
-                lines.append(value)
+                lines.append(f"**{_esc(key)}:**")
+                lines.append(_esc(value))
                 lines.append("")
     return "\n".join(lines)
 
@@ -546,16 +554,21 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
     for s in stats:
         models.add(s.model)
-        p = _policy_for_stats(s)
         if s.decision_class == "_usage":
             usage_cell_by_model[s.model] = s
-        if p == Policy.SHORT_CIRCUIT:
-            short_circuit += 1
-            sc_models_by_dc[(s.decision_class, s.model)] = s.model
-        elif p == Policy.LEARNING:
-            learning += 1
-        elif p == Policy.FALL_THROUGH:
-            fall_through += 1
+        # Underscore-prefixed cells (_usage roll-ups, _structured
+        # schema tallies) are bookkeeping, not policy cells — counting
+        # them in the breakdown inflated "learning" by one per model
+        # per bookkeeping axis.
+        if not s.decision_class.startswith("_"):
+            p = _policy_for_stats(s)
+            if p == Policy.SHORT_CIRCUIT:
+                short_circuit += 1
+                sc_models_by_dc[(s.decision_class, s.model)] = s.model
+            elif p == Policy.LEARNING:
+                learning += 1
+            elif p == Policy.FALL_THROUGH:
+                fall_through += 1
         # ``_usage`` is the per-model roll-up of every real call and its
         # spend. Other underscore-prefixed cells (e.g. ``_structured``)
         # re-count a per-call subset of those same calls on a separate
