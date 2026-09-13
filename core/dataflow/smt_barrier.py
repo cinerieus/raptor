@@ -74,8 +74,10 @@ from enum import Enum
 from pathlib import Path
 
 from core.dataflow import sanitizer_cut_config as _sc_config
+from core.paths import confine
 from core.smt_solver import z3
 from core.smt_solver import z3_available as _z3_available
+from core.source import read_text_capped
 
 # --------------------------------------------------------------------------
 # Sink danger model.  Each sink_class maps to the set of characters whose
@@ -2217,10 +2219,8 @@ def try_tier0(
     # arbitrary host file. Same defence as the module's siblings
     # (tier1_llm.try_tier1b, injection_prescreen._read_source,
     # cvefix_bridge._resolve_in_repo).
-    try:
-        src_path = (repo_root / sink_uri.lstrip("/")).resolve()
-        src_path.relative_to(repo_root.resolve())
-    except (ValueError, OSError):
+    src_path = confine(repo_root, sink_uri)
+    if src_path is None:
         return Tier0Result(
             Tier0Status.NOT_APPLICABLE,
             f"sink path {sink_uri!r} resolves outside the repo root — "
@@ -2233,14 +2233,17 @@ def try_tier0(
             f"post-fix source not readable at {sink_uri!r}",
             spec=spec,
         )
-    try:
-        source_text = src_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
+    # Capped read (shared default): a truncated read can only make
+    # the validator line unfindable below — NOT_APPLICABLE, falling
+    # through to Tier 2 — never prove a barrier from missing text.
+    got = read_text_capped(src_path)
+    if got is None:
         return Tier0Result(
             Tier0Status.NOT_APPLICABLE,
-            f"could not read source {sink_uri!r}: {exc}",
+            f"could not read source {sink_uri!r}",
             spec=spec,
         )
+    source_text = got[0]
     line = find_validator_line(source_text, spec)
     if line is None:
         return Tier0Result(
