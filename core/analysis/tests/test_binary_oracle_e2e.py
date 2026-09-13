@@ -11,6 +11,7 @@ in isolation. These prove the layers compose correctly.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,16 @@ from core.analysis.reach_witness import (
 from core.analysis.reachability import binary_oracle_absent
 
 _GC_SECTIONS = "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections"
+
+# Skip-or-hermetic: the module-scoped fixture gcc-compiles a real
+# target and the classifier shells out to binutils. Without this gate
+# a toolchain-less runner ERRORS every test in the module from the
+# fixture (FileNotFoundError) instead of skipping — same gate shape as
+# the sibling test_binary_oracle.py toolchain skip.
+pytestmark = pytest.mark.skipif(
+    not all(shutil.which(t) for t in ("gcc", "nm", "objdump", "readelf")),
+    reason="toolchain (gcc/nm/objdump/readelf) not available",
+)
 
 
 @pytest.fixture(scope="module")
