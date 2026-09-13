@@ -1,13 +1,9 @@
 """Tests for project-level shared checklist via symlinks."""
 
 import os
-import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-# core/inventory/tests/test_shared_checklist.py -> repo root
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from core.inventory import read_checklist, save_checklist, update_checklist
 from core.json import load_json, save_json
