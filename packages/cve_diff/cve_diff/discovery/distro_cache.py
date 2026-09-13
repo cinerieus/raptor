@@ -258,7 +258,10 @@ def _fetch_redhat(cve_id: str) -> dict[str, Any]:
         return {"error": f"non-json response: {type(exc).__name__}"}
     if not isinstance(data, dict):
         return {"error": f"non-dict response: {type(data).__name__}"}
-    refs = list(data.get("references") or [])
+    # isinstance filter mirrors the Debian/Ubuntu paths: a dict/int
+    # entry is truthy and later raises inside the tool handler's URL
+    # regex, losing the (7-day-cached) advisory data for that CVE.
+    refs = [r for r in (data.get("references") or []) if isinstance(r, str)]
     affected = data.get("affected_release") or []
     fix_version = affected[0].get("package") if affected and isinstance(affected[0], dict) else None
     status = "fixed" if affected else None

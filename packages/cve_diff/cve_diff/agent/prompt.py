@@ -219,9 +219,7 @@ Rules:
 - Source-class cascade: the system tracks which kinds of source
   you've used (OSV, NVD, deterministic_hints, GitHub search,
   distro trackers, non-GitHub forges, generic HTTP) and which
-  remain. At iter 4 you'll receive a system hint listing tried
-  vs untried classes if you haven't verified a candidate yet.
-  When ALL applicable classes are tried and none yielded a
+  remain. When ALL applicable classes are tried and none yielded a
   ``gh_commit_detail`` / ``gitlab_commit`` / ``cgit_fetch`` confirmation,
   the loop will surrender ``no_evidence`` for you. To stay productive,
   prefer cascading into an *untried* source class over re-querying

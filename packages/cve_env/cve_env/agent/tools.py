@@ -8,8 +8,10 @@ tool can never be silently unregistered at run time.
 
 Tool taxonomy:
 
-* **Deterministic shortcut** (zero-LLM inside the tool): ``vulhub_lookup``,
-  ``image_resolve``, ``arch_decide``.
+* **Deterministic shortcut** (zero-LLM inside the tool):
+  ``image_resolve`` (``vulhub_lookup`` was folded into it and
+  ``arch_decide`` into ``image_resolve``'s decision field — neither is
+  a registered tool; see the TOOL_NAMES note).
 * **Build/run/verify plumbing**: ``dockerfile_gen``, ``docker_build``,
   ``docker_run``, ``verify``, ``source_build``.
 * **Terminal**: ``give_up`` -- agent emits ``{reason}`` and the loop

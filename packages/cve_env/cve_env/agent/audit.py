@@ -96,11 +96,6 @@ AuditStatus = Literal[
     "final_turn_cap",
     "final_no_verify",
     "recovery",
-    "post_build_refusal",
-    "fix8_continuation",
-    "force_resolve_continuation",
-    "benign_verify_continuation",
-    "proprietary_verify_continuation",
 ]
 """Agent-visible outcomes of a single audit entry.
 
@@ -117,25 +112,12 @@ build-path tool succeeds within ``RECOVERY_GAP_TURNS`` turns of a
 same-tool failure. Lets post-bench analysis count recovery events without
 scripted forensic over raw tool_ok / tool_error pairs.
 
-``post_build_refusal`` is emitted when the SDK throws a refusal-class
-exception AFTER ``state.launched_ok`` is True, i.e., the agent reached
-docker_run/compose_up success but the verify-plan composition (or a
-downstream tool input) tripped Anthropic's safety classifier. Distinct
-from research-phase refusals (NVD-description trigger handled by the
-sanitizer). Paired with the prompts.py open-clause verify-plan
-composition rule.
-
-``force_resolve_continuation`` is emitted by the build-engagement gate.
-``benign_verify_continuation`` is emitted when a post-launch refusal
-blocked verify and the env-gated benign-verify continuation resumes the
-session with a benign-only verify prompt.
-
-``proprietary_verify_continuation`` is emitted when the env-gated
-proprietary-verify continuation resumes the session because the agent gave
-up ``proprietary`` WITHOUT an image_resolve probe — verify-the-negative
-against the open-source-by-proprietary-vendor false-positive class. Locked
-by ``test_proprietary_verify_continuation`` +
-``test_audit_status_registers_all_emitted_continuations``.
+Historical statuses (``post_build_refusal``, ``fix8_continuation``,
+``force_resolve_continuation``, ``benign_verify_continuation``,
+``proprietary_verify_continuation``) belonged to the retired SDK-engine
+backend and are no longer emitted by any surviving code path — old
+audit JSONLs may still carry them; forensic consumers must not read
+their absence in new runs as "the feature fired 0 times".
 """
 
 

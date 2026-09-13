@@ -259,6 +259,11 @@ class SourceBuildResult:
 # -- main builder ----------------------------------------------------------
 
 
+# git ref grammar subset for release tags: no separators that could
+# re-route the codeload URL (/ ? # % whitespace), no leading dash.
+_SAFE_TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~@-]{0,199}")
+
+
 class SourceBuilder:
     """Clone + checkout + discovery. Use as context manager for auto-cleanup."""
 
@@ -547,8 +552,16 @@ class SourceBuilder:
         return out
 
     def _download_tarball(self, owner: str, repo: str, tag: str, target: Path) -> bool:
+        # ``tag`` comes from the (potentially attacker-chosen) repo's own
+        # tag list: refuse ref shapes that would re-route the request
+        # path/query, and percent-encode the remainder. Host stays fixed
+        # to codeload.github.com either way; this closes the
+        # different-archive-than-asked-for path.
+        if not _SAFE_TAG_RE.fullmatch(tag):
+            return False
         codeload_url = (
-            f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/tags/{tag}"
+            "https://codeload.github.com/"
+            f"{owner}/{repo}/tar.gz/refs/tags/{urllib.parse.quote(tag, safe='')}"
         )
         try:
             payload = _http_get_bytes(

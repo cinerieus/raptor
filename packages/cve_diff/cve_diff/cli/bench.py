@@ -30,6 +30,7 @@ import typer
 
 from core.atomic_fs import write_text_atomically
 from core.json import save_json
+from cve_diff.agent.loop import AgentConfig
 from cve_diff.core.exceptions import CveDiffError
 from cve_diff.infra import api_status
 from cve_diff.infra.github_client import warn_if_token_missing
@@ -155,7 +156,10 @@ def _run_one(cve_id: str, output_dir: str, disk_limit_pct: float = 80.0,
     # Cost is near-zero because OSV / NVD / GitHub-commit fetches share
     # caches with the agent's tool calls.
     pipeline = Pipeline(disk_limit_pct=disk_limit_pct, max_file_bytes=max_file_bytes)
-    model_id = "claude-opus-4-7"  # AgentConfig default
+    # Read the default from the dataclass field (pipeline._effective_model
+    # pattern) — a duplicated literal drifted silently when the default
+    # model changed.
+    model_id = AgentConfig.__dataclass_fields__["model_id"].default
     try:
         with tempfile.TemporaryDirectory(prefix=f"bench-{cve_id}-") as tmp:
             try:

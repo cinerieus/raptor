@@ -1814,3 +1814,43 @@ def test_checkout_refuses_dash_leading_ref_and_terminates_options(
     plain = _plain_git(checkout_argv)
     assert plain[-1] == "v9.9.9"
     assert plain[-2] == "--end-of-options"
+
+
+class TestCodeloadTagShape:
+    """Tags come from the (potentially attacker-chosen) repo's own tag
+    list. A tag containing '/', '?', '#' or '%' re-routed the codeload
+    request path/query — the fetched tree is handed to docker builds,
+    so refuse hostile shapes before any fetch and percent-encode the
+    rest."""
+
+    @pytest.mark.parametrize("tag", [
+        "v1.0/../../evil/tar.gz",
+        "v1.0?x=1",
+        "v1.0#frag",
+        "v1.0%2f..",
+        "-v1.0",
+        "",
+    ])
+    def test_hostile_tag_refused_before_any_fetch(self, tag, monkeypatch):
+        import cve_env.tools.source_build as sb
+
+        def _no_fetch(*a, **k):
+            raise AssertionError("hostile tag reached the network")
+
+        monkeypatch.setattr(sb, "_http_get_bytes", _no_fetch)
+        builder = sb.SourceBuilder()
+        assert builder._download_tarball("owner", "repo", tag, Path("/tmp/x")) is False
+
+    def test_legit_tag_is_percent_encoded(self, monkeypatch, tmp_path):
+        import cve_env.tools.source_build as sb
+
+        seen = {}
+
+        def _fetch(url, timeout=None):
+            seen["url"] = url
+            return None  # short-circuit after URL construction
+
+        monkeypatch.setattr(sb, "_http_get_bytes", _fetch)
+        builder = sb.SourceBuilder()
+        assert builder._download_tarball("owner", "repo", "v1.2.3+build", tmp_path) is False
+        assert seen["url"].endswith("/tar.gz/refs/tags/v1.2.3%2Bbuild")
