@@ -101,11 +101,3 @@ def sanitise(source: str) -> str:
 
     return result
 
-
-def needs_sanitising(source: str) -> bool:
-    """Return True if the source contains constructs that need rewriting."""
-    return bool(
-        _SCOPED_STATIC_RE.search(source)
-        or _CLASS_MEMBER_RE.search(source)
-        or _CONCAT_RE.search(source)
-    )

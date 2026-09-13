@@ -565,9 +565,6 @@
     "dead:dead_function:core/audit/callsite_consistency.py:_find_deviations": {
       "note": "superseded by the consistency channel's census adjudicator (consistency_verify); deletion deferred to the next dead-code sweep"
     },
-    "dead:dead_function:core/audit/decompiler_sanitise.py:needs_sanitising": {
-      "note": "binary-audit checker entry point landed ahead of its consumer wiring (roadmap phases land checker surface first); remove this entry when the orchestrator/sweep wiring lands or the symbol is excised"
-    },
     "dead:dead_function:core/audit/frida_observe.py:collect_observed_functions": {
       "note": "zero-reference symbol at baseline cut \u2014 triaged as public-API surface, planned wiring, or deletable-pending-owner-decision"
     },
