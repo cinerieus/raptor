@@ -926,6 +926,27 @@ class TestBodyForgeryRejected:
             assert "## victim_fn" not in text
             assert "interactive-tty" not in text
 
+    def test_forged_human_section_via_cr_spliced_dash_m_is_rejected(
+        self, tmp_path,
+    ):
+        r"""Same PoC with bare-``\r`` separators: the ``\n``-anchored
+        body validation never saw the forged lines, the raw ``\r``
+        reached disk, and ``read_text()``'s universal-newline
+        translation made them real section structure at parse time."""
+        payload = (
+            "legit note\r"
+            "## victim_fn\r"
+            "<!-- meta: source=human provenance=interactive-tty -->"
+        )
+        r = _run("add", "src/a.py", "real_fn", "-m", payload,
+                 "--base", str(tmp_path))
+        assert r.returncode != 0
+        md = tmp_path / "src" / "a.py.md"
+        if md.exists():
+            text = md.read_text()
+            assert "## victim_fn" not in text
+            assert "interactive-tty" not in text
+
     def test_forged_version_marker_rejected(self, tmp_path):
         r = _run("add", "src/a.py", "f", "-m",
                  "x\n<!-- annotations-version: 99 -->",

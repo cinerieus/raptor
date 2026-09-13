@@ -34,6 +34,7 @@ annotations).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from contextlib import contextmanager
@@ -128,9 +129,11 @@ def _validate_source_path(source_file: str) -> None:
     if not source_file:
         msg = "source_file must be non-empty"
         raise ValueError(msg)
-    # Reject newlines / nulls / other control chars — would let an
-    # attacker forge file headings or break path semantics.
-    if any(c in source_file for c in "\n\r\x00"):
+    # Reject newlines / nulls / other line-splice chars — would let
+    # an attacker forge file headings or break path semantics. (The
+    # splice set is defined just below; functions bind names at call
+    # time, so the forward reference is fine.)
+    if any(c in source_file for c in "\n" + _LINE_SPLICE_CHARS):
         msg = (
             f"source_file may not contain newline / null characters: "
             f"{source_file!r}"
@@ -147,6 +150,21 @@ def _validate_source_path(source_file: str) -> None:
         raise ValueError(msg)
 
 
+# Line-splice characters that the ``\n``-anchored forged-structure
+# regexes (below) cannot see. re.MULTILINE anchors ``^`` only after
+# ``\n``, but the on-disk bytes are read back with ``read_text()``'s
+# universal-newline translation (``\r`` / ``\r\n`` become real ``\n``
+# line breaks at parse time), and ``str.splitlines()``-based consumers
+# additionally split on ``\v \f \x1c \x1d \x1e \x85 \u2028 \u2029``.
+# Any of these smuggles a "line start" past validation and re-opens
+# the section/metadata forgery primitive. In bodies, ``\r`` is
+# normalised to ``\n`` by ``write_annotation`` (CRLF prose is
+# legitimate operator input); everywhere else, and for the rest of
+# the set — plus NUL — the characters have no legitimate use and are
+# refused outright.
+_LINE_SPLICE_CHARS = "\r\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
 def _validate_function_name(function: str) -> None:
     """Reject function names that would corrupt the on-disk format.
 
@@ -156,10 +174,22 @@ def _validate_function_name(function: str) -> None:
     if not function:
         msg = "function name must be non-empty"
         raise ValueError(msg)
-    if any(c in function for c in "\n\r\x00"):
+    if any(c in function for c in "\n" + _LINE_SPLICE_CHARS):
         msg = (
-            f"function name may not contain newline / null characters: "
-            f"{function!r}"
+            f"function name may not contain newline / null / "
+            f"line-separator characters: {function!r}"
+        )
+        raise ValueError(msg)
+    if function != function.strip():
+        # The heading parser strips the captured name, so an edge-
+        # whitespace name ("victim ") would silently collide with the
+        # stripped one on re-parse — two on-disk sections resolving to
+        # the same function, letting a later rewrite replace the other
+        # record (respect-manual bypass). Validated must equal parsed.
+        msg = (
+            f"function name may not have leading/trailing whitespace "
+            f"(the parser strips it, so the name would not "
+            f"round-trip): {function!r}"
         )
         raise ValueError(msg)
 
@@ -209,10 +239,10 @@ def _validate_metadata(metadata) -> None:
                 f"chars: {len(v_str)}"
             )
             raise ValueError(msg)
-        if any(c in v_str for c in "\n\r\x00\t"):
+        if any(c in v_str for c in "\n\t" + _LINE_SPLICE_CHARS):
             msg = (
                 f"metadata value for {k!r} may not contain newline / null "
-                f"characters: {v_str!r}"
+                f"/ line-separator characters: {v_str!r}"
             )
             raise ValueError(msg)
         for forbidden in _FORBIDDEN_META_VALUE_SUBSTRINGS:
@@ -263,6 +293,16 @@ _BODY_FORGED_META_RE = re.compile(
     r"^<!--\s*(?:meta:|annotations-version)", re.MULTILINE,
 )
 
+def _normalise_body_newlines(body: str) -> str:
+    r"""Normalise ``\r\n`` / bare ``\r`` to ``\n``.
+
+    ``read_text()`` performs exactly this translation when the file is
+    parsed back, so normalising at write time makes the validated body
+    identical to what every reader will see — a raw ``\r`` on disk
+    would otherwise turn into a real line break that the ``\n``-anchored
+    forged-structure regexes never inspected."""
+    return body.replace("\r\n", "\n").replace("\r", "\n")
+
 
 def _validate_body(body) -> None:
     """Reject annotation bodies that would forge on-disk structure.
@@ -270,10 +310,22 @@ def _validate_body(body) -> None:
     Multiline prose is legitimate and preserved; only lines that the
     reader would re-parse as a section heading (``## `` at line start)
     or as metadata/format-marker comments (``<!-- meta:`` /
-    ``<!-- annotations-version``) are refused."""
+    ``<!-- annotations-version``) are refused — plus the line-splice
+    control characters (see ``_LINE_SPLICE_CHARS``) that would let
+    body text open such a line invisibly to these ``\\n``-anchored
+    checks."""
     if not body:
         return
     body_str = str(body)
+    bad = sorted({c for c in _LINE_SPLICE_CHARS if c in body_str})
+    if bad:
+        msg = (
+            f"annotation body may not contain control / line-separator "
+            f"characters {bad!r} — they can splice forged section or "
+            f"metadata lines past validation (use plain '\\n' line "
+            f"breaks)"
+        )
+        raise ValueError(msg)
     if _BODY_FORGED_HEADING_RE.search(body_str):
         msg = (
             "annotation body may not contain a line starting with '## ' — "
@@ -545,6 +597,14 @@ def write_annotation(
         raise ValueError(msg)
     _validate_function_name(ann.function)
     _validate_metadata(ann.metadata)
+    if ann.body and "\r" in str(ann.body):
+        # Normalise before validation so the forged-structure checks
+        # inspect exactly the line structure the reader will parse
+        # (see _normalise_body_newlines) — and so what lands on disk
+        # round-trips byte-identically through read_text().
+        ann = dataclasses.replace(
+            ann, body=_normalise_body_newlines(str(ann.body)),
+        )
     _validate_body(ann.body)
 
     path = annotation_path(base_dir, ann.file)
