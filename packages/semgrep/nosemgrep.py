@@ -24,7 +24,8 @@ import logging
 import re
 from pathlib import Path
 
-from core.paths import strip_file_uri
+from core.paths import confine, strip_file_uri
+from core.source import read_text_capped
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +66,11 @@ class _FileCache:
         if len(self._store) >= _MAX_CACHE_FILES:
             # Evict oldest entry (insertion-order dict).
             self._store.pop(next(iter(self._store)))
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-            result = text.splitlines()
-        except OSError:
-            result = None
+        # Capped read (shared 10 MB default): a pathological
+        # generated/planted file yields its truncated prefix instead
+        # of loading whole per annotation pass.
+        got = read_text_capped(path)
+        result = None if got is None else got[0].splitlines()
         self._store[path] = result
         return result
 
@@ -163,9 +164,17 @@ def annotate_sarif(sarif_data: dict, repo_root: str) -> int:
             if not uri or not line:
                 continue
 
-            # Resolve the file path against repo root.
-            stripped = strip_file_uri(uri)
-            abs_path = stripped if stripped != uri else str(root / uri)
+            # Resolve the file path against the repo root,
+            # containment-checked: the URI comes from SARIF produced
+            # over an untrusted repo, so a file:// / absolute URI or
+            # traversal shape would otherwise read arbitrary host
+            # files and quote them into properties.nosemgrep (the
+            # codeql siblings' read_source_context /
+            # read_vulnerable_code enforce the same root).
+            resolved = confine(root, strip_file_uri(uri))
+            if resolved is None:
+                continue
+            abs_path = str(resolved)
 
             lines = cache.lines(abs_path)
             if lines is None:

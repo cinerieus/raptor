@@ -236,6 +236,47 @@ class TestAnnotateSarif:
         assert "nosemgrep" not in r_cql.get("properties", {})
 
 
+class TestAnnotateSarifContainment:
+    """URIs derive from SARIF over an untrusted repo — reads must stay
+    under the repo root (out-of-tree files must never be quoted into
+    properties.nosemgrep.justification)."""
+
+    def _outside(self, tmp_path):
+        outside = tmp_path / "outside.py"
+        outside.write_text("x = 1  # nosemgrep: test.rule leaked-text\n")
+        root = tmp_path / "repo"
+        root.mkdir()
+        return outside, root
+
+    def test_file_uri_outside_root_refused(self, tmp_path):
+        outside, root = self._outside(tmp_path)
+        result = _make_result(f"file://{outside}", 1)
+        sarif = _make_sarif_data([result])
+        assert annotate_sarif(sarif, str(root)) == 0
+        assert "properties" not in result
+
+    def test_absolute_uri_outside_root_refused(self, tmp_path):
+        outside, root = self._outside(tmp_path)
+        result = _make_result(str(outside), 1)
+        sarif = _make_sarif_data([result])
+        assert annotate_sarif(sarif, str(root)) == 0
+        assert "properties" not in result
+
+    def test_traversal_uri_refused(self, tmp_path):
+        _outside, root = self._outside(tmp_path)
+        result = _make_result("../outside.py", 1)
+        sarif = _make_sarif_data([result])
+        assert annotate_sarif(sarif, str(root)) == 0
+        assert "properties" not in result
+
+    def test_file_uri_inside_root_still_annotates(self, tmp_path):
+        src = tmp_path / "a.py"
+        src.write_text("x = eval(inp)  # nosemgrep: test.rule ok\n")
+        result = _make_result(f"file://{src}", 1)
+        sarif = _make_sarif_data([result])
+        assert annotate_sarif(sarif, str(tmp_path)) == 1
+
+
 # ── build_cmd flag ───────────────────────────────────────────────────────────
 
 
