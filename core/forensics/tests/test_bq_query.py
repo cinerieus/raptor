@@ -198,6 +198,30 @@ class TestProxyHosts:
         monkeypatch.setattr(bq, "_OVERRIDE_CONFIG_PATH", override)
         assert bq.proxy_hosts_for_bq() == list(bq._DEFAULT_BQ_HOSTS)
 
+    def test_explicit_empty_override_allows_nothing(self, tmp_path,
+                                                    monkeypatch):
+        """{"hosts": []} is an explicit operator statement (ban
+        BigQuery egress) — it must yield an empty allowlist, never
+        silently restore the permissive Google-host default."""
+        override = tmp_path / "bq-proxy-hosts.json"
+        override.write_text(json.dumps({"hosts": []}))
+        monkeypatch.setattr(bq, "_OVERRIDE_CONFIG_PATH", override)
+        assert bq.proxy_hosts_for_bq() == []
+
+    def test_override_with_only_invalid_entries_allows_nothing(
+            self, tmp_path, monkeypatch):
+        """Schema parsed but every entry dropped (non-string/empty):
+        still an explicit override — allow nothing, don't fail open."""
+        override = tmp_path / "bq-proxy-hosts.json"
+        override.write_text(json.dumps({"hosts": [42, ""]}))
+        monkeypatch.setattr(bq, "_OVERRIDE_CONFIG_PATH", override)
+        assert bq.proxy_hosts_for_bq() == []
+
+    def test_missing_override_keeps_default(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            bq, "_OVERRIDE_CONFIG_PATH", tmp_path / "nope.json")
+        assert bq.proxy_hosts_for_bq() == list(bq._DEFAULT_BQ_HOSTS)
+
 
 # =========================================================================
 # execution against a stubbed google client

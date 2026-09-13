@@ -282,8 +282,14 @@ _CREDS_INLINE_MAX = 64 * 1024
 
 def _load_override() -> list[str] | None:
     """Operator override list, or None. Same contract as the git
-    proxy-hosts override: the override REPLACES the default so a shop
-    with a locked-down mirror can also ban the public endpoints."""
+    proxy-hosts override (core.config.hosts_override, mirrored here
+    because this module must stay stdlib-only): a file that parses to
+    the ``{"hosts": [...]}`` schema is an explicit operator statement
+    and is honoured even when the list is empty — the override
+    REPLACES the default, so ``{"hosts": []}`` means "allow nothing",
+    never "restore the public default". A shop banning BigQuery
+    egress must not silently fail open. Only a missing or malformed
+    file returns None (keep the static default)."""
     if not _OVERRIDE_CONFIG_PATH.exists():
         return None
     try:
@@ -301,7 +307,7 @@ def _load_override() -> list[str] | None:
         if isinstance(h, str) and h and h not in seen:
             seen.add(h)
             result.append(h)
-    return result or None
+    return result
 
 
 def _token_uri_host() -> str | None:
