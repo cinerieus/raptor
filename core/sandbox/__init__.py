@@ -360,7 +360,12 @@ Threat model — what the sandbox DOES protect against:
   is out of scope; hosts without libseccomp keep the memfd gap
   (the existing seccomp-lost warning covers the degradation);
   `restrict_reads=False` opts out of this deny along with the read
-  restriction it rides on.
+  restriction it rides on; the `frida` profile keeps `memfd_create`
+  (agent injection writes frida-agent.so into a memfd the target
+  dlopen-maps — consented instrumentation on a lane that already
+  grants ptrace/process_vm_*; the execveat AT_EMPTY_PATH arm still
+  installs there, and every other profile builds the full two-arm
+  deny — see the carve-out rationale in seccomp.py).
 - Child-planted symlink TOCTOU on parent-side writes into `output`:
   `{output}/proxy-events.jsonl` is opened with O_NOFOLLOW + fstat
   S_ISREG check; `{output}/.home/{,.config,.cache,.local,...}` are

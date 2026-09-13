@@ -614,6 +614,32 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
     exec scoping (O_TMPFILE, unlinked files, non-allowlisted trees)
     is Landlock's job — see landlock.py's EXECUTE handling.
 
+    FRIDA-PROFILE CARVE-OUT (threat model, stated): under
+    ``profile == "frida"`` the memfd_create arm is NOT installed; the
+    execveat AT_EMPTY_PATH arm still is. frida-core cannot function
+    without memfd: agent injection writes frida-agent.so into a memfd
+    (``frida_memory_file_descriptor_from_bytes``) and the target maps
+    it via dlopen("/proc/self/fd/N") — a wholesale memfd deny aborts
+    every sandboxed frida run at injection. Permitting memfd_create
+    here is a CONSENTED-INSTRUMENTATION capability, not a containment
+    loss: the frida profile already omits the ptrace /
+    process_vm_readv / process_vm_writev blocks (that is what the
+    profile IS — dynamic instrumentation injects and runs arbitrary
+    in-memory code in the target by design, the dynamic-validation
+    trust surface the operator opted into by running frida), so
+    "anonymous in-memory code" is this lane's granted capability
+    already, and an exec'd memfd image still inherits every OTHER
+    layer (seccomp filter survives execve, Landlock read/write
+    scoping, network policy, namespace-creation deny). What the
+    carve-out gives up is exactly the no-anonymous-process-image
+    AUDITABILITY property — unattainable in an instrumentation lane
+    by definition. The carve-out is keyed on the frida seccomp
+    profile string (explicit lane posture, selected only by
+    packages/frida/sandboxed.py; same precedent as the AF_UNIX and
+    dgram-socketpair carve-outs above) — never ambient state — and
+    every non-frida profile builds the full two-arm deny
+    byte-identically.
+
     `observe_mode=True` extends the trace set with stat-family syscalls
     (stat/lstat/newfstatat/access/faccessat/faccessat2) on top of the
     audit set. Stat-family events surface "binary probed candidate
@@ -764,7 +790,17 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
     # else; the child fail-closes if either is unresolved while the
     # deny was requested (same posture as block_udp's socket() check —
     # a requested control must not silently vanish).
-    memfd_create_num = _resolve("memfd_create") if deny_fd_exec else -1
+    #
+    # "frida" profile carve-out: memfd_create stays PERMITTED (the
+    # execveat AT_EMPTY_PATH arm still installs). frida-core's agent
+    # injection is memfd-based — frida_memory_file_descriptor_from_
+    # bytes() memfd_creates the agent .so and the target dlopen-maps
+    # it from /proc/self/fd (never an exec of the fd) — so the
+    # wholesale memfd deny aborts every sandboxed spawn/attach at
+    # injection time. See the docstring for why this is a consented
+    # instrumentation capability, not a containment loss.
+    deny_memfd_create = deny_fd_exec and profile != "frida"
+    memfd_create_num = _resolve("memfd_create") if deny_memfd_create else -1
     execveat_num = _resolve("execveat") if deny_fd_exec else -1
 
     # socketpair(AF_UNIX, SOCK_DGRAM) is denied exactly when the
@@ -985,7 +1021,8 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                 # hard_deny on both: escape-primitive class, never
                 # downgrades to allow-and-log under audit mode.
                 if deny_fd_exec:
-                    if memfd_create_num < 0 or execveat_num < 0:
+                    if ((deny_memfd_create and memfd_create_num < 0)
+                            or execveat_num < 0):
                         # Requested control unresolvable on this arch —
                         # fail-closed like block_udp's socket() check.
                         _os_write(2, b"sandbox: seccomp fd-exec deny "
@@ -993,15 +1030,20 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                                      b"unresolved -- refusing to exec "
                                      b"without filter\n")
                         os._exit(126)
-                    null_args = ctypes.POINTER(_ScmpArgCmp)()
-                    ret = lib.seccomp_rule_add_array(
-                        ctx, hard_deny, memfd_create_num, 0, null_args,
-                    )
-                    if ret < 0:
-                        _os_write(2, b"sandbox: seccomp memfd_create rule "
-                                     b"failed -- refusing to exec without "
-                                     b"filter\n")
-                        os._exit(126)
+                    # memfd rule skipped exactly on the frida-profile
+                    # carve-out (deny_memfd_create False); the
+                    # execveat AT_EMPTY_PATH rule below installs for
+                    # every deny_fd_exec build.
+                    if deny_memfd_create:
+                        null_args = ctypes.POINTER(_ScmpArgCmp)()
+                        ret = lib.seccomp_rule_add_array(
+                            ctx, hard_deny, memfd_create_num, 0, null_args,
+                        )
+                        if ret < 0:
+                            _os_write(2, b"sandbox: seccomp memfd_create "
+                                         b"rule failed -- refusing to exec "
+                                         b"without filter\n")
+                            os._exit(126)
                     _ev = _ScmpArgCmp(arg=4, op=_SCMP_CMP_MASKED_EQ,
                                       datum_a=_AT_EMPTY_PATH,
                                       datum_b=_AT_EMPTY_PATH)

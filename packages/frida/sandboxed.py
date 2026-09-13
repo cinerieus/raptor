@@ -173,6 +173,13 @@ def main() -> int:
     if out_dir and not os.path.isdir(out_dir):
         os.makedirs(out_dir, exist_ok=True)
 
+    # restrict_reads carries the fileless-exec seccomp deny; the frida
+    # profile carves memfd_create back out of it (agent injection
+    # writes frida-agent.so into a memfd and the target dlopen-maps it
+    # from /proc/self/fd — the wholesale deny aborts every spawn/attach
+    # at injection). Consented-instrumentation rationale and the
+    # execveat arm that stays: core/sandbox/seccomp.py,
+    # _make_seccomp_preexec docstring.
     result = sandbox_run(
         cmd,
         profile="frida",

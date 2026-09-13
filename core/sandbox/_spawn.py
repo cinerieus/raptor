@@ -1883,7 +1883,9 @@ def run_sandboxed(
             # A memfd's SB_NOUSER inode is exempt from every Landlock
             # rule, so this seccomp deny is the ONLY layer standing
             # between an untrusted payload and an anonymous in-memory
-            # process image on this lane too.
+            # process image on this lane too. (The frida profile keeps
+            # memfd_create — consented instrumentation; see
+            # _make_seccomp_preexec's carve-out.)
             deny_fd_exec=bool(restrict_reads),
         ) if seccomp_profile else None
 

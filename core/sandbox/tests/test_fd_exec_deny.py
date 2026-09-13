@@ -25,6 +25,13 @@ Two directions, per the deny doctrine:
     caller-inventory toolchain shape), and TRUSTED read-everywhere
     lanes still get memfd_create.
 
+Plus the frida-profile carve-out (TestFridaProfileCarveOut): under
+``profile == "frida"`` only, memfd_create stays permitted (frida's
+agent injection is memfd-based) while the execveat AT_EMPTY_PATH arm
+still installs; every other profile — including the ptrace-granting
+"debug" — keeps the full two-arm deny. Rationale in the
+_make_seccomp_preexec docstring (seccomp.py).
+
 PROBE-ENVIRONMENT CAVEAT for future editors: an environment-level
 security agent on some hosts SIGKILLs fork+exec-of-memfd patterns
 even outside any sandbox (exit 137, race-losable). These tests are
@@ -77,9 +84,12 @@ _PROBE = textwrap.dedent("""
     failures = []
 
     # 1. memfd_create — the deny direction expects EPERM; the trusted
-    #    direction expects success. Decided by argv[2]. The fd is
-    #    NEVER exec'd (see the module-docstring probe caveat).
+    #    and frida directions expect success. Decided by argv[2]. The
+    #    fd is NEVER exec'd (see the module-docstring probe caveat).
     want_memfd_denied = sys.argv[2] == "deny"
+    # The frida carve-out relaxes ONLY memfd_create: the execveat
+    # AT_EMPTY_PATH arm must still be installed on that lane.
+    want_fd_exec_denied = sys.argv[2] in ("deny", "frida")
     try:
         fd = os.memfd_create("probe", 0)
     except OSError as e:
@@ -108,7 +118,7 @@ _PROBE = textwrap.dedent("""
         os._exit(ctypes.get_errno())
     _, st = os.waitpid(pid, 0)
     code = os.WEXITSTATUS(st) if os.WIFEXITED(st) else 200
-    if want_memfd_denied:
+    if want_fd_exec_denied:
         if code != errno.EPERM:
             failures.append("execveat AT_EMPTY_PATH not EPERM"
                             " (child exit=%d)" % code)
@@ -199,6 +209,160 @@ class TestSeccompLayerAlone:
         r = self._run_under_filter(False, "allow")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "memfd_create OK" in r.stdout
+
+
+@requires_execveat_nr
+class TestFridaProfileCarveOut:
+    """The frida-profile memfd carve-out, both directions.
+
+    frida-core's agent injection writes frida-agent.so into a memfd
+    (frida_memory_file_descriptor_from_bytes) and the target maps it
+    via dlopen("/proc/self/fd/N") — the fd is never exec'd — so the
+    wholesale memfd_create deny aborted every sandboxed frida
+    spawn/attach at injection time. Under ``profile == "frida"`` the
+    memfd arm is skipped (consented instrumentation: that profile
+    already grants ptrace/process_vm_*, i.e. in-memory code injection
+    is the lane's granted capability) while the execveat AT_EMPTY_PATH
+    arm still installs. Scope-tightness: the carve-out is keyed on the
+    frida seccomp-profile string alone, so every other profile —
+    including "debug", the OTHER ptrace-granting profile — must build
+    the full two-arm deny unchanged.
+    """
+
+    def _run_under_filter(self, profile: str, direction: str):
+        from core.sandbox.seccomp import _make_seccomp_preexec
+
+        fn = _make_seccomp_preexec(profile, deny_fd_exec=True)
+        assert fn is not None
+        return subprocess.run(
+            _probe_cmd(direction),
+            preexec_fn=fn, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_frida_profile_relaxes_memfd_keeps_fd_exec_deny(self):
+        r = self._run_under_filter("frida", "frida")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "memfd_create OK" in r.stdout
+        assert "execveat-empty-path DENIED EPERM" in r.stdout
+        assert "execveat-with-path OK" in r.stdout
+        assert "execve-control OK" in r.stdout
+
+    @pytest.mark.parametrize("profile", ["full", "debug"])
+    def test_carve_out_unreachable_from_other_profiles(self, profile):
+        # "full" is the untrusted/strict lane; "debug" is the adjacent
+        # ptrace-granting profile — ptrace consent alone must NOT
+        # relax the memfd deny.
+        r = self._run_under_filter(profile, "deny")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "memfd_create DENIED EPERM" in r.stdout
+        assert "execveat-empty-path DENIED EPERM" in r.stdout
+
+    def test_untrusted_contract_cannot_select_frida_profile(
+            self, tmp_path, monkeypatch):
+        # The untrusted contract can never reach the carve-out via the
+        # kwarg route: the profile ratchet rejects everything but
+        # full/strict, so no run_untrusted CALLER can weaken the memfd
+        # deny by naming the frida profile. (The operator's --sandbox
+        # CLI flag remains authoritative over profiles everywhere, as
+        # documented at the resolution site — an operator override is
+        # consent, not a caller-reachable relaxation; it already
+        # grants ptrace, which dwarfs memfd.) The userns floor gate
+        # runs before the
+        # ratchet and would mask the TypeError with its own refusal
+        # on userns-denied hosts — neutralise it (the established
+        # pattern for pinning run_untrusted's argument contract, see
+        # test_untrusted_failclosed_gates); the floor refusal has its
+        # own pins.
+        from core.sandbox import context as ctx
+        from core.sandbox import run_untrusted
+
+        monkeypatch.setattr(ctx, "_require_userns_or_optin",
+                            lambda *a, **k: False)
+        with pytest.raises(TypeError, match="frida"):
+            run_untrusted(["/bin/true"], target=str(tmp_path),
+                          profile="frida")
+
+    def test_carve_out_composes_with_audit_mode(self):
+        # frida composes with --audit; the carve-out must survive the
+        # audit filter build (memfd permitted) while the execveat arm
+        # keeps its hard-deny ERRNO action. Same fork/probe discipline
+        # as TestAuditModeHardDeny: the audit filter TRACEs
+        # open/connect, and a TRACE rule firing without an attached
+        # tracer SIGSYS-kills — resolve everything in the parent, raw
+        # syscalls only after the filter installs.
+        import ctypes
+        import os as _os
+
+        from core.sandbox.seccomp import _make_seccomp_preexec
+
+        fn = _make_seccomp_preexec(
+            "frida", audit_mode=True, deny_fd_exec=True,
+        )
+        assert fn is not None
+        nr = _execveat_nr()
+        libc = ctypes.CDLL(None, use_errno=True)
+        bfd = _os.open("/bin/echo", _os.O_RDONLY)
+        r, w = _os.pipe()
+        pid = _os.fork()
+        if pid == 0:
+            try:
+                _os.close(r)
+                fn()
+                code = 0
+                try:
+                    mfd = _os.memfd_create("x", 0)
+                    _os.close(mfd)   # created, never exec'd
+                except OSError:
+                    code = 4         # carve-out lost under audit
+                if code == 0:
+                    libc.syscall(nr, bfd, b"", None, None, 0x1000)
+                    if ctypes.get_errno() != errno.EPERM:
+                        code = 5     # fd-exec arm lost on frida lane
+                _os.write(w, bytes([code]))
+            except BaseException:
+                try:
+                    _os.write(w, bytes([9]))
+                except OSError:
+                    pass
+            _os._exit(0)
+        _os.close(w)
+        _os.close(bfd)
+        try:
+            data = _os.read(r, 1)
+        finally:
+            _os.close(r)
+            _os.waitpid(pid, 0)
+        assert data == b"\x00", f"frida audit carve-out probe code={data!r}"
+
+    @pytest.mark.usefixtures("degraded_floor_consent_if_mountless")
+    @requires_landlock
+    @requires_userns
+    def test_frida_posture_end_to_end(self, tmp_path):
+        # The exact sandbox posture packages/frida/sandboxed.py runs
+        # the CLI under (frida profile + restrict_reads) — the memfd
+        # relaxation must survive whichever builder site the host
+        # dispatches, and the fd-exec arm must still bite there.
+        from core.sandbox import run
+
+        out = tmp_path / "o"
+        out.mkdir()
+        r = run(
+            _probe_cmd("frida"),
+            profile="frida",
+            skip_pid_ns=True,
+            skip_mount_ns=True,
+            fake_home=True,
+            block_network=True,
+            output=str(out),
+            restrict_reads=True,
+            tool_paths=_py_tool_paths(),
+            capture_output=True, text=True, timeout=120,
+        )
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "memfd_create OK" in r.stdout
+        assert "execveat-empty-path DENIED EPERM" in r.stdout
+        assert "execveat-with-path OK" in r.stdout
+        assert "execve-control OK" in r.stdout
 
 
 @pytest.fixture()

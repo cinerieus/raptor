@@ -2673,6 +2673,8 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # AT_EMPTY_PATH are refused for exactly the children whose
         # exec surface is scoped to the read allowlist. Trusted
         # read-everywhere contexts build a byte-identical filter.
+        # (The frida profile keeps memfd_create — consented
+        # instrumentation; see _make_seccomp_preexec's carve-out.)
         seccomp_deny_fd_exec=bool(restrict_reads),
     )
     # Plain-subprocess preexec with the namespace-creation deny rules
