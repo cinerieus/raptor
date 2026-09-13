@@ -369,14 +369,11 @@ def make_batch_review_fn(
             if r is None and ctx_pair_counts.get(pair, 0) == 1:
                 r = results_by_pair.get(pair)
             if r is not None:
-                status = r.get("status", "suspicious")
-                if status not in ("clean", "suspicious"):
-                    logger.warning(
-                        "batch glance returned invalid status %r for "
-                        "%s:%s — falling back to suspicious",
-                        status, ctx["file"], ctx["function"],
-                    )
-                    status = "suspicious"
+                # parse_batch_response is the sole producer of
+                # ``results`` and drops any element whose status is
+                # outside _BATCH_STATUSES, so status is always a
+                # valid "clean"/"suspicious" here.
+                status = r["status"]
                 outcomes.append(ReviewOutcome(
                     file=ctx["file"],
                     function=ctx["function"],
