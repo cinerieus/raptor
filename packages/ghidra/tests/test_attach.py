@@ -1589,11 +1589,17 @@ class TestAddressIndex:
                  for i in range(10_000)]
         db = REDatabase(source_tool="ghidra", binary_path="/fw/b",
                         functions=funcs)
-        t0 = time.monotonic()
+        # CPU time, not wall clock: lookups are pure computation, so
+        # the quadratic regression burns CPU while an oversubscribed
+        # runner only adds scheduling delay — process_time keeps the
+        # signal without load-induced flakes. Bound trade-off: high
+        # enough for slow CI CPUs (~10x over the indexed path), low
+        # enough that the ~1.8s-CPU linear rescan still trips it.
+        t0 = time.process_time()
         for addr in range(0x1000, 0x1000 + 32 * 10_000, 32):
             db.function_containing_address(addr + 3)
-        elapsed = time.monotonic() - t0
-        assert elapsed < 1.0, f"indexed lookups took {elapsed:.2f}s"
+        elapsed = time.process_time() - t0
+        assert elapsed < 1.0, f"indexed lookups took {elapsed:.2f}s CPU"
 
     def test_zero_size_symbols_do_not_break_containment(self):
         """nm-fallback databases carry size-0 symbols (asm without
