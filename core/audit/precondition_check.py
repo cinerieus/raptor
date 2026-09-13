@@ -527,6 +527,29 @@ def _check_sanitization(
     )
 
 
+def _edge_node_keys(raw: str, file_hint: str) -> tuple[str, ...]:
+    """Normalise one call-edge endpoint into its lookup keys.
+
+    Mirrors the combined-form parse of ``_edge_endpoints`` in
+    llm_summaries.py (split a ``"file:function"`` string, strip a
+    trailing ``"(...)"`` signature fragment) but, unlike the twin,
+    keeps bare-name edges usable instead of requiring a file: entry
+    points and precondition locations arrive in either shape, so every
+    node is indexed under BOTH its bare name and (when a file is
+    known) its ``"file:function"`` form.
+    """
+    name = raw
+    node_file = file_hint
+    if not node_file and ":" in raw:
+        node_file, _, name = raw.partition(":")
+    name = name.split("(")[0].strip()
+    if not name:
+        return ()
+    if node_file:
+        return (name, f"{node_file}:{name}")
+    return (name,)
+
+
 def _check_attacker_control(
     _source: str, file: str, func: str,
     _parameter: str, expect_absent: bool,
@@ -574,18 +597,35 @@ def _check_attacker_control(
     # exhausts the edge list (visited-set bounded); only a truncated
     # walk leaves ``reach_truncated`` set, and that must degrade to
     # inconclusive, never to contradicted.
+    # Index every edge endpoint under BOTH its bare name and its
+    # "file:func" form (see _edge_node_keys): context maps mix the two
+    # shapes edge-by-edge, and a frontier of bare names walked over
+    # combined-form keys reads real edges as missing.
     callers_by_callee: dict[str, set[str]] = {}
+    edge_nodes: set[str] = set()
     for edge in context_map.get("call_edges", []):
-        callee = edge.get("callee") or ""
-        caller = edge.get("caller") or ""
-        if callee and caller:
-            callers_by_callee.setdefault(callee, set()).add(caller)
+        caller_keys = _edge_node_keys(
+            edge.get("caller") or "", edge.get("caller_file") or "",
+        )
+        callee_keys = _edge_node_keys(
+            edge.get("callee") or "", edge.get("callee_file") or "",
+        )
+        if not caller_keys or not callee_keys:
+            continue
+        edge_nodes.update(caller_keys)
+        edge_nodes.update(callee_keys)
+        for callee_key in callee_keys:
+            callers_by_callee.setdefault(callee_key, set()).update(caller_keys)
+
+    start_keys = {func}
+    if file:
+        start_keys.add(f"{file}:{func}")
 
     reachable = is_entry
     reach_truncated = False
     if not reachable:
-        seen = {func}
-        frontier = [func]
+        seen = set(start_keys)
+        frontier = list(start_keys)
         while frontier and not reachable:
             if len(seen) > _REACHABILITY_NODE_CAP:
                 reach_truncated = True
@@ -602,6 +642,24 @@ def _check_attacker_control(
                 if reachable:
                     break
             frontier = nxt
+
+    # Graph-incompleteness gate: the map is LLM-authored /understand
+    # output and routinely incomplete.  An exhausted walk that found
+    # no path is only evidence about functions the map actually
+    # RECORDS — when no edge names the function at all, "no callers
+    # found" is absence of evidence, and it must mint neither the sole
+    # demoting verdict (contradicted) nor a positive unreachability
+    # receipt (supported).
+    if not reachable and not reach_truncated and not (start_keys & edge_nodes):
+        return CheckResult(
+            check_type="attacker_controls_input",
+            assumption="",
+            verdict="inconclusive",
+            evidence=(
+                f"context map records no call edge naming {func} — "
+                "graph incompleteness is not evidence of unreachability"
+            ),
+        )
 
     if expect_absent:
         # LLM claims attacker does NOT control input

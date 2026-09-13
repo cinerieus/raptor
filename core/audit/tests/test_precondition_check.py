@@ -188,11 +188,77 @@ class TestCheckAttackerControl:
         assert result.verdict == "supported"
 
     def test_function_not_reachable(self):
-        ctx = {"entry_points": ["main"], "call_edges": []}
+        # helper's caller IS recorded in the map, so the exhausted
+        # walk is real evidence — and none of it reaches an entry
+        # point.  This is the legitimate demoting case.
+        ctx = {"entry_points": ["main"], "call_edges": [
+            {"caller": "orphan", "callee": "helper"},
+            {"caller": "main", "callee": "unrelated"},
+        ]}
         result = _check_attacker_control(
             "", "f.c", "helper", "", expect_absent=False, context_map=ctx,
         )
         assert result.verdict == "contradicted"
+
+    def test_absent_from_map_is_inconclusive(self):
+        # The map is LLM-authored /understand output and routinely
+        # incomplete: when no call edge names the function at all, an
+        # empty upward walk is graph incompleteness, not
+        # unreachability — it must not mint the only demoting verdict.
+        ctx = {"entry_points": ["main"], "call_edges": [
+            {"caller": "main", "callee": "other"},
+        ]}
+        result = _check_attacker_control(
+            "", "f.c", "helper", "", expect_absent=False, context_map=ctx,
+        )
+        assert result.verdict == "inconclusive"
+        assert "no call edge naming helper" in result.evidence
+
+    def test_absent_from_map_earns_no_absence_receipt(self):
+        # Two-direction guard: the same non-evidence must not earn a
+        # supported unreachability receipt for the absence claim
+        # either — "no pattern found" is not a positive receipt.
+        ctx = {"entry_points": ["main"], "call_edges": [
+            {"caller": "main", "callee": "other"},
+        ]}
+        result = _check_attacker_control(
+            "", "f.c", "helper", "", expect_absent=True, context_map=ctx,
+        )
+        assert result.verdict == "inconclusive"
+
+    def test_empty_edge_list_is_inconclusive(self):
+        # Degenerate incompleteness: a map with entry points but no
+        # edges at all records nothing about anyone.
+        ctx = {"entry_points": ["main"], "call_edges": []}
+        result = _check_attacker_control(
+            "", "f.c", "helper", "", expect_absent=False, context_map=ctx,
+        )
+        assert result.verdict == "inconclusive"
+
+    def test_combined_form_edge_matches_bare_hypothesis(self):
+        # Edges keyed "file:func" while the hypothesis carries the
+        # bare name: the edge must still be seen — mixed key shapes
+        # made real reachability invisible and the empty walk read as
+        # a refutation.
+        ctx = {"entry_points": ["main"], "call_edges": [
+            {"caller": "src/a.c:main", "callee": "src/a.c:helper"},
+        ]}
+        result = _check_attacker_control(
+            "", "f.c", "helper", "", expect_absent=False, context_map=ctx,
+        )
+        assert result.verdict == "supported"
+
+    def test_mixed_key_shapes_walk_across_hops(self):
+        # Bare and combined forms alternating along the chain must
+        # still chain up to the entry point.
+        ctx = {"entry_points": ["main"], "call_edges": [
+            {"caller": "main", "callee": "src/b.c:mid"},
+            {"caller": "src/b.c:mid", "callee": "helper"},
+        ]}
+        result = _check_attacker_control(
+            "", "f.c", "helper", "", expect_absent=False, context_map=ctx,
+        )
+        assert result.verdict == "supported"
 
     def test_no_context_map(self):
         result = _check_attacker_control("", "f.c", "fn", "", True, None)
