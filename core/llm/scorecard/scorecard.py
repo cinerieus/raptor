@@ -94,6 +94,20 @@ DEFAULT_MISS_RATE_CEILING = 0.05
 # for the operator to scan a representative spread of failures.
 MAX_DISAGREEMENT_SAMPLES = 5
 
+# How many TOOL_EVIDENCE finding ids to remember per cell for the
+# idempotency claim (newest-N, oldest evicted). Trade-off, both
+# directions: LARGER keeps re-imports of old validate runs idempotent
+# for longer but grows the sidecar and the linear membership scan on
+# every claim (pre-cap the list was unbounded — one entry per
+# validated finding forever, re-parsed and re-written under the flock
+# each cycle); SMALLER bounds the sidecar but lets a finding older
+# than the window double-count if the same (model, decision_class,
+# finding) is re-imported after eviction. 1000 ids ≈ tens of KB per
+# ACTIVE cell and covers far more findings than one decision class
+# realistically accumulates between auto-GC horizons; a duplicate
+# import that far apart is a bounded counting error, not a trust flip.
+MAX_TOOL_EVIDENCE_SEEN_IDS = 1000
+
 
 # ---- auto-GC retention ---------------------------------------------------
 # The scorecard JSON grows as new (model, decision_class) pairs accumulate.
@@ -905,6 +919,12 @@ class ModelScorecard:
             if finding_id in seen:
                 return False
             seen.append(finding_id)
+            # Newest-N eviction — see MAX_TOOL_EVIDENCE_SEEN_IDS for
+            # the both-directions trade-off.
+            if len(seen) > MAX_TOOL_EVIDENCE_SEEN_IDS:
+                cell["tool_evidence_finding_ids"] = (
+                    seen[-MAX_TOOL_EVIDENCE_SEEN_IDS:]
+                )
             now_iso = _now_iso()
             bucket = cell["events"][EventType.TOOL_EVIDENCE].setdefault(
                 bucket_key(now_iso), {"correct": 0, "incorrect": 0}

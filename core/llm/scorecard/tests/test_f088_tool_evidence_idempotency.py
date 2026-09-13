@@ -368,3 +368,48 @@ class TestBulkIdempotency:
         # Bulk returns count of *recorded* events — 2, not 3.
         assert n == 2
         assert _stat(scorecard, "agentic:py/sql", "claude-opus") == (2, 0)
+
+
+class TestSeenSetCap:
+    """The per-cell finding-id seen-set is bounded (newest-N)."""
+
+    def test_seen_set_capped_at_limit(self, tmp_path, monkeypatch):
+        from core.llm.scorecard import scorecard as sc_mod
+
+        monkeypatch.setattr(sc_mod, "MAX_TOOL_EVIDENCE_SEEN_IDS", 10)
+        sc = ModelScorecard(tmp_path / "sc.json")
+        for i in range(25):
+            assert sc.claim_and_record_tool_evidence(
+                "dc", "m1", f"f-{i}", "correct",
+            )
+        data = json.loads((tmp_path / "sc.json").read_text())
+        seen = data["models"]["m1"]["dc"]["tool_evidence_finding_ids"]
+        assert len(seen) == 10
+        # Newest-N: the most recent ids survive, the oldest evicted.
+        assert seen == [f"f-{i}" for i in range(15, 25)]
+
+    def test_recent_ids_stay_idempotent(self, tmp_path, monkeypatch):
+        from core.llm.scorecard import scorecard as sc_mod
+
+        monkeypatch.setattr(sc_mod, "MAX_TOOL_EVIDENCE_SEEN_IDS", 10)
+        sc = ModelScorecard(tmp_path / "sc.json")
+        for i in range(12):
+            sc.claim_and_record_tool_evidence("dc", "m1", f"f-{i}", "correct")
+        # Within the window → still deduped.
+        assert not sc.claim_and_record_tool_evidence(
+            "dc", "m1", "f-11", "correct",
+        )
+
+    def test_evicted_id_recounts_by_design(self, tmp_path, monkeypatch):
+        """The accepted trade-off direction: an id older than the
+        window re-records (bounded counting error, not a trust flip).
+        Pinned so a future cap change reconsiders it consciously."""
+        from core.llm.scorecard import scorecard as sc_mod
+
+        monkeypatch.setattr(sc_mod, "MAX_TOOL_EVIDENCE_SEEN_IDS", 10)
+        sc = ModelScorecard(tmp_path / "sc.json")
+        for i in range(25):
+            sc.claim_and_record_tool_evidence("dc", "m1", f"f-{i}", "correct")
+        assert sc.claim_and_record_tool_evidence(
+            "dc", "m1", "f-0", "correct",
+        )
