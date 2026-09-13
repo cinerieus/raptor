@@ -103,7 +103,7 @@ class PropagationResult:
     # ("confirmed" | "refuted" | "depth_limited"); resolved=False is a
     # passthrough ("inconclusive" or heuristic caller scheduling).
     resolved: bool = False
-    resolution: str = ""          # "confirmed" | "refuted" | "depth_limited"
+    resolution: str = ""          # "confirmed" | "refuted" | "depth_limited" | "inconclusive"
     resolver_used: str = ""       # "codeql" | "coccinelle" | "semgrep" | "heuristic" | "llm"
     callers_scheduled: list[CallerCandidate] = field(default_factory=list)
     finding: dict[str, Any] | None = None
