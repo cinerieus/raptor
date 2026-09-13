@@ -851,3 +851,45 @@ class TestCoccinelleCallerCap:
         result = try_coccinelle_resolve(c, config)
         assert result is not None
         assert len(result.callers_scheduled) == 3
+
+
+class TestSourceReadMemo:
+    def test_repeat_scoring_reads_file_once(
+        self, monkeypatch, tmp_path: Path,
+    ):
+        from core.audit.run_memo import BoundedMemo
+
+        src = tmp_path / "caller.c"
+        src.write_text("void a() { parse_header(len); }\n")
+        reads: list = []
+        orig = Path.read_text
+
+        def counting(self, *args, **kwargs):
+            reads.append(str(self))
+            return orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", counting)
+        c = _constraint()
+        memo: BoundedMemo = BoundedMemo(8)
+        for _ in range(3):
+            result = score_caller(
+                "caller.c", "a", 1, c,
+                entry_points=set(),
+                target_path=tmp_path,
+                source_memo=memo,
+            )
+            # The scoring itself must still see the source text.
+            assert "variable_arg" in result.reasons
+        assert reads.count(str(src)) == 1
+
+    def test_no_memo_still_reads(self, tmp_path: Path):
+        src = tmp_path / "caller.c"
+        src.write_text("void a() { parse_header(len); }\n")
+        c = _constraint()
+        result = score_caller(
+            "caller.c", "a", 1, c,
+            entry_points=set(),
+            target_path=tmp_path,
+            source_memo=None,
+        )
+        assert "variable_arg" in result.reasons

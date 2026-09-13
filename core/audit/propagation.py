@@ -45,6 +45,7 @@ from ._util import (
     find_function_lines,
     safe_join,
 )
+from .run_memo import BoundedMemo
 
 if TYPE_CHECKING:
     from .constraints import Constraint
@@ -54,6 +55,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_DEPTH = 5
 DEFAULT_MAX_CALLERS_PER_HOP = 10
 _MAX_SOURCE_BYTES = 2 * 1024 * 1024  # 2 MB cap for heuristic source reads
+
+# Caller-source memo size.  Each entry holds one source file's text
+# (<= _MAX_SOURCE_BYTES), so 32 bounds worst-case memory at ~64 MB.
+# Larger would help constraint sets whose callers span more than 32
+# files per round at the cost of proportionally more resident text;
+# smaller re-pays file reads on wide caller fan-outs (the repeated
+# per-caller-per-constraint read this memo exists to collapse).
+_SOURCE_MEMO_MAX_ENTRIES = 32
 
 _BOUNDS_CHECK_RE = re.compile(
     r"""
@@ -133,6 +142,12 @@ class PropagationConfig:
     # (P23). None = tier disabled; the orchestrator threads its
     # already-running server in, this module never starts one.
     joern_server: Any | None = None
+    # Caller-source text memo shared across every hop this config
+    # serves: score_caller reads each caller's file once per
+    # (mtime, size) stamp instead of once per caller-per-constraint.
+    source_memo: BoundedMemo[str] = field(
+        default_factory=lambda: BoundedMemo(_SOURCE_MEMO_MAX_ENTRIES),
+    )
 
 
 def score_caller(
@@ -145,6 +160,7 @@ def score_caller(
     checklist: dict[str, Any] | None = None,
     target_path: Path | None = None,
     inventory: dict[str, Any] | None = None,
+    source_memo: BoundedMemo[str] | None = None,
 ) -> CallerCandidate:
     """Score a caller by likelihood of violating a constraint.
 
@@ -178,9 +194,18 @@ def score_caller(
         source_file = safe_join(target_path, caller_file)
         if source_file and source_file.exists():
             try:
-                size = source_file.stat().st_size
-                if size <= _MAX_SOURCE_BYTES:
-                    source = source_file.read_text(errors="replace")
+                st = source_file.stat()
+                if st.st_size <= _MAX_SOURCE_BYTES:
+                    if source_memo is not None:
+                        # (mtime, size)-stamped key: a file edited
+                        # mid-run re-reads rather than serving stale
+                        # text.
+                        source, _ = source_memo.get_or_compute(
+                            (str(source_file), st.st_mtime_ns, st.st_size),
+                            lambda: source_file.read_text(errors="replace"),
+                        )
+                    else:
+                        source = source_file.read_text(errors="replace")
                     # Scope to the caller function body so we don't
                     # attribute evidence from unrelated functions in the
                     # same file.
@@ -1014,6 +1039,7 @@ def propagate_one_hop(
             checklist=checklist,
             target_path=config.target_path,
             inventory=config.inventory,
+            source_memo=config.source_memo,
         )
         for f, fn, ln in raw_callers
     ]
