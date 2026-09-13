@@ -665,6 +665,15 @@ def execute_witness(
 # ---------------------------------------------------------------------------
 
 
+# Languages whose witness prompts define ``expected_exception`` as an
+# error-MESSAGE substring rather than an exception class/type token:
+# Lua's pcall and Perl's die carry no exception class, so their
+# harnesses report a fixed ``type`` token ("error" / "die") that holds
+# no signal — comparing the prediction against it would refute every
+# correctly-predicted error.
+_MESSAGE_MATCH_LANGS = frozenset({"lua", "perl"})
+
+
 def _classify_json_output(
     spec: DarkWitnessSpec,
     stdout: str,
@@ -724,6 +733,23 @@ def _classify_json_output(
         exc_type = data.get("type", "")
         exc_msg = data.get("message", "")
         if expected_exc:
+            if language in _MESSAGE_MATCH_LANGS:
+                if expected_exc in exc_msg:
+                    return DarkVerifyResult(
+                        finding_key=spec.finding_key, verdict="confirmed",
+                        language=language,
+                        actual_exception=f"{exc_type}: {exc_msg}",
+                        match_detail="error message contains prediction",
+                    )
+                return DarkVerifyResult(
+                    finding_key=spec.finding_key, verdict="refuted",
+                    language=language,
+                    actual_exception=f"{exc_type}: {exc_msg}",
+                    match_detail=(
+                        f"expected error message containing "
+                        f"{expected_exc!r}, got: {exc_msg[:200]}"
+                    ),
+                )
             if exc_type == expected_exc:
                 return DarkVerifyResult(
                     finding_key=spec.finding_key, verdict="confirmed",

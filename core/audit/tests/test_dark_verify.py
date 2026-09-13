@@ -339,6 +339,65 @@ class TestClassifyOutput:
         r = _classify_output(spec, stdout, "python")
         assert r.verdict == "refuted"
 
+    def test_lua_error_message_substring_confirms(self):
+        # Lua's pcall carries no exception class — the harness reports
+        # a fixed type token ("error") and the prompt contract defines
+        # expected_exception as an error-MESSAGE substring.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.lua", function="f",
+            language="lua",
+            expected_exception="attempt to index a nil value",
+        )
+        stdout = json.dumps({
+            "status": "exception", "type": "error",
+            "message": "a.lua:3: attempt to index a nil value (local 'x')",
+        })
+        r = _classify_output(spec, stdout, "lua")
+        assert r.verdict == "confirmed"
+
+    def test_perl_die_message_substring_confirms(self):
+        # Perl's die is untyped — the harness reports type "die" and
+        # the prompt contract defines expected_exception as an
+        # error-MESSAGE substring.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="A.pm", function="f",
+            language="perl",
+            expected_exception="division by zero",
+        )
+        stdout = json.dumps({
+            "status": "exception", "type": "die",
+            "message": "Illegal division by zero at A.pm line 4.",
+        })
+        r = _classify_output(spec, stdout, "perl")
+        assert r.verdict == "confirmed"
+
+    def test_lua_error_message_mismatch_not_confirmed(self):
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.lua", function="f",
+            language="lua",
+            expected_exception="attempt to index a nil value",
+        )
+        stdout = json.dumps({
+            "status": "exception", "type": "error",
+            "message": "a.lua:3: bad argument #1 to 'f'",
+        })
+        r = _classify_output(spec, stdout, "lua")
+        assert r.verdict == "refuted"
+
+    def test_typed_language_keeps_exact_type_match(self):
+        # Python's prompt contract promises an exception CLASS name —
+        # a message merely mentioning the class must not confirm.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.py", function="f",
+            module_path="a", expected_exception="ValueError",
+        )
+        stdout = json.dumps({
+            "status": "exception", "type": "TypeError",
+            "message": "expected ValueError here",
+        })
+        r = _classify_output(spec, stdout, "python")
+        assert r.verdict == "refuted"
+
     def test_unexpected_exception_is_error_not_confirmed(self):
         """No stated exception expectation: an exception means the
         witness itself failed (bad args, wrong signature), never that
@@ -2274,7 +2333,9 @@ class TestRealExecutionPerl:
             finding_key="f1", file="Strict.pm", function="fail_hard",
             language="perl",
             args=[],
-            expected_exception="die",
+            # Per the Perl prompt contract this is an error-MESSAGE
+            # substring, not a type token.
+            expected_exception="intentional failure",
             lang_config={"use_module": "Strict"},
         )
         r = execute_witness(spec, tmp_path)
