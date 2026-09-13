@@ -1426,6 +1426,12 @@ class ProjectManager:
         if not src.exists():
             msg = f"Directory not found: {directory}"
             raise ValueError(msg)
+        if not src.is_dir():
+            # An easy operator slip (`project add myproj findings.json`)
+            # otherwise surfaces as an unhandled NotADirectoryError
+            # traceback from the child-run scan below.
+            msg = f"Not a directory: {directory}"
+            raise ValueError(msg)
 
         from core.run import generate_run_metadata, is_run_directory
 

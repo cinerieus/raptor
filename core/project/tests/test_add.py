@@ -32,6 +32,17 @@ class TestAddDirectory(unittest.TestCase):
         added = self.mgr.add_directory("myapp", str(run_dir))
         self.assertEqual(added, 1)
 
+    def test_add_regular_file_raises_value_error(self):
+        """`project add myproj /path/to/file.json` (an easy operator
+        mistake) must produce the CLI's one-line error, not an
+        unhandled NotADirectoryError traceback from iterdir()."""
+        self.mgr.create("myapp", self.target_code, output_dir=self.output_dir)
+        f = Path(self.tmpdir.name) / "findings.json"
+        f.write_text("[]")
+        with self.assertRaises(ValueError) as ctx:
+            self.mgr.add_directory("myapp", str(f))
+        self.assertIn("Not a directory", str(ctx.exception))
+
     def test_add_directory_of_runs(self):
         self.mgr.create("myapp", self.target_code, output_dir=self.output_dir)
         runs = Path(self.tmpdir.name) / "runs"
