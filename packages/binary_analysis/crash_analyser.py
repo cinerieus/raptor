@@ -37,6 +37,10 @@ from packages.binary_analysis._validators import is_valid_hex_address
 
 logger = get_logger()
 
+#: Linux ASLR level pseudo-file — module-level so tests can point it
+#: at a fixture instead of intercepting a subprocess.
+_PROC_ASLR_PATH = Path("/proc/sys/kernel/randomize_va_space")
+
 _SIGSEGV_SIGNALS = frozenset({"11", "sigsegv", "segmentation fault"})
 _SIGABRT_SIGNALS = frozenset({"6", "06", "sigabrt", "abort"})
 _SIGFPE_SIGNALS = frozenset({"8", "08", "sigfpe", "floating point exception"})
@@ -1344,20 +1348,19 @@ class CrashAnalyser:
                 info["aslr_enabled"] = "true"
                 info["aslr_level"] = "macos-default"
             elif sys_platform == "Linux":
-                result = _run_trusted(
-                    ["cat", "/proc/sys/kernel/randomize_va_space"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.returncode == 0:
-                    aslr_level = result.stdout.strip()
+                # Read the procfs file directly — spawning `cat` for
+                # a 2-byte pseudo-file added a subprocess round-trip
+                # for nothing.
+                try:
+                    aslr_level = _PROC_ASLR_PATH.read_text(
+                        encoding="ascii").strip()
+                except OSError:
+                    info["aslr_enabled"] = "unknown"
+                else:
                     info["aslr_enabled"] = (
                         "true" if aslr_level != "0" else "false"
                     )
                     info["aslr_level"] = aslr_level
-                else:
-                    info["aslr_enabled"] = "unknown"
             else:
                 # Other unixes (BSD variants etc) — best-effort
                 # try sysctl, otherwise mark unknown.
@@ -1544,8 +1547,6 @@ class CrashAnalyser:
 
         # Extract function names from stack trace (ignore addresses for better deduplication)
         # Format: #0  0xaddress in function_name (args) at file:line
-        import re
-
         functions = []
         for line in stack_trace.split('\n'):
             # Match GDB format: #N  0xADDR in function_name

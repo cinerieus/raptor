@@ -182,24 +182,31 @@ class TestAslrEnabledStringConvention(unittest.TestCase):
     'true'/'false' string convention, never a Python bool."""
 
     def _layout_info(self, aslr_stdout: str) -> dict:
+        import tempfile
+
         analyser = _bare_analyser()
         analyser.binary = Path("/nonexistent/bin")
 
+        # The ASLR level is read straight from the procfs pseudo-file
+        # (module-level seam) — point it at a fixture.
+        td = tempfile.mkdtemp(prefix="aslr-fixture-")
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        aslr_file = Path(td) / "randomize_va_space"
+        aslr_file.write_text(aslr_stdout)
+
         def fake_run_trusted(argv: list, **kwargs) -> MagicMock:
-            result = MagicMock()
-            if argv[0] == "cat":
-                result.returncode = 0
-                result.stdout = aslr_stdout
-            else:  # otool NX probe — irrelevant here
-                result.returncode = 1
-                result.stdout = ""
-            return result
+            # otool NX probe — irrelevant here
+            return MagicMock(returncode=1, stdout="")
 
         nm_result = MagicMock(returncode=1, stdout="")
         readelf_result = MagicMock(returncode=1, stdout="")
         with patch(
             "packages.binary_analysis.crash_analyser.platform.system",
             return_value="Linux",
+        ), patch(
+            "packages.binary_analysis.crash_analyser._PROC_ASLR_PATH",
+            aslr_file,
         ), patch(
             "packages.binary_analysis.crash_analyser._run_trusted",
             side_effect=fake_run_trusted,
