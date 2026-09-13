@@ -192,12 +192,14 @@ class TestRecoverIssueThroughClient:
         assert obs.verification.source == EvidenceSource.GHARCHIVE
         assert obs.verification.bigquery_table == "githubarchive.day.20250713"
 
-        # Day-granularity query: whole-day table, no hour/minute filter.
+        # Minute-precise timestamp: the query filters to the exact
+        # hour/minute at the SQL layer (keeps busy-repo scans far below
+        # the row cap that would otherwise truncate recovery).
         assert "`githubarchive.day.20250713`" in stub.queries[0]
-        assert "EXTRACT(HOUR" not in stub.queries[0]
-        assert "EXTRACT(MINUTE" not in stub.queries[0]
+        assert "EXTRACT(HOUR" in stub.queries[0]
+        assert "EXTRACT(MINUTE" in stub.queries[0]
         names = _param_names(stub.job_configs[0])
-        assert "hour" not in names and "minute" not in names
+        assert "hour" in names and "minute" in names
 
     def test_recover_issue_not_found_raises(self, monkeypatch):
         client, _ = _client_with_rows(monkeypatch, [])

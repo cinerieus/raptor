@@ -77,6 +77,11 @@ class GHArchiveClient:  # nosemgrep: generic.secrets.security.detected-google-gc
         # File path or ADC fallback
         return google.auth.default(scopes=scopes)
 
+    # Default row cap. Callers making absence claims must compare the
+    # result count against the limit they passed: a result that HIT the
+    # cap is truncated and proves nothing about rows beyond it.
+    DEFAULT_LIMIT = 1000
+
     def query_events(
         self,
         repo: str | None = None,
@@ -84,6 +89,7 @@ class GHArchiveClient:  # nosemgrep: generic.secrets.security.detected-google-gc
         event_type: str | None = None,
         from_date: str = "",
         to_date: str | None = None,
+        limit: int = DEFAULT_LIMIT,
     ) -> list[dict[str, Any]]:
         """Query GH Archive for events using parameterized queries.
 
@@ -95,8 +101,19 @@ class GHArchiveClient:  # nosemgrep: generic.secrets.security.detected-google-gc
           hour/minute filter. This is the granularity the recover_*
           collectors need — they match candidate rows against the full
           timestamp themselves.
+
+        ``limit`` caps the rows returned. When a result's length equals
+        ``limit`` it is truncated — callers must not conclude absence
+        from it.
         """
         client = self._get_client()
+
+        # LIMIT cannot be parameterized; validate to a bounded int
+        # before interpolation.
+        limit = int(limit)
+        if not 1 <= limit <= 100_000:
+            msg = f"limit must be between 1 and 100000, got {limit}"
+            raise ValueError(msg)
 
         # Build table reference - use daily table.
         # Table names can't be parameterized, but the format is
@@ -148,7 +165,7 @@ class GHArchiveClient:  # nosemgrep: generic.secrets.security.detected-google-gc
         FROM {table}
         WHERE {where}
         ORDER BY created_at
-        LIMIT 1000
+        LIMIT {limit}
         """
 
         job_config = bigquery.QueryJobConfig(query_parameters=params)

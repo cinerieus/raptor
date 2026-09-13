@@ -117,11 +117,54 @@ def _timestamp_matches(timestamp: str, row_created_at: object) -> bool:
     )
 
 
+# Row cap for recovery queries. A result that HITS this cap is
+# truncated: "no match among the first N rows" is not evidence of
+# absence, and recover_* must say so instead of raising "not found".
+_RECOVERY_ROW_LIMIT = GHArchiveClient.DEFAULT_LIMIT
+
+
 class GHArchiveCollector:
     """Collects evidence from GH Archive (BigQuery)."""
 
     def __init__(self, client: GHArchiveClient | None = None) -> None:
         self.client = client or GHArchiveClient()
+
+    def _recovery_query_rows(
+        self, repo: str, event_type: str, timestamp: str
+    ) -> tuple[list[dict], bool]:
+        """Query candidate rows for a recover_* call.
+
+        When the caller's timestamp carries minute granularity, filter
+        at the SQL layer to that exact minute (the scan then stays far
+        below the row cap even on busy repos); day-only timestamps scan
+        the whole day table. Returns ``(rows, truncated)`` where
+        ``truncated`` means the result hit the row cap.
+        """
+        query_dt, day_only = _parse_query_timestamp(timestamp)
+        from_date = query_dt.strftime("%Y%m%d" if day_only else "%Y%m%d%H%M")
+        rows = self.client.query_events(
+            repo=repo,
+            event_type=event_type,
+            from_date=from_date,
+            limit=_RECOVERY_ROW_LIMIT,
+        )
+        return rows, len(rows) >= _RECOVERY_ROW_LIMIT
+
+    @staticmethod
+    def _absence_error(what: str, repo: str, timestamp: str, truncated: bool) -> ValueError:
+        """Build the terminal error for a recovery miss.
+
+        A truncated result set must never be presented as forensic
+        evidence of absence.
+        """
+        if truncated:
+            return ValueError(
+                f"{what} not found in the first {_RECOVERY_ROW_LIMIT} GH Archive "
+                f"rows for {repo} at {timestamp} — results truncated at the row "
+                "cap, so absence cannot be concluded; narrow the timestamp to "
+                "minute granularity (YYYYMMDDHHMM / full ISO) and retry"
+            )
+        return ValueError(f"{what} not found in GH Archive for {repo} at {timestamp}")
 
     def collect_events(
         self,
@@ -165,7 +208,7 @@ class GHArchiveCollector:
         owner, name = repo.split("/", 1)
         date = _gharchive_day(timestamp)
 
-        rows = self.client.query_events(repo=repo, event_type="PushEvent", from_date=date)
+        rows, truncated = self._recovery_query_rows(repo, "PushEvent", timestamp)
 
         for row in rows:
             if not _timestamp_matches(timestamp, row.get("created_at")):
@@ -205,15 +248,14 @@ class GHArchiveCollector:
                         is_dangling=True,
                     )
 
-        msg = f"Commit {sha} not found in GH Archive for {repo} at {timestamp}"
-        raise ValueError(msg)
+        raise self._absence_error(f"Commit {sha}", repo, timestamp, truncated)
 
     def recover_force_push(self, repo: str, timestamp: str) -> CommitObservation:
         """Recover force-pushed commit from GH Archive."""
         owner, name = repo.split("/", 1)
         date = _gharchive_day(timestamp)
 
-        rows = self.client.query_events(repo=repo, event_type="PushEvent", from_date=date)
+        rows, truncated = self._recovery_query_rows(repo, "PushEvent", timestamp)
 
         for row in rows:
             if not _timestamp_matches(timestamp, row.get("created_at")):
@@ -255,8 +297,7 @@ class GHArchiveCollector:
                     is_dangling=True,
                 )
 
-        msg = f"Force push not found in GH Archive for {repo} at {timestamp}"
-        raise ValueError(msg)
+        raise self._absence_error("Force push", repo, timestamp, truncated)
 
     def _recover_from_gharchive(
         self, item_type: str, repo: str, number: int, timestamp: str
@@ -267,7 +308,7 @@ class GHArchiveCollector:
         event_type = "PullRequestEvent" if item_type == "pr" else "IssuesEvent"
         payload_key = "pull_request" if item_type == "pr" else "issue"
 
-        rows = self.client.query_events(repo=repo, event_type=event_type, from_date=date)
+        rows, truncated = self._recovery_query_rows(repo, event_type, timestamp)
 
         for row in rows:
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
@@ -306,5 +347,4 @@ class GHArchiveCollector:
                 )
 
         label = "PR" if item_type == "pr" else "Issue"
-        msg = f"{label} #{number} not found in GH Archive for {repo} at {timestamp}"
-        raise ValueError(msg)
+        raise self._absence_error(f"{label} #{number}", repo, timestamp, truncated)
