@@ -675,3 +675,26 @@ def test_cve_legacy_osv_id_key_still_labelled(tmp_path: Path):
     _write_sample(tmp_path, "PyPI", "p", [f])
     samples = _load_findings_with_labels(tmp_path)
     assert samples[0][1] == 1
+
+
+class TestAcceptGateClamp:
+    """(P20 ∨ ρ) accept gate with the P20 non-regression clamp on the
+    ρ arm — both directions."""
+
+    def test_p20_above_threshold_accepts(self):
+        from packages.sca.calibration.refit import _fails_accept_gate
+        assert _fails_accept_gate(0.06, -0.5, 0.05) is False
+
+    def test_rho_accept_with_nonregressing_p20_accepts(self):
+        from packages.sca.calibration.refit import _fails_accept_gate
+        assert _fails_accept_gate(0.0, 0.06, 0.05) is False
+
+    def test_rho_accept_with_p20_regression_rejects(self):
+        """Pre-fix: a ρ jump shipped an auto-applied refit that lowered
+        top-20 precision."""
+        from packages.sca.calibration.refit import _fails_accept_gate
+        assert _fails_accept_gate(-0.01, 0.5, 0.05) is True
+
+    def test_both_below_threshold_rejects(self):
+        from packages.sca.calibration.refit import _fails_accept_gate
+        assert _fails_accept_gate(0.01, 0.01, 0.05) is True

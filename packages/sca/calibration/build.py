@@ -116,7 +116,10 @@ def build_corpus(
 
     if http is None:
         from core.http import default_client
-        http = default_client()
+        # Fixed-host scheduled job: pass the known source hosts as the
+        # egress allowlist (repo standard — "production paths SHOULD
+        # pass an allowlist"). Injected clients bypass this by design.
+        http = default_client(allowed_hosts=_CORPUS_SOURCE_HOSTS)
 
     if sources is None:
         sources = ["kev", "epss", "exploitdb", "metasploit",
@@ -191,6 +194,17 @@ def _build_kev(out_dir: Path, http: Any) -> BuildResult:
 # so it lives here as a single source of truth. The ``HEAD`` ref
 # resolves to the repo's default branch at request time (GitLab raw
 # honours HEAD), so a branch rename upstream can't 404 us.
+# Every remote host the corpus builders talk to. Passed as the egress
+# allowlist when build_corpus constructs its own client.
+_CORPUS_SOURCE_HOSTS = [
+    "www.cisa.gov",
+    "gitlab.com",
+    "raw.githubusercontent.com",
+    "api.first.org",
+    "api.osv.dev",
+    "codeload.github.com",
+]
+
 _EDB_CSV_URL = (
     "https://gitlab.com/exploit-database/exploitdb/-/raw/HEAD/"
     "files_exploits.csv"

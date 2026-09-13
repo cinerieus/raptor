@@ -674,7 +674,11 @@ def _prewarm_global_feeds() -> None:
         from .. import SCA_CACHE_ROOT
         cache = JsonCache(root=SCA_CACHE_ROOT)
         # A throwaway lookup forces the catalog load → writes the disk cache.
-        KevClient(default_client(), cache).contains("CVE-1970-0000")
+        # KEV catalog is a single fixed host — pass it as the egress
+        # allowlist (repo standard for network-facing production paths).
+        KevClient(
+            default_client(allowed_hosts=["www.cisa.gov"]), cache,
+        ).contains("CVE-1970-0000")
     except Exception as e:                                  # noqa: BLE001
         logger.debug("sca.calibration: KEV pre-warm skipped: %s", e)
 

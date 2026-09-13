@@ -170,6 +170,26 @@ class RefitReport:
         }
 
 
+
+def _fails_accept_gate(p20_improvement: float, rho_improvement: float,
+                       threshold: float) -> bool:
+    """True when the refit accept gate REJECTS.
+
+    Accept requires P20 improvement ≥ threshold, OR ρ improvement ≥
+    threshold WITH P20 not regressing. The non-regression clamp on the
+    ρ arm is a deliberate trade-off, both directions: without it, a
+    corpus-wide rank-correlation jump could ship an auto-applied refit
+    that LOWERS operator-facing top-20 precision (the headline verdict
+    metric); with it, a refit trading a hair of P20 for a large ρ gain
+    needs a manual apply. P20 is what operators see first, so
+    regressions there must never ship silently.
+    """
+    if p20_improvement >= threshold:
+        return False
+    if rho_improvement >= threshold and p20_improvement >= 0:
+        return False
+    return True
+
 def grid_search_refit(
     corpus_dir: Path,
     *,
@@ -369,14 +389,22 @@ def grid_search_refit(
     if not joint_overrides:
         status = "rejected"
         notes.append("no per-constant variant beat the baseline")
-    elif (improvement < improvement_threshold
-            and rho_improvement < improvement_threshold):
+    elif _fails_accept_gate(improvement, rho_improvement,
+                            improvement_threshold):
         status = "rejected"
-        notes.append(
-            f"joint P20 improvement {improvement:+.3f} AND ρ "
-            f"improvement {rho_improvement:+.3f} both below "
-            f"threshold {improvement_threshold:.3f}; refit not shipped"
-        )
+        if rho_improvement >= improvement_threshold:
+            notes.append(
+                f"rejected by non-regression clamp: ρ improvement "
+                f"{rho_improvement:+.3f} clears the threshold but P20 "
+                f"regressed {improvement:+.3f}; a rank-correlation gain "
+                f"must not ship a top-20 precision regression"
+            )
+        else:
+            notes.append(
+                f"joint P20 improvement {improvement:+.3f} AND ρ "
+                f"improvement {rho_improvement:+.3f} both below "
+                f"threshold {improvement_threshold:.3f}; refit not shipped"
+            )
     else:
         status = "proposed"
         if rho_improvement >= improvement_threshold:
@@ -776,8 +804,12 @@ def joint_grid_search_refit(
 
     report_proposed_p20 = joint_metric[0]
     report_improvement = p20_improvement
-    if (p20_improvement < improvement_threshold
-            and rho_improvement < improvement_threshold):
+    # Shared accept gate (incl. the P20 non-regression clamp). The
+    # single-pass fallback below still propagates when it passed its
+    # own gate, so a clamped joint result degrades to the cheap
+    # search's optimum, never to silence.
+    if _fails_accept_gate(p20_improvement, rho_improvement,
+                          improvement_threshold):
         # Surface whichever metric came closest to the gate so
         # operators reading the report know what's driving the
         # verdict.

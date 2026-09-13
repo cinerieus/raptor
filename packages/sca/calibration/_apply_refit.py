@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from core.atomic_fs import write_text_atomically
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,7 +108,10 @@ def apply_refit_to_risk_py(
         modified += 1
 
     if modified:
-        risk_py_path.write_text("".join(lines), encoding="utf-8")
+        # Atomic: this rewrites PRODUCTION source in the auto-PR
+        # workflow — an interrupt mid-write must not leave a truncated
+        # risk.py for a blind commit step to ship.
+        write_text_atomically(risk_py_path, "".join(lines))
     return modified
 
 
