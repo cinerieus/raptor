@@ -31,7 +31,7 @@ or the file/id can't be resolved.
 
 ``--profile`` selects bitvector width and signedness:
 
-  uint64  64-bit unsigned (default — size_t / pointer arithmetic)
+  uint64  64-bit unsigned (size_t / pointer arithmetic)
   int64   64-bit signed
   uint32  32-bit unsigned (CWE-190 32-bit wraparound paths)
   int32   32-bit signed (signed-overflow UB reasoning)
@@ -153,7 +153,9 @@ def main() -> int:
         "--profile",
         default=None,
         help="Bitvector profile name.  Defaults to the trace's path_profile "
-             "when --from-trace is used, otherwise to 'uint64'.",
+             "when --from-trace is used, otherwise to guessed-signedness "
+             "uint64 reasoning (an infeasible verdict then requires both "
+             "signedness profiles to agree).",
     )
     p.add_argument(
         "--stdin",
@@ -233,8 +235,10 @@ def main() -> int:
     else:
         conditions = list(args.conditions)
 
-    # Profile precedence: explicit --profile > trace's path_profile > "uint64"
-    profile = args.profile or trace_profile or "uint64"
+    # Profile precedence: explicit --profile > trace's path_profile >
+    # None (guessed uint64 — validate_path then honors an infeasible
+    # verdict only when both signedness profiles agree).
+    profile = args.profile or trace_profile
 
     try:
         result = validate_path(
