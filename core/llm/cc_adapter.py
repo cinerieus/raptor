@@ -1571,10 +1571,20 @@ def run_cc_streaming(
                 if chunk:
                     stdout_buf += chunk
                     _split_stdout_lines()
+                else:
+                    # EOF while the child still runs (it closed its
+                    # end, or a budget-abort path closed pipes before
+                    # exit). Drop the fd from the select set: a
+                    # closed-but-open-here pipe reports readable
+                    # forever, and re-selecting it spun this loop at
+                    # full CPU until the child exited.
+                    stdout_fd = None
             if stderr_fd is not None and stderr_fd in ready:
                 chunk = os.read(stderr_fd, 65536)
                 if chunk:
                     stderr_chunks.append(chunk)
+                else:
+                    stderr_fd = None
 
         # Child exited — if it did so without consuming the whole
         # prompt, release our end so nothing lingers.

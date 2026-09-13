@@ -351,3 +351,56 @@ def test_timeout_covers_stdin_write():
     # Well under the child's sleep — the deadline, not the child,
     # ended the call.
     assert time.monotonic() - start < 30
+
+
+def test_early_pipe_close_does_not_busy_spin(monkeypatch):
+    """A child that closes stdout AND stderr then lingers (cleanup,
+    budget-abort teardown) must not peg a core: a closed pipe reports
+    readable forever, so an fd left in the select set after EOF turns
+    the drain loop into a busy spin for the child's remaining
+    lifetime. Count select() calls — the fixed loop parks in ~1s
+    blocking selects (a handful of calls); the spin shape was tens of
+    thousands."""
+    import select as select_mod
+
+    result_line = json.dumps({
+        "type": "result",
+        "session_id": "sess-early-close",
+        "is_error": False,
+    })
+    script = (
+        "import os, sys, time\n"
+        f"sys.stdout.write({result_line!r} + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "os.close(1)\n"
+        "os.close(2)\n"
+        "time.sleep(1.5)\n"
+    )
+
+    real_select = select_mod.select
+    calls = {"n": 0}
+
+    def counting_select(*args, **kwargs):
+        calls["n"] += 1
+        return real_select(*args, **kwargs)
+
+    monkeypatch.setattr(select_mod, "select", counting_select)
+    try:
+        sr = run_cc_streaming(
+            [sys.executable, "-c", script],
+            prompt="",
+            env=_env(),
+            timeout_s=30,
+        )
+    finally:
+        monkeypatch.setattr(select_mod, "select", real_select)
+
+    assert sr.error is None
+    assert sr.session_id == "sess-early-close"
+    # Generous bound: the fixed loop needs ~2-4 selects for the whole
+    # 1.5s lingering window (plus the prompt/stdin iterations); the
+    # busy-spin regression shape is unbounded (>10k in 1.5s).
+    assert calls["n"] < 100, (
+        f"select() called {calls['n']} times — EOF fds are being "
+        "re-selected (busy spin)"
+    )
