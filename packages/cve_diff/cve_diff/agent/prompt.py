@@ -141,6 +141,9 @@ Approach:
      ``gh_commit_detail`` on the new pick to confirm.
    - ``orphan`` → no oracle data; ignore and proceed with your own
      verification.
+   - ``unknown`` → the oracle LOOKUP itself failed (network/transient),
+     not a statement about your pick; treat exactly like ``orphan`` —
+     no signal either way, never a confirmation or refutation.
    ``oracle_check`` counts toward the iteration budget. Default
    behavior should be: don't call it. Call it only on the genuine
    uncertainty cases above.
