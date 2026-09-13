@@ -1718,7 +1718,7 @@
     "kind": "literal"
   },
   "libexec/raptor-study-prep::out_data": {
-    "count": 10,
+    "count": 11,
     "kind": "literal"
   },
   "libexec/raptor-understand::_do_hunt": {
@@ -2004,7 +2004,7 @@
     "note": "host tool binary-name registry keyed to install advice (mirrors the RaptorConfig.TOOL_DEPS binaries), operator environment guidance, not target API vocabulary"
   },
   "packages/describe/report.py::doc": {
-    "count": 18,
+    "count": 19,
     "kind": "literal"
   },
   "packages/describe/tool_readiness.py::_BUILD_SYSTEM_DEPS": {
@@ -2236,7 +2236,7 @@
     "kind": "literal"
   },
   "packages/llm_analysis/orchestrator.py::orchestrate": {
-    "count": 34,
+    "count": 36,
     "kind": "literal"
   },
   "packages/llm_analysis/patch_gate.py::to_dict": {
