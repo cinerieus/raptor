@@ -8,7 +8,10 @@ try:
     _HAS_TS = True
 except ImportError:
     _HAS_TS = False
-pytestmark = pytest.mark.skipif(not _HAS_TS, reason="tree-sitter not installed")
+# Scoped, not module-wide: only the Go/JS sub-detectors go through
+# ts_extract — the Python sub-detectors are pure-ast and must keep
+# their coverage on tree-sitter-less runners.
+_needs_ts = pytest.mark.skipif(not _HAS_TS, reason="tree-sitter not installed")
 
 from core.audit.sentinel_collapse import detect_sentinel_collapses  # noqa: E402
 
@@ -256,6 +259,7 @@ async def fetch_items(key):
         assert findings[0].function == "fetch_items"
 
 
+@_needs_ts
 class TestGoSentinel:
     """Sub-detector (d): Go sentinel confusion."""
 
@@ -302,6 +306,7 @@ def lookup(key):
         assert len(go_findings) == 0
 
 
+@_needs_ts
 class TestJsSentinel:
     """Sub-detector (e): JS/TS sentinel confusion."""
 
