@@ -47,12 +47,14 @@ never the premise. Grade accordingly:
 
 The channel-local field index rides regex extraction (the
 ``lifecycle_collector.collect_field_sites_from_source`` shape) plus
-per-function attribution; when the shared field census
-(``core/audit/field_census.py``, phase A of this programme) lands, it
-supplies the same records with rhs-provenance tiers — fields only
-added, this module's consumers read dicts. Guard-dependent verdicts
-report ``census-degraded`` when the CFG leg is unavailable rather
-than guessing. No LLM calls, no subprocesses.
+per-function attribution. The shared field census
+(``core/audit/field_census.py``, used by ptr_lifecycle) exists and
+offers a tree-sitter tier plus alias-assignment contexts this
+regex-tier index lacks; migrating this module onto
+``build_field_census`` is future work — until then the two censuses
+are maintained separately. Guard-dependent verdicts report
+``census-degraded`` when the CFG leg is unavailable rather than
+guessing. No LLM calls, no subprocesses.
 """
 
 from __future__ import annotations
@@ -437,9 +439,11 @@ def _classify_rhs(rhs: str) -> str:
     rhs = rhs.strip()
     if not rhs:
         return "unknown"
-    if rhs in ("NULL", "nullptr", "0", "NULL;"):
-        return "literal_null" if not rhs.rstrip(";").isdigit() \
-            else "literal_const"
+    # "0" deliberately absent: the numeric-literal fullmatch below
+    # already classifies it literal_const, which is what the old
+    # inline conditional here resolved to.
+    if rhs in ("NULL", "nullptr", "NULL;"):
+        return "literal_null"
     if re.fullmatch(r"\d+[uUlL]*", rhs.rstrip(";")):
         return "literal_const"
     m = re.match(r"([A-Za-z_]\w*)\s*\(", rhs)
