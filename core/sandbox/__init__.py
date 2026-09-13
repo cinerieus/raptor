@@ -23,8 +23,14 @@ Six independent isolation layers (any combination may be active):
   `newuidmap`/`newgidmap` to set up the 0-->caller_uid mapping, the
   child then does all mount operations via ctypes BEFORE Landlock
   install (Landlock blocks mount topology changes on kernel 6.15+),
-  pivot_roots into the tmpfs, installs Landlock + seccomp, unshares
-  pid-ns and fork-execs the target as PID 1. Per-sandbox `/tmp` and
+  pivot_roots into the tmpfs, unshares pid-ns and forks the
+  GRANDCHILD, which mounts a fresh /proc for the new pid-ns and only
+  then installs Landlock + seccomp and execs the target. The target
+  runs as PID 2: PID 1 of the pid-ns is a minimal in-process waiter
+  (`_pid1_split_for_waiter`) that mirrors the target's exit status
+  (128+sig for signals) and forwards termination signals — a
+  PID-1-target would see kernel-distorted default signal handling.
+  Per-sandbox `/tmp` and
   `/run`, host `/usr`/`/lib`/`/etc` etc. bind-mounted read-only,
   caller's target + output bind-mounted at their ORIGINAL absolute
   paths (no argv rewriting needed). Requires the `uidmap` package
