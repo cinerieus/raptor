@@ -534,58 +534,68 @@ def run_landlock_audit(
             _close_safely(p_go_w)
             _close_safely(t_ready_r)
             _close_safely(t_ready_w)
-            if capture_output:
-                _close_safely(out_r)
-                _close_safely(err_r)
-                try:
-                    os.dup2(out_w, 1)
-                    os.dup2(err_w, 2)
-                finally:
-                    _close_safely(out_w)
-                    _close_safely(err_w)
-            # stdin: caller-supplied or /dev/null. Same shape as
-            # _spawn for parity (no PIPE on this path; that's a
-            # caller-side construct that wouldn't survive exec).
-            _use_devnull = (
-                stdin is None or stdin in (subprocess.DEVNULL, subprocess.PIPE)
-            )
-            if _use_devnull:
-                try:
-                    devnull = os.open("/dev/null", os.O_RDONLY)
-                    os.dup2(devnull, 0)
-                    os.close(devnull)
-                except OSError:
-                    pass
-            else:
-                try:
-                    stdin_fd = (stdin if isinstance(stdin, int)
-                                else stdin.fileno())
-                    os.dup2(stdin_fd, 0)
-                    if stdin_fd != 0:
-                        _close_safely(stdin_fd)
-                except (AttributeError, OSError):
+            # The guard starts HERE, before the stdio plumbing: a
+            # dup2/fileno failure (e.g. a caller-supplied stdin
+            # object whose fileno() raises ValueError — the closed-
+            # file shape; the inner handler catches only
+            # AttributeError/OSError) would otherwise unwind the
+            # FORKED child through this function's finally (running
+            # _cleanup_fds + evidence close in BOTH processes) and
+            # on into the caller's stack — the classic forked-
+            # child-runs-parent-code double execution _spawn's
+            # child guard already refuses.
+            try:
+                if capture_output:
+                    _close_safely(out_r)
+                    _close_safely(err_r)
+                    try:
+                        os.dup2(out_w, 1)
+                        os.dup2(err_w, 2)
+                    finally:
+                        _close_safely(out_w)
+                        _close_safely(err_w)
+                # stdin: caller-supplied or /dev/null. Same shape as
+                # _spawn for parity (no PIPE on this path; that's a
+                # caller-side construct that wouldn't survive exec).
+                _use_devnull = (
+                    stdin is None or stdin in (subprocess.DEVNULL, subprocess.PIPE)
+                )
+                if _use_devnull:
                     try:
                         devnull = os.open("/dev/null", os.O_RDONLY)
                         os.dup2(devnull, 0)
                         os.close(devnull)
                     except OSError:
                         pass
+                else:
+                    try:
+                        stdin_fd = (stdin if isinstance(stdin, int)
+                                    else stdin.fileno())
+                        os.dup2(stdin_fd, 0)
+                        if stdin_fd != 0:
+                            _close_safely(stdin_fd)
+                    except (AttributeError, OSError):
+                        try:
+                            devnull = os.open("/dev/null", os.O_RDONLY)
+                            os.dup2(devnull, 0)
+                            os.close(devnull)
+                        except OSError:
+                            pass
 
-            if start_new_session:
-                try:
-                    os.setsid()
-                except OSError:
-                    pass
+                if start_new_session:
+                    try:
+                        os.setsid()
+                    except OSError:
+                        pass
 
-            # cwd
-            if cwd is not None:
-                try:
-                    os.chdir(cwd)
-                except OSError:
-                    os._exit(126)
+                # cwd
+                if cwd is not None:
+                    try:
+                        os.chdir(cwd)
+                    except OSError:
+                        os._exit(126)
 
-            # rlimits + ptracer-any
-            try:
+                # rlimits + ptracer-any
                 if rlimit_preexec is not None:
                     rlimit_preexec()
                 _set_ptracer_any_in_child()
@@ -645,7 +655,7 @@ def run_landlock_audit(
                 os._exit(127)
             except PermissionError:
                 os._exit(126)
-            except Exception:  # noqa: BLE001 — post-fork guard; any failure must become an exit code, never a traceback in the child
+            except BaseException:  # noqa: BLE001 — post-fork guard; any failure must become an exit code, never a traceback in the child (BaseException: even SystemExit must not unwind the fork)
                 os._exit(125)
 
         # ============== PARENT after target fork ==============
@@ -710,7 +720,7 @@ def run_landlock_audit(
                 os._exit(127)
             except PermissionError:
                 os._exit(126)
-            except Exception:  # noqa: BLE001 — post-fork guard; any failure must become an exit code, never a traceback in the child
+            except BaseException:  # noqa: BLE001 — post-fork guard; any failure must become an exit code, never a traceback in the child (BaseException: even SystemExit must not unwind the fork)
                 os._exit(125)
 
         # ============== PARENT after tracer fork ==============
