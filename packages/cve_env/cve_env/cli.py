@@ -528,18 +528,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
 # they belong to. Stage order = pipeline order.
 #
 # Schema: lowercase keys ("research", "acquire") for end-of-run human report.
-# Three sibling tables exist with intentionally-different value schemas
+# A sibling table exists with an intentionally-different value schema
 # (kept apart because each serves a different consumer):
-#   - scripts/cve_evidence.py::_STAGE_BY_TOOL — 3-letter codes ("RES", "ACQ")
-#     for compact per-tool evidence JSONL rendering
-#   - scripts/heartbeat_status.sh::STAGE_BY_TOOL — long names ("RESEARCH",
-#     "ACQUIRE") for live human-readable heartbeat output
-#   - src/cve_env/config.py::TOOL_TO_STAGE — uppercase names
+#   - cve_env/config.py::TOOL_TO_STAGE — uppercase names
 #     for budget-engine per-stage cost attribution
-# When adding a new tool, update all four. Drift across the first three is
-# blocked by refactor/tests/unit/test_stage_table_sync.py; drift between
-# the first three and config.py is allowed only via the _KNOWN_DIVERGENCE
-# allowlist in that test.
+# When adding a new tool, update both. Drift between the two is allowed
+# only via the _KNOWN_DIVERGENCE allowlist in
+# tests/unit/test_stage_table_sync.py. (The upstream cve-env repo
+# carries two further script-side siblings; they are not vendored into
+# this tree.)
 _STAGE_BY_TOOL: dict[str, str] = {
     "nvd_lookup": "research",
     "github_fetch": "research",
@@ -556,11 +553,11 @@ _STAGE_BY_TOOL: dict[str, str] = {
     "run_in_container": "launch",
     "verify": "verify",
     "log_check": "verify",
-    # Non-pipeline tools — kept here so the sibling tables in
-    # scripts/cve_evidence.py and scripts/heartbeat_status.sh stay in sync
-    # (test_stage_table_sync.py enforces this). _STAGE_ORDER below limits
-    # the human report to the 5 pipeline stages, so these don't appear in
-    # the end-of-run summary even though they're tracked.
+    # Non-pipeline tools — kept here so the config.py sibling table
+    # stays in sync (test_stage_table_sync.py enforces this).
+    # _STAGE_ORDER below limits the human report to the 5 pipeline
+    # stages, so these don't appear in the end-of-run summary even
+    # though they're tracked.
     "give_up": "give_up",
     "ToolSearch": "meta",
     "Bash": "meta",

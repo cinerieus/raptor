@@ -163,12 +163,13 @@ of the cap-hit. Beyond this window the agent is presumed stuck."""
 # ResultMessages are attributed to the most-recently-called tool's stage.
 # Provides telemetry for budget engine.
 #
-# Sibling tables (different schemas, same conceptual mapping):
-#   - src/cve_env/cli.py::_STAGE_BY_TOOL — lowercase for end-of-run report
-#   - scripts/cve_evidence.py::_STAGE_BY_TOOL — 3-letter codes for evidence JSONL
-#   - scripts/heartbeat_status.sh::STAGE_BY_TOOL — long names for heartbeat
-# When adding a new tool, update all four. Sync (modulo documented
-# divergence) enforced by refactor/tests/unit/test_stage_table_sync.py.
+# Sibling table (different schema, same conceptual mapping):
+#   - cve_env/cli.py::_STAGE_BY_TOOL — lowercase for end-of-run report
+# When adding a new tool, update both. Sync (modulo the documented
+# divergence allowlist) enforced by
+# tests/unit/test_stage_table_sync.py. (The upstream cve-env repo
+# carries two further script-side siblings; they are not vendored
+# into this tree.)
 STAGES: tuple[str, ...] = (
     "RESEARCH",
     "RESOLVE",
