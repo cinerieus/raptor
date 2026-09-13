@@ -116,6 +116,20 @@ class _LiteralExtractor(ast.NodeVisitor):
         self._field_params: list[str] = [
             p for p in (param_names or []) if _FIELD_NAME_RE.match(p)
         ]
+        self._entered_root = False
+
+    def _visit_function(self, node: ast.AST) -> None:
+        # The first function node is the one being extracted; a NESTED
+        # def's literals belong to the nested function's own record
+        # (ast.walk in _extract_function_literals visits it separately)
+        # — descending here would double-attribute them.
+        if self._entered_root:
+            return
+        self._entered_root = True
+        self.generic_visit(node)
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
 
     # -- producers ----------------------------------------------------------
 
@@ -268,7 +282,14 @@ def _extract_function_literals(
     results: list[_FunctionLiterals] = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            param_names = [a.arg for a in node.args.args]
+            param_names = [
+                a.arg
+                for a in (
+                    node.args.posonlyargs
+                    + node.args.args
+                    + node.args.kwonlyargs
+                )
+            ]
             extractor = _LiteralExtractor(
                 file_path, node.name, param_names=param_names
             )

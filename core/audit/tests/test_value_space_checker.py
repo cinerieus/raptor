@@ -782,6 +782,30 @@ class TestDeadVisitorFlagsRemoved:
         assert not hasattr(extractor, "_in_membership")
 
 
+class TestNestedFunctionAttribution:
+    def test_nested_def_literals_not_double_attributed(self):
+        funcs = _extract_function_literals(
+            'def outer():\n'
+            '    def inner():\n'
+            '        return "inner_value"\n'
+            '    return "outer_value"\n',
+            "a.py",
+        )
+        by_name = {fl.function: fl for fl in funcs}
+        assert by_name["inner"].produced == {"inner_value"}
+        assert by_name["outer"].produced == {"outer_value"}
+
+    def test_posonly_and_kwonly_params_are_field_params(self):
+        funcs = _extract_function_literals(
+            'def f(ecosystem, /, *, severity):\n'
+            '    labels = {"PyPI": 1, "npm": 2}\n'
+            '    return labels\n',
+            "a.py",
+        )
+        assert len(funcs) == 1
+        assert funcs[0].field_produced == {"ecosystem", "severity"}
+
+
 class TestFieldHeuristicNoise:
     """Generic field names must not cross-product unrelated functions;
     pairs per field are capped."""
