@@ -43,8 +43,15 @@ def _manifest(p: Path) -> Manifest:
     )
 
 
-def _write_pkg(tmp_path: Path, scripts: dict, name: str = "victim") -> Path:
-    pkg = tmp_path / "package.json"
+def _write_pkg(tmp_path: Path, scripts: dict, name: str = "victim",
+               *, vendored: bool = False) -> Path:
+    pkg_dir = tmp_path
+    if vendored:
+        # node_modules/<name>/package.json — the layout that ATTESTS
+        # the self-declared name for the allowlist suppression.
+        pkg_dir = tmp_path / "node_modules" / name
+        pkg_dir.mkdir(parents=True)
+    pkg = pkg_dir / "package.json"
     pkg.write_text(
         json.dumps({"name": name, "version": "1.0.0", "scripts": scripts}),
         encoding="utf-8",
@@ -160,15 +167,15 @@ def test_worm_shape_credentials_plus_publish_fires_high(
     assert "self-replication" in findings[0].confidence.reason
 
 
-def test_worm_shape_suppressed_on_publish_helper_allowlist(
+def test_worm_shape_suppressed_on_vendored_publish_helper(
     tmp_path: Path,
 ) -> None:
-    """``semantic-release`` legitimately reads tokens AND publishes;
-    the C+G shape must NOT promote when the host package is in the
-    allowlist."""
+    """A VENDORED ``semantic-release`` (node_modules entry named by
+    the package manager) legitimately reads tokens AND publishes; the
+    C+G shape must NOT promote for the attested copy."""
     pkg = _write_pkg(tmp_path, {
         "postinstall": "cat ~/.npmrc && npm publish",
-    }, name="semantic-release")
+    }, name="semantic-release", vendored=True)
     findings = install_hooks.scan_manifests(
         [_manifest(pkg)], [_dep("semantic-release", declared_in=pkg)],
     )
@@ -178,19 +185,56 @@ def test_worm_shape_suppressed_on_publish_helper_allowlist(
     assert findings[0].severity == "low"
 
 
-def test_worm_shape_suppressed_on_scoped_publish_helper(
+def test_worm_shape_suppressed_on_vendored_scoped_publish_helper(
     tmp_path: Path,
 ) -> None:
-    """Scope prefix ``@semantic-release/*`` suppresses any package in
-    that scope."""
+    """Scope prefix ``@semantic-release/*`` suppresses any ATTESTED
+    package in that scope."""
     pkg = _write_pkg(tmp_path, {
         "postinstall": "cat ~/.npmrc && npm publish",
-    }, name="@semantic-release/github")
+    }, name="@semantic-release/github", vendored=True)
     findings = install_hooks.scan_manifests(
         [_manifest(pkg)], [_dep("@semantic-release/github", declared_in=pkg)],
     )
     assert len(findings) == 1
     assert findings[0].severity == "low"
+
+
+def test_self_declared_allowlist_name_does_not_suppress(
+    tmp_path: Path,
+) -> None:
+    """The allowlist name is self-declared in the scanned manifest: a
+    top-level package CLAIMING to be ``np`` (no vendored-path
+    attestation) keeps its worm-shape promotion — the exact evasion
+    the attestation requirement exists to stop."""
+    pkg = _write_pkg(tmp_path, {
+        "postinstall": "cat ~/.npmrc && npm publish",
+    }, name="np")
+    findings = install_hooks.scan_manifests(
+        [_manifest(pkg)], [_dep("np", declared_in=pkg)],
+    )
+    assert len(findings) == 1
+    assert findings[0].severity == "high"
+    assert "self-replication" in findings[0].confidence.reason
+
+
+def test_wrong_vendor_entry_name_does_not_attest(tmp_path: Path) -> None:
+    """node_modules/<other>/package.json declaring name=np: the
+    directory chain disagrees with the claim — no suppression."""
+    pkg_dir = tmp_path / "node_modules" / "innocent-lib"
+    pkg_dir.mkdir(parents=True)
+    pkg = pkg_dir / "package.json"
+    pkg.write_text(
+        json.dumps({"name": "np", "version": "1.0.0", "scripts": {
+            "postinstall": "cat ~/.npmrc && npm publish",
+        }}),
+        encoding="utf-8",
+    )
+    findings = install_hooks.scan_manifests(
+        [_manifest(pkg)], [_dep("np", declared_in=pkg)],
+    )
+    assert len(findings) == 1
+    assert findings[0].severity == "high"
 
 
 def test_credentials_without_publish_does_not_fire_worm_shape(

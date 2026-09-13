@@ -219,12 +219,78 @@ def load_publish_helpers() -> tuple[frozenset, frozenset]:
 
 
 def is_publish_helper(dep: Dependency) -> bool:
-    """True iff ``dep.name`` matches the publish-helpers allowlist."""
+    """True iff ``dep.name`` matches the publish-helpers allowlist.
+
+    Name-only check — for worm-shape SUPPRESSION decisions use
+    :func:`is_attested_publish_helper`: the name is self-declared in
+    the scanned manifest, so on its own it is attacker-satisfiable.
+    """
     exact, scopes = load_publish_helpers()
     name = dep.name or ""
     if name in exact:
         return True
     return any(name.startswith(scope) for scope in scopes)
+
+
+# Vendor directories whose entry layout binds a directory name to the
+# installed package's registry name (the package manager, not the
+# package, chooses the path). Used to corroborate a self-declared
+# allowlist name before it may suppress the worm-shape promotion.
+_VENDOR_DIR_NAMES = frozenset({
+    "node_modules", "vendor", "gems", "site-packages", "dist-packages",
+})
+
+
+def is_attested_publish_helper(dep: Dependency) -> bool:
+    """True iff ``dep.name`` is an allowlisted publish helper AND the
+    manifest's on-disk location corroborates that self-declared name.
+
+    The allowlist name comes from the scanned manifest itself, so a
+    malicious package could simply DECLARE ``"name": "np"`` and have
+    its credential-read+publish install hook demoted. Suppression
+    therefore requires attestation: the manifest must sit inside a
+    recognised vendor directory whose entry is named after the
+    package (``node_modules/np/package.json``, scoped npm
+    ``node_modules/@semantic-release/github/package.json``, RubyGems
+    ``gems/<name>-<version>/...``). A top-level project claiming an
+    allowlisted name gets NO suppression — its worm-shape hook fires
+    at full severity.
+
+    Residual (documented): a hostile repo that CHECKS IN a full
+    vendored path under the listed name still self-attests; that
+    requires committing the fake vendor tree, and the composite
+    chokepoint still sees the hook evidence.
+    """
+    if not is_publish_helper(dep):
+        return False
+    declared_in = dep.declared_in
+    if declared_in is None:
+        return False
+    parts = Path(declared_in).parts
+    name = dep.name or ""
+    if not name or len(parts) < 2:
+        return False
+    # Directory chain naming the package, immediately under a vendor
+    # dir. Scoped npm names span two path components.
+    name_parts = tuple(p for p in name.split("/") if p)
+    dirs = parts[:-1]
+
+    def _entry_matches(entry: str, leaf: str) -> bool:
+        # Exact, or gems-style "<name>-<version>" entry.
+        if entry == leaf:
+            return True
+        version = dep.version or ""
+        return bool(version) and entry == f"{leaf}-{version}"
+
+    n = len(name_parts)
+    if len(dirs) < n + 1:
+        return False
+    tail = dirs[-n:]
+    if not all(
+        _entry_matches(seg, leaf) for seg, leaf in zip(tail, name_parts)
+    ):
+        return False
+    return dirs[-n - 1] in _VENDOR_DIR_NAMES
 
 
 # ---------------------------------------------------------------------------

@@ -331,9 +331,33 @@ def test_python_worm_suppression_keys_on_own_name_not_first_dep(
     assert "self-replication" in findings[0].confidence.reason
 
 
-def test_python_worm_suppression_applies_when_package_is_helper(
+def test_python_worm_suppression_requires_attested_helper(
     tmp_path: Path,
 ) -> None:
+    """A VENDORED copy of an allowlisted helper (site-packages entry
+    named by the installer) keeps the suppression."""
+    pkg_dir = tmp_path / "site-packages" / "np"
+    pkg_dir.mkdir(parents=True)
+    py = pkg_dir / "pyproject.toml"
+    py.write_text("[project]\nname = 'np'\n", encoding="utf-8")
+    setup_py = pkg_dir / "setup.py"
+    setup_py.write_text(
+        "import subprocess\n"
+        "subprocess.run(['cat', '~/.pypirc'])\n"
+        "subprocess.run(['twine', 'upload', 'dist/*'])\n",
+        encoding="utf-8",
+    )
+    findings = python_lifecycle_hooks.scan_manifests(
+        [_manifest(py, "PyPI")], [],
+    )
+    assert findings == []
+
+
+def test_python_self_declared_helper_name_does_not_suppress(
+    tmp_path: Path,
+) -> None:
+    """A top-level project merely CLAIMING an allowlisted name gets no
+    suppression — the name is attacker-declared manifest content."""
     py = tmp_path / "pyproject.toml"
     py.write_text("[project]\nname = 'np'\n", encoding="utf-8")
     setup_py = tmp_path / "setup.py"
@@ -346,7 +370,8 @@ def test_python_worm_suppression_applies_when_package_is_helper(
     findings = python_lifecycle_hooks.scan_manifests(
         [_manifest(py, "PyPI")], [],
     )
-    assert findings == []
+    assert len(findings) == 1
+    assert "self-replication" in findings[0].confidence.reason
 
 
 def test_cargo_host_is_crate_own_name_not_first_dep(

@@ -63,7 +63,7 @@ def scan_manifests(
         worm_shape = (
             analysis.reads_credentials
             and analysis.has_publish_action
-            and not _hook_patterns.is_publish_helper(host)
+            and not _hook_patterns.is_attested_publish_helper(host)
         )
         if analysis.reasons:
             why = ", ".join(analysis.reasons)

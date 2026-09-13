@@ -190,14 +190,15 @@ def _scan_one(path: Path, host: Dependency) -> list[InstallHookFinding]:
             has_publish_action=analysis.has_publish_action,
         )
         # Phase 5 worm-shape: install hook reads credentials AND
-        # invokes a publish action.  Suppress when the host package
-        # is in the publish-helpers allowlist (semantic-release et
-        # al. legitimately do both at runtime; the malicious shape
-        # is doing it from an INSTALL hook on an unrelated package).
+        # invokes a publish action.  Suppress only for an ATTESTED
+        # publish helper — allowlisted name corroborated by a vendored
+        # path (node_modules/<name>/...): semantic-release et al.
+        # legitimately do both at runtime, but the name alone is
+        # self-declared manifest content an attacker can copy.
         worm_shape = (
             analysis.reads_credentials
             and analysis.has_publish_action
-            and not _hook_patterns.is_publish_helper(host)
+            and not _hook_patterns.is_attested_publish_helper(host)
         )
         if analysis.reasons:
             out.append(InstallHookFinding(
