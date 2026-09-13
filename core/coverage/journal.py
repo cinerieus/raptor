@@ -749,13 +749,33 @@ def latest_entries(out_dir: Path) -> dict[str, ReviewJournalEntry]:
 # ── Project-level index ──────────────────────────────────────────────
 
 def _flock(path: Path):
-    """Advisory flock on a .lock sidecar."""
+    """Advisory flock on a .lock sidecar.
+
+    O_NOFOLLOW + degrade-with-warning mirrors the store's
+    ``coverage_store_lock``: a planted symlink at the sidecar path
+    would otherwise make this process create and flock an
+    attacker-chosen path. A refused open degrades to the no-lock path
+    (same as non-POSIX) rather than crashing the merge.
+    """
     if not _HAS_FCNTL:
         yield
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(path.suffix + ".lock")
-    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    flags = (
+        os.O_WRONLY | os.O_CREAT
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(str(lock_path), flags, 0o600)
+    except OSError as exc:
+        logger.warning(
+            "journal index lock %s: refusing to open (%s); proceeding "
+            "WITHOUT cross-process lock — investigate a planted "
+            "symlink at that path", lock_path, exc)
+        yield
+        return
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:

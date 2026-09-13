@@ -77,3 +77,24 @@ def test_second_level_journals_not_merged(tmp_path):
     append_entry(deep, _entry("too_deep"))
 
     assert merge_run_into_index(project, run) == 0
+
+
+def test_flock_refuses_planted_symlink_sidecar(tmp_path, caplog):
+    """A planted symlink at the .lock sidecar must not be created
+    through (O_NOFOLLOW): degrade to the no-lock path with a loud
+    warning — same treatment as the store's coverage_store_lock."""
+    import logging
+
+    from core.coverage.journal import _flock
+
+    victim = tmp_path / "victim"
+    idx = tmp_path / "journal-index.json"
+    (tmp_path / "journal-index.json.lock").symlink_to(victim)
+    entered = False
+    with caplog.at_level(logging.WARNING):
+        with _flock(idx):
+            entered = True
+    assert entered
+    assert not victim.exists(), "flock followed the planted symlink"
+    assert any("WITHOUT cross-process lock" in r.message
+               for r in caplog.records)
