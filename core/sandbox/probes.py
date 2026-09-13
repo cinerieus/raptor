@@ -181,6 +181,58 @@ def unshare_supports_cgroup() -> bool:
         return False
 
 
+def _staged_pidns_selftest() -> bool:
+    """Fork a child that runs the spawn backend's exact two-step
+    namespace pattern: ``os.unshare(CLONE_NEWUSER)`` then a SECOND
+    ``os.unshare(CLONE_NEWPID)`` with no exec in between.
+
+    Restricted-userns hosts (Ubuntu's AppArmor transition; GitHub
+    runners) allow single-call multi-namespace creation but deny the
+    staged second call with EPERM — the shape the flat CLI engagement
+    probe cannot see. In-process on purpose: the userns creator keeps
+    full capabilities in the new namespace until an exec recalculates
+    them, and the real spawn stages its pid-ns unshare in-process too,
+    so an exec'd CLI form of this check false-negatives on capable
+    hosts. Same fork/exit-code discipline as the sibling functional
+    self-tests; the child is two ``os.unshare`` calls + ``os._exit``.
+    Exit codes: 0 engaged; 190 the userns itself refused (the flat CLI
+    probe reports that case with its own diagnostic); errno otherwise.
+    """
+    _CLONE_NEWUSER = getattr(os, "CLONE_NEWUSER", 0x10000000)
+    _CLONE_NEWPID = getattr(os, "CLONE_NEWPID", 0x20000000)
+    import warnings as _warnings
+    with _warnings.catch_warnings():
+        _warnings.filterwarnings(
+            "ignore", category=DeprecationWarning,
+            message=r".*fork.*may lead to deadlocks.*",
+        )
+        pid = os.fork()
+    if pid == 0:
+        try:
+            os.unshare(_CLONE_NEWUSER)
+        except BaseException:
+            os._exit(190)
+        try:
+            os.unshare(_CLONE_NEWPID)
+        except OSError as e:
+            os._exit((e.errno or 250) & 0xFF)
+        except BaseException:
+            os._exit(250)
+        os._exit(0)
+    try:
+        _, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return False
+    if not os.WIFEXITED(status):
+        return False
+    code = os.WEXITSTATUS(status)
+    # 190 = the user namespace itself refused; that is the flat CLI
+    # probe's case to diagnose (its stderr names the real reason), not
+    # a staged-creation refusal — don't mask it with this helper's
+    # message.
+    return code in (0, 190)
+
+
 def check_unshare_engages(unshare_flags) -> tuple:
     """Return (engages, reason) for the EXACT unshare flag-set a real run uses.
 
@@ -195,6 +247,16 @@ def check_unshare_engages(unshare_flags) -> tuple:
     real run depends on. Namespace creation is a deterministic kernel
     check (not data-dependent), so a pass here means the real wrapper will
     engage too.
+
+    Scope note: this single-call CLI probe cannot see the STAGED
+    creation pattern the spawn backend uses (a second
+    ``os.unshare(CLONE_NEWPID)`` from inside the new user namespace) —
+    restricted-userns hosts allow the single call and refuse the staged
+    one. That host class is excluded UPSTREAM: the namespace-backend
+    foundation probe (``check_net_available`` →
+    ``_staged_pidns_selftest``) reports the whole backend unavailable
+    there, so backend selection routes to the degraded lanes and this
+    gate is never consulted.
 
     ``unshare_flags`` is the namespace flag list WITHOUT the ``unshare``
     binary or the ``-- cmd`` tail, e.g.
@@ -434,6 +496,25 @@ def _probe_net_available() -> bool:
             logger.debug("Sandbox: network test failed: %s", result.stderr.strip())
             return False
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+    # Namespace CREATION alone is not the backend: the fork-based spawn
+    # stages a second os.unshare(CLONE_NEWPID) from inside the new user
+    # namespace, and restricted-userns hosts (Ubuntu's AppArmor
+    # transition — GitHub runners, live-confirmed from run artifacts)
+    # allow every single-call creation above while refusing that staged
+    # second call with EPERM. On such hosts the CLI probe passes, every
+    # namespace-backed run then dies mid-child (silent rc-126 empty
+    # results, demotion warnings for calls that were promised
+    # isolation), and the capability-gated test suite mis-runs. Treat
+    # the staged refusal as "no namespace backend": backend selection
+    # then routes to the same degraded lanes an outright userns denial
+    # gets — deny-all TCP via Landlock, floor consent, honest skips.
+    if not _staged_pidns_selftest():
+        logger.debug(
+            "Sandbox: staged pid-namespace creation refused "
+            "(restricted unprivileged user namespaces) — namespace "
+            "backend unavailable")
         return False
 
     return True

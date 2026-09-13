@@ -239,6 +239,41 @@ class TestLayerFunctionalSelfTests:
                 lambda pid, opts, _s=child_exit << 8: (12345, _s))
             assert _mount_ns_functional_selftest() is expected, child_exit
 
+    def test_staged_pidns_selftest_maps_child_exits(self, monkeypatch):
+        # Exit 0 = staged creation engaged; 190 = the userns itself
+        # refused (the flat CLI probe's case to diagnose — not a
+        # staged refusal, so it must NOT flip this helper); any errno
+        # = the staged unshare(CLONE_NEWPID) was refused (the
+        # restricted-userns class live-confirmed on GitHub runners).
+        import os as _os
+
+        from core.sandbox.probes import _staged_pidns_selftest
+
+        for child_exit, expected in ((0, True), (190, True), (1, False),
+                                     (13, False), (250, False)):
+            monkeypatch.setattr(_os, "fork", lambda: 12345)
+            monkeypatch.setattr(
+                _os, "waitpid",
+                lambda pid, opts, _s=child_exit << 8: (12345, _s))
+            assert _staged_pidns_selftest() is expected, child_exit
+
+    def test_net_probe_keys_on_staged_selftest(self):
+        # The namespace-backend foundation probe must agree with the
+        # staged self-test: on hosts that allow single-call namespace
+        # creation but refuse the spawn backend's staged
+        # unshare(CLONE_NEWPID), check_net_available() must report the
+        # backend unavailable so backend selection routes to the
+        # degraded lanes instead of dying mid-child on every run
+        # (live-confirmed failure mode on GitHub runners).
+        from core.sandbox.probes import (
+            _staged_pidns_selftest,
+            check_net_available,
+        )
+        if not _staged_pidns_selftest():
+            assert check_net_available() is False
+        # (On staged-capable hosts the CLI creation probe owns the
+        # verdict — True or a host-specific False both legal.)
+
     def test_mount_probe_consistent_with_selftest(self):
         # Mirrors the seccomp consistency test: the cached availability
         # verdict may report True only on hosts where the functional

@@ -1767,7 +1767,13 @@ class TestNetProbeLockDiscipline(unittest.TestCase):
             )
             return mock.Mock(returncode=0, stderr=b"")
 
-        with mock.patch.object(probes.subprocess, "run", fake_run):
+        # Pin the staged pid-ns self-test too: this test asserts LOCK
+        # DISCIPLINE, not host shape, and on restricted-userns hosts
+        # the real self-test correctly reports the backend unavailable
+        # even when the mocked CLI probe "succeeds".
+        with mock.patch.object(probes.subprocess, "run", fake_run), \
+                mock.patch.object(probes, "_staged_pidns_selftest",
+                                  return_value=True):
             result = probes.check_net_available()
 
         # The probe may exit before the subprocess stage (missing
