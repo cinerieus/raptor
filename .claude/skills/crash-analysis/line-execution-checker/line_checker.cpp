@@ -4,7 +4,6 @@
 
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,32 +16,52 @@ struct Query {
     int line;
 };
 
-// Parse .gcov file to extract execution counts
+// Parse .gcov file to extract execution counts.
+//
+// Real gcov lines are printed as "%9s:%5d:%s" — the count and line
+// number are whitespace-padded with the colon attached to the field
+// ("        1:    3:puts(...)"), so whitespace-token extraction never
+// sees a bare ':' token. Split on the first two colons instead.
 std::unordered_map<int, uint64_t> parse_gcov_file(const std::string& filename) {
     std::unordered_map<int, uint64_t> line_counts;
     std::ifstream file(filename);
     if (!file.is_open()) return line_counts;
-    
+
     std::string line;
     while (std::getline(file, line)) {
-        // Format: "count:line_num:source"
-        // Skip header lines
-        if (line.find(":    0:") != std::string::npos) continue;
-        
-        std::istringstream iss(line);
-        std::string count_str;
+        // Format: "     count:  line_num:source"
+        size_t colon1 = line.find(':');
+        if (colon1 == std::string::npos) continue;
+        size_t colon2 = line.find(':', colon1 + 1);
+        if (colon2 == std::string::npos) continue;
+
+        std::string count_str = line.substr(0, colon1);
+        std::string line_str = line.substr(colon1 + 1, colon2 - colon1 - 1);
+
+        // Strip the leading padding.
+        count_str.erase(0, count_str.find_first_not_of(" \t"));
+        line_str.erase(0, line_str.find_first_not_of(" \t"));
+        if (count_str.empty() || line_str.empty()) continue;
+
         int line_num;
-        char c1, c2;
-        
-        iss >> count_str >> c1 >> line_num >> c2;
-        if (c1 != ':' || c2 != ':') continue;
-        
-        // Parse count: "#####" = 0, "-" = non-executable, else number
+        try {
+            line_num = std::stoi(line_str);
+        } catch (...) {
+            continue;
+        }
+        // Line 0 carries file-level metadata (Source:, Graph:, Runs:).
+        if (line_num <= 0) continue;
+
+        // Count field: "-" = non-executable, "#####" (and "=====" for
+        // exceptional-only paths) = executable but never executed,
+        // otherwise a number — possibly suffixed ("12*" marks partial
+        // coverage; stoull stops at the '*').
         uint64_t count = 0;
-        if (count_str.find("#####") != std::string::npos) {
-            count = 0;
-        } else if (count_str.find("-") != std::string::npos) {
+        if (count_str == "-") {
             continue; // Non-executable
+        } else if (count_str.find("#####") != std::string::npos ||
+                   count_str.find("=====") != std::string::npos) {
+            count = 0;
         } else {
             try {
                 count = std::stoull(count_str);
@@ -50,10 +69,10 @@ std::unordered_map<int, uint64_t> parse_gcov_file(const std::string& filename) {
                 continue;
             }
         }
-        
+
         line_counts[line_num] = count;
     }
-    
+
     return line_counts;
 }
 
