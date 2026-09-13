@@ -295,8 +295,20 @@ jobs:
       # category so the merged multi-run upload below covers all
       # three configs and the meta-check sees a complete baseline
       # match.
+      #
+      # PR / merge_group ONLY: the stub exists for the meta-check
+      # race on proposed refs. GitHub treats an upload for the same
+      # (tool, category, ref) as a REPLACEMENT of the previous
+      # analysis, so a zero-result stub uploaded for refs/heads/main
+      # (e.g. a docs-only direct push, or a merge whose PR-head run
+      # the dedup didn't find) would close that category's open
+      # alerts as no-longer-detected until the next real analysis.
+      # On push, gated-out languages upload nothing instead — their
+      # existing main-branch analysis stays authoritative.
       - name: Write empty SARIF for skipped language
-        if: steps.gate.outputs.run != 'true'
+        if: >-
+          steps.gate.outputs.run != 'true' &&
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group')
         env:
           LANG_NAME: ${{ matrix.language }}
         run: |
@@ -341,8 +353,14 @@ jobs:
           print(json.dumps(doc))
           PY
 
+      # Skipped when this entry produced no SARIF (gated-out language
+      # on a push — see the stub step above): if-no-files-found: error
+      # must keep guarding the paths that DO produce one.
       - name: Stash SARIF as artifact for atomic upload
-        if: needs.pre_check.outputs.should_skip != 'true'
+        if: >-
+          needs.pre_check.outputs.should_skip != 'true' &&
+          (steps.gate.outputs.run == 'true' ||
+           github.event_name == 'pull_request' || github.event_name == 'merge_group')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # was v7.0.1
         with:
           name: sarif-${{ matrix.language }}
@@ -354,8 +372,21 @@ jobs:
   # into a single SARIF document and uploads in one POST so GitHub's
   # CodeQL meta-check sees all configs in one shot.
   upload:
-    needs: [pre_check, analyze]
-    if: needs.pre_check.outputs.should_skip != 'true'
+    needs: [pre_check, changes, analyze]
+    # Skip entirely when no matrix entry produced a SARIF: on push,
+    # gated-out languages write no stub (see the stub step), so an
+    # all-gated push (e.g. docs-only direct push) has nothing to
+    # upload — and MUST upload nothing, or main's per-category alert
+    # baselines would be replaced by empty analyses. PR / merge_group
+    # always have all three (stubs fill the gaps); force_full events
+    # analyse everything.
+    if: >-
+      needs.pre_check.outputs.should_skip != 'true' &&
+      (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
+       needs.changes.outputs.force_full == 'true' ||
+       needs.changes.outputs.codeql_python == 'true' ||
+       needs.changes.outputs.codeql_cpp == 'true' ||
+       needs.changes.outputs.codeql_actions == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
