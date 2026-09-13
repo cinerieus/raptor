@@ -55,6 +55,12 @@ logger = logging.getLogger(__name__)
 
 RULE_ID = "api_boundary:caller-contract"
 
+#: Evidence marker for a bounded-contract site whose argument is a
+#: pinned integer literal — decidable in neither direction without
+#: the numeric bound.  Consumers key aggregate prose off this string;
+#: keep it in sync with the ``bounded`` branch of ``_check_site``.
+BOUNDED_CONST_EVIDENCE_MARKER = "pinned to compile-time constant"
+
 _IDENT = r"[A-Za-z_]\w*"
 
 # Hypothesis shapes that assert caller/boundary obligations.
@@ -167,7 +173,8 @@ _CALLER_CONDITIONAL_RE = re.compile(
 class Contract:
     """One asserted caller obligation, bound to a callee parameter."""
 
-    kind: str          # "null" | "negative" | "single_call" | "external"
+    # "null" | "negative" | "single_call" | "bounded" | "external"
+    kind: str
     param: str = ""    # callee parameter name ("" for external)
     param_index: int = -1
 
@@ -180,6 +187,11 @@ class Contract:
             return (
                 f"callers must not invoke again on the same "
                 f"{self.param} (single-call contract)"
+            )
+        if self.kind == "bounded":
+            return (
+                f"callers must keep {self.param} within the bound "
+                "the flagged arithmetic assumes"
             )
         return f"callers must not pass negative {self.param}"
 
@@ -1010,6 +1022,52 @@ def _check_site(
     if contract.kind == "single_call":
         return _check_single_call_site(site, check, base, callee, arg)
 
+    if contract.kind == "bounded":
+        # A bounded contract carries no concrete numeric bound (the
+        # receipt that asserted it does not carry one across the
+        # promotion boundary), so a pinned integer literal is
+        # decidable in NEITHER direction: it cannot be judged
+        # violating (no bound to exceed) and it must not be graded
+        # upholding (the pinned value may itself exceed the bound the
+        # flagged arithmetic assumes).  Literals stay "undecided"
+        # with a constant-specific receipt, and the kind never
+        # returns "unguarded" — the aggregate can refute
+        # (sizeof-bounded sites) or decline, never confirm.
+        if re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|\d+)[uUlL]*", stripped):
+            check.evidence = (
+                f"operand {BOUNDED_CONST_EVIDENCE_MARKER} {stripped} "
+                "— no numeric bound available to adjudicate"
+            )
+            return check
+        # Tested on the raw argument: the cast-stripper reads a
+        # parenthesised type operand ("sizeof(int)") as a cast.
+        if re.match(r"sizeof\s*\(", arg):
+            check.verdict = "guarded"
+            check.evidence = (
+                "sizeof-valued argument — bounded by an in-repo "
+                "object/type size"
+            )
+            return check
+        if base:
+            guard = re.search(
+                rf"(?:if|while|assert\w*|BUG_ON|ASSERT|CHECK)\s*\("
+                rf"[^;)]*\b{re.escape(base)}\b\s*(?:<=?|>=?|==)",
+                window,
+            )
+            if guard:
+                check.verdict = "guarded"
+                check.grade = "lexical"
+                check.evidence = (
+                    f"range check in the window (lexical — no "
+                    f"dominance proof): {guard.group(0).strip()}"
+                )
+                return check
+        check.evidence = (
+            "argument not provably bounded (no sizeof, no range "
+            "check in the window)"
+        )
+        return check
+
     check.evidence = f"unsupported contract kind {contract.kind!r}"
     return check
 
@@ -1398,6 +1456,33 @@ def run_api_boundary_check(
             contract=contract.describe(),
         )
 
+    return adjudicate_contract(
+        target_path,
+        file_path,
+        function_name,
+        contract,
+        inventory=inventory,
+        def_span=def_span,
+    )
+
+
+def adjudicate_contract(
+    target_path: Path,
+    file_path: str,
+    function_name: str,
+    contract: Contract,
+    *,
+    inventory: dict[str, Any] | None = None,
+    def_span: tuple[int, int] | None = None,
+) -> ApiBoundaryResult:
+    """Adjudicate one already-bound caller obligation at the API
+    boundary: enumerate in-repo call sites and grade each against the
+    contract.  Shared tail of :func:`run_api_boundary_check` for
+    callers that carry a :class:`Contract` directly (e.g. a
+    precondition re-derived from a tool receipt) instead of a prose
+    hypothesis; verdict and honesty semantics are identical (see
+    module docstring)."""
+    target_path = Path(target_path)
     sites, report = enumerate_call_sites_with_report(
         target_path,
         function_name,
