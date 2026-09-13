@@ -769,6 +769,9 @@
     "count": 50,
     "kind": "literal"
   },
+  "core/audit/promotion_alarm.py::record": {
+    "note": "degraded alarm-record field keys (JSONL trail schema written when build_alarm_record itself fails) \u2014 a serialization schema, not an API vocabulary"
+  },
   "core/audit/prompt_defence.py::_INJECTION_PATTERNS": {
     "count": 13,
     "kind": "alternation"
