@@ -3663,12 +3663,17 @@ def review_one_function(
             seen_keys = (reviewed_set or set()) | {
                 f"{g['file']}:{g['name']}" for g in (workqueue or [])
             }
+            # Writers mutate quarantined_rules under _rule_triage_lock;
+            # copy under the same lock or a concurrent quarantine can
+            # raise "set changed size during iteration" here.
+            with shared._rule_triage_lock:
+                quarantined_snapshot = set(shared.quarantined_rules)
             synth = synthesize_and_sweep(
                 outcome,
                 config,
                 seen_keys,
                 synthesis_count=result.synthesis_amplified,
-                quarantined_rules=set(shared.quarantined_rules),
+                quarantined_rules=quarantined_snapshot,
             )
             if synth and synth.cost_usd:
                 result.cost_tracker.record_call(
