@@ -69,8 +69,11 @@ jobs:
         # Exit 0 = at least one source produced output; exit 1 = every
         # source failed (a global outage, retried next schedule). A
         # single source drifting does NOT fail the run or discard the
-        # rest. (GHA's default shell sets pipefail, so the script's
-        # exit code propagates through the ``tee``.)
+        # rest. (``shell: bash`` sets pipefail so the script's exit
+        # code propagates through the ``tee``; GHA's DEFAULT shell is
+        # ``bash -e`` only, which would let tee swallow it and leave a
+        # global source outage green indefinitely.)
+        shell: bash
         run: |
           # Log to $RUNNER_TEMP (persists across steps, outside the
           # worktree) so it can't be swept into the commit if the scoped
