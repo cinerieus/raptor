@@ -31,13 +31,17 @@ def _read_manifest_lines(manifest_path: Path) -> set[str]:
     consumer (``build_from_manifest``, ``build_from_findings``) gets
     the same reader-writer coordination and memory ceiling.
 
-    Hold a shared flock during the read so an in-flight writer (the
-    PostToolUse hook in plugins/coverage/) can't interleave a partial
-    line into our buffered iteration — the hook side serialises
-    appends via flock LOCK_EX on the same path; taking LOCK_SH here
-    completes the coordination. fcntl.flock is non-fatal: on platforms
-    without flock (Windows; raptor doesn't really support them but the
-    import is best-effort) we fall back to an unlocked read.
+    Line integrity against in-flight writers (the PostToolUse hook in
+    plugins/coverage/) comes from the writers themselves: both hook
+    writers (the bash ``raptor-hook-json _append`` helper and
+    track_read.py) emit each line as a single lock-free
+    ``O_APPEND`` write, which POSIX keeps un-interleaved. The LOCK_SH
+    taken here is belt-and-braces only — it no longer pairs with a
+    writer-side LOCK_EX (that serialisation was removed) and guards
+    solely against hypothetical non-append writers. fcntl.flock is
+    non-fatal: on platforms without flock (Windows; raptor doesn't
+    really support them but the import is best-effort) we fall back
+    to an unlocked read.
 
     Use ``rstrip("\r\n")`` not ``strip()`` — the latter also trims
     leading/trailing spaces, but POSIX permits filenames that

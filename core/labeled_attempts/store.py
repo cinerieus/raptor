@@ -4,7 +4,7 @@ Three-tier pool:
 
   Bundled demo corpus      packages/llm_analysis/exploit_engine/eval/bundled_corpus/
                             ships with each RAPTOR release; immutable per release
-  Per-project (default)    <project>/labeled_attempts/<finding_id>/<oracle>-<ts>.json
+  Per-project (default)    <project>/labeled_attempts/<finding_signature>/<oracle>-<ts>.json
                             operator-owned, per-engagement, default writable
   Cross-project global     ~/.raptor/labeled_attempts/<finding_sig>/...
                             opt-in via ``/project corpus enable``

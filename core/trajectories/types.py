@@ -43,8 +43,9 @@ class TrajectoryStep:
     assistant turns. ``tool_results`` is a list of
     ``{tool_use_id, content, is_error}`` dicts for user turns.
 
-    Text and tool-result content are truncated at :data:`_MAX_TEXT_LEN`
-    in :func:`store.serialize_messages` to keep individual trajectories
+    Text and tool-result content are truncated at
+    ``store._MAX_TEXT_LEN`` (defined in :mod:`core.trajectories.store`)
+    by :func:`store.serialize_messages` to keep individual trajectories
     bounded. Truncation is indicated with a ``...[truncated N chars]``
     suffix.
     """

@@ -6,7 +6,7 @@ logic in Python so test_record.py can exercise coverage tracking
 in-process without shelling out to the bash hook.
 
 Not used in production. Extension list must stay in sync with the
-bash hook's case statement (line 185 of raptor-hook-read).
+extension case statement in raptor-hook-read.
 """
 
 import json
