@@ -46,6 +46,14 @@ def normalise_path(path: str, repo_root: str) -> str:
 # mutation of an already-indexed entry is not detected (nothing in the
 # enrichment pipeline rewrites entry paths mid-run) — item/line edits
 # are always safe because lookups read the live entry dicts.
+# Same limitation, one step wider: SAME-LENGTH in-place ENTRY
+# replacement (``files[i] = new_entry_dict``) keeps both identity and
+# length, so the index would keep serving the replaced-out dict. No
+# pipeline site does this either (swept: builders construct fresh
+# lists; fixture_detection's ``d["path"]`` writes to a fresh
+# ``to_dict`` copy) and it is not hostile-reachable — but a future
+# caller that swaps entries in place must rebuild or drop the list
+# object (fresh list = fresh id = fresh index).
 #
 # Bound trade-off: larger keeps more checklists' indexes (and their
 # files lists) pinned in memory — checklists on big targets reach tens
