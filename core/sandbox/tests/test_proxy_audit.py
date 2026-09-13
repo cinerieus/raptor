@@ -48,6 +48,18 @@ def active_run(tmp_path):
     summary_mod.set_active_run_dir(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_resolver(hermetic_invalid_dns):
+    """Every CONNECT target in this file is a literal IP or an RFC 2606
+    ``.invalid`` name. The conftest stub answers ``.invalid`` instantly,
+    so no test rides the host resolver's NXDOMAIN latency — macOS
+    runners have taken longer than ``_send_connect``'s 5s read budget
+    to fail one, timing the client out before the proxy's 502 arrived.
+    (TestProxyResolverFailureShapes layers its own per-test resolver
+    stub on top — both patches ride the same shared monkeypatch undo
+    stack, so teardown unwinds LIFO back to the pristine method.)"""
+
+
 def _send_connect(port: int, target: str, timeout: float = 5.0) -> tuple:
     """Send a CONNECT request to a proxy on (127.0.0.1, port).
 

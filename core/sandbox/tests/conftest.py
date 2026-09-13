@@ -35,6 +35,70 @@ def short_sock_dir():
         shutil.rmtree(d, ignore_errors=True)
 
 
+@pytest.fixture
+def hermetic_invalid_dns(monkeypatch):
+    """Deterministic NXDOMAIN for RFC 2606 ``.invalid`` CONNECT targets.
+
+    Several proxy tests use ``.invalid`` hostnames as guaranteed-failing
+    resolve targets. The GUARANTEE is only about the outcome — the
+    latency and exception detail come from the host's live resolver,
+    and platform resolvers differ wildly: glibc fails an NXDOMAIN
+    immediately, while macOS (search-domain retries through
+    mDNSResponder) has been observed taking longer than a test client's
+    5s read budget, so the proxy's 502 arrived after the client gave
+    up. Stub the proxy's resolve seam for ``.invalid`` names — instant
+    gaierror, no resolver in the loop — and delegate every other name
+    (e.g. ``localhost``, literal IPs) to the real lookup.
+
+    The patch MUST go through the shared ``monkeypatch`` fixture, not a
+    manual save/restore: tests layer their own ``monkeypatch.setattr``
+    on the same class attribute, and a manual ``finally`` restore runs
+    BEFORE that monkeypatch's undo — which then re-installs the value
+    it saved at setattr time (this fixture's stub), leaking the stub
+    onto the class for the rest of the process. One shared undo stack
+    unwinds LIFO and always lands back on the pristine method (the
+    session-end seam guard below trips if that ever regresses).
+    """
+    import socket as _socket
+
+    from core.sandbox import proxy as _proxy_mod
+
+    real = _proxy_mod.EgressProxy._cached_getaddrinfo
+
+    async def _stubbed(self, host, port):
+        if host.endswith(".invalid"):
+            raise _socket.gaierror(
+                _socket.EAI_NONAME, "Name or service not known")
+        return await real(self, host, port)
+
+    monkeypatch.setattr(_proxy_mod.EgressProxy, "_cached_getaddrinfo",
+                        _stubbed)
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _resolver_seam_leak_guard():
+    """Leak tripwire for the proxy resolve seam.
+
+    Session-scoped so its teardown runs after every function-scoped
+    fixture (including ``monkeypatch``, which instantiates early — it
+    is requested by root-conftest autouse fixtures — and therefore
+    finalizes after any function-scoped guard could). If any test or
+    fixture leaves a stub on ``EgressProxy._cached_getaddrinfo``, the
+    whole session fails loudly here instead of silently running every
+    later module against the stub.
+    """
+    from core.sandbox import proxy as _proxy_mod
+
+    pristine = _proxy_mod.EgressProxy._cached_getaddrinfo
+    yield
+    current = _proxy_mod.EgressProxy._cached_getaddrinfo
+    assert current is pristine, (
+        f"EgressProxy._cached_getaddrinfo leaked a test stub past its "
+        f"test: {current!r} (pristine: {pristine!r})"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _consent_env_guard():
     """Strip the degraded-untrusted consent variable around every test.

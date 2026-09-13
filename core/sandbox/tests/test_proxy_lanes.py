@@ -69,7 +69,8 @@ def _drive_connect(s: socket.socket, target: str) -> int:
 
 class TestUnixLaneIsolation:
     def test_audit_bit_scoped_to_one_lane(self, reset_proxy,
-                                          short_sock_dir):
+                                          short_sock_dir,
+                                          hermetic_invalid_dns):
         proxy = proxy_mod.EgressProxy(allowed_hosts={"allowed.example"})
         path_a = str(short_sock_dir / "a.sock")
         path_b = str(short_sock_dir / "b.sock")
