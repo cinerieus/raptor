@@ -441,3 +441,25 @@ class TestCRegexFallback:
         seqs = _extract_sequences_c_regex("app.c", src)
         assert len(seqs) == 1
         assert seqs[0].function == "handle"
+
+
+class TestAllDuplicatesReported:
+    def test_multiple_distinct_duplicates_all_reported(self):
+        """The check used to stop at the first duplicate per chain."""
+        src = textwrap.dedent("""\
+            def process(data):
+                data = custom_sanitize(data)
+                data = validate_input(data)
+                data = custom_sanitize(data)
+                data = validate_input(data)
+                return data
+        """)
+        violations = detect_transform_order_violations({"app.py": src})
+        dups = [
+            v for v in violations
+            if v.catalog_rule == "duplicate_transform"
+        ]
+        assert len(dups) == 2
+        names = " ".join(v.violation for v in dups)
+        assert "custom_sanitize" in names
+        assert "validate_input" in names

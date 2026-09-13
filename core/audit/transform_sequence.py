@@ -360,7 +360,6 @@ def _check_duplicate_transforms(
                 confidence="medium",
                 catalog_rule="duplicate_transform",
             ))
-            break
         seen[name] = i
 
     return violations
@@ -452,11 +451,6 @@ class _SequenceExtractor(ast.NodeVisitor):
                 parts = self._dotted_name(node.func)
                 return parts, _first_arg_summary(node)
             return "", ""
-
-        # Method chain: x.strip().lower().replace(...)
-        # Walk leftward collecting the chain.
-        if isinstance(node, ast.Call):
-            pass  # handled above
         return "", ""
 
     @staticmethod
