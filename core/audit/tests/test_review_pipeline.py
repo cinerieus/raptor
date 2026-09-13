@@ -186,6 +186,62 @@ void *alloc_obj(size_t n) {
         )
         assert not result.skip_llm
 
+    def _py_wrapper(self, body: str):
+        from core.audit.prefilter import run_prefilter
+        return run_prefilter(
+            target_path=Path("/tmp"),
+            file_path="wrap.py",
+            function_name="f",
+            source=f"def f(arg):\n    return {body}\n",
+            line_start=1,
+        )
+
+    def test_shell_true_wrapper_keeps_its_hit_and_review(self):
+        # A one-line delegate to subprocess.run(cmd, shell=True) fires
+        # an error-grade hit on its own line; the wrapper skip must
+        # not resolve the function mechanically clean over it.
+        result = self._py_wrapper("subprocess.run(arg, shell=True)")
+        assert any(
+            h.rule_id == "subprocess-shell-true" for h in result.hits
+        )
+        assert not result.skip_llm
+
+    def test_pickle_loads_wrapper_not_skipped(self):
+        result = self._py_wrapper("pickle.loads(arg)")
+        assert any(h.rule_id == "pickle-untrusted" for h in result.hits)
+        assert not result.skip_llm
+
+    def test_yaml_load_wrapper_not_skipped(self):
+        result = self._py_wrapper("yaml.load(arg)")
+        assert any(h.rule_id == "yaml-unsafe-load" for h in result.hits)
+        assert not result.skip_llm
+
+    def test_dotted_dangerous_delegate_not_skipped(self):
+        # No hit fires for shell-less subprocess.run, so this pins the
+        # DOTTED callee match: the bare-word capture compared "run"
+        # against the dotted _DANGEROUS_PY_APIS entries and never
+        # excluded it.
+        result = self._py_wrapper("subprocess.run(arg)")
+        assert not result.hits
+        assert not result.skip_llm
+
+    def test_bare_imported_dangerous_tail_not_skipped(self):
+        # `from pickle import loads` — the bare tail of a dotted
+        # dangerous entry must exclude too.
+        result = self._py_wrapper("loads(arg)")
+        assert not result.skip_llm
+
+    def test_other_language_callee_sets_excluded(self):
+        # The wrapper exclusion must not be narrower than
+        # _is_trivially_clean's per-language dangerous-callee sets
+        # (body-only shape: the signature line usually saves these by
+        # accident, which is no contract).
+        from core.audit.prefilter import _is_trivial_wrapper
+        is_wrapper, _ = _is_trivial_wrapper(
+            "\treturn exec.Command(c)\n", "go", None,
+        )
+        assert not is_wrapper
+
 
 # ── Multi-language prefilter patterns ─────────────────────────────
 

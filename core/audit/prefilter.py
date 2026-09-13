@@ -497,7 +497,12 @@ def run_prefilter(
     ):
         result.skip_llm = True
 
-    if not result.skip_llm:
+    # A standing hit is a live signal on the wrapper's own line(s)
+    # (shell=True, unsafe deserialization, format string): the shape
+    # being a one-line delegate does not discharge it, and resolving
+    # it mechanically clean is the suppression direction — the hits
+    # must reach review.
+    if not result.skip_llm and not result.hits:
         is_wrapper, wrapper_reason = _is_trivial_wrapper(
             source, result.language, callees,
             project_sinks=project_sinks,
@@ -571,12 +576,31 @@ _DANGEROUS_MACROS = frozenset({
 })
 
 
-_WRAPPER_CALL_RE = re.compile(r'\b(\w+)\s*\(')
+# Captures the DOTTED callee form (subprocess.run, pickle.loads): a
+# bare-word capture could never match the dotted _DANGEROUS_PY_APIS
+# entries, so dangerous one-line delegates skipped as trivial.
+_WRAPPER_CALL_RE = re.compile(r'\b((?:\w+\.)*\w+)\s*\(')
 _WRAPPER_RETURN_CALL_RE = re.compile(r'return\s+(\w+)\s*\(')
 _WRAPPER_PTR_ARITH_RE = re.compile(
     r'(?<!\w->)\w+\s*\+\s*\w|\w+\s*\[\s*[^]]+\]|'
     r'\(\s*\w+\s*\*\s*\)|'
     r'\(\s*(?:unsigned\s+)?(?:char|int|long|short|void)\s*\*\s*\)',
+)
+
+
+_WRAPPER_DANGEROUS_CALLEES = frozenset(
+    _DANGEROUS_C_APIS | _DANGEROUS_PY_APIS
+    | _DANGEROUS_GO_CALLEES | _DANGEROUS_RUST_CALLEES
+    | _DANGEROUS_PHP_CALLEES | _DANGEROUS_JAVA_CALLEES
+    | _DANGEROUS_JS_CALLEES | _DANGEROUS_LUA_CALLEES
+    | _DANGEROUS_PERL_CALLEES,
+)
+
+#: Bare tails of the dotted entries (subprocess.run -> run): the
+#: wrapper capture sees the bare form when the API is imported
+#: unqualified.
+_WRAPPER_DANGEROUS_TAILS = frozenset(
+    e.rsplit(".", 1)[-1] for e in _WRAPPER_DANGEROUS_CALLEES
 )
 
 
@@ -650,7 +674,18 @@ def _is_trivial_wrapper(
 
     callee_name = real_calls[0]
 
-    if callee_name in (_DANGEROUS_C_APIS | _DANGEROUS_PY_APIS | extra_dangerous):
+    # Every language's dangerous-callee set (a wrapper's language arm
+    # only strips the signature; the exclusion must not be narrower
+    # than _is_trivially_clean's), matched against the full dotted
+    # name AND its bare tail — `from subprocess import run` delegates
+    # via the bare name. Over-exclusion only costs one review; a
+    # missed exclusion journals a dangerous delegate mechanically
+    # clean.
+    exclusion = _WRAPPER_DANGEROUS_CALLEES | extra_dangerous
+    tails = _WRAPPER_DANGEROUS_TAILS | {
+        e.rsplit(".", 1)[-1] for e in extra_dangerous
+    }
+    if callee_name in exclusion or callee_name.rsplit(".", 1)[-1] in tails:
         return False, ""
     if any(api in callee_name.lower() for api in _CRYPTO_APIS):
         return False, ""
