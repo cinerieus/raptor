@@ -315,6 +315,43 @@ class TestSystemPromptFileFor:
                 os.unlink(parent_file)
                 os.rmdir(parent_dir)
 
+    def test_dir_keepalive_paired_with_cleanup(self):
+        # The cc-sysprompt- prefix is reaper-registered by the scratch
+        # substrate, so the live directory must be keepalive-protected
+        # (a long-run process's cache must never age past the sweep
+        # floor) and the pid-guarded cleanup must unregister it — the
+        # substrate's contract for non-context-manager owners.
+        from core.llm import cc_adapter
+        from core.run import scratch
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        cache_dir = spf.parent
+        assert str(cache_dir) in scratch._keepalive_paths
+        cc_adapter._cleanup_sysprompt_cache()
+        assert str(cache_dir) not in scratch._keepalive_paths
+        assert not cache_dir.exists()
+
+    def test_swept_dir_recreated_with_fresh_keepalive(self):
+        # An externally-swept dir (tmpwatch, stale-tmp sweep) is
+        # replaced on next use; the dead path's keepalive registration
+        # must not be left behind pinning a name nobody owns.
+        import shutil
+
+        from core.run import scratch
+
+        config = CCDispatchConfig(claude_bin="claude", system_prompt="sp")
+        with system_prompt_file_for(config) as spf:
+            pass
+        old_dir = spf.parent
+        shutil.rmtree(old_dir)
+        with system_prompt_file_for(config) as again:
+            assert again.parent != old_dir
+            assert again.read_text(encoding="utf-8") == "sp"
+        assert str(old_dir) not in scratch._keepalive_paths
+        assert str(again.parent) in scratch._keepalive_paths
+
     def test_cache_hit_refreshes_mtime(self):
         # Age-based TMPDIR sweepers (tmpwatch) must see a file in
         # active use — an hours-old mtime on a hot cache entry got the
