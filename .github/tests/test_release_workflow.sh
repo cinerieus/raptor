@@ -426,6 +426,64 @@ cp CITATION.cff.orig CITATION.cff
 rm -f "$BANNER_PATH.orig" core/config/__init__.py.orig CITATION.cff.orig
 echo ""
 
+# ── 5b. stamp-version script (the real one) ────────────────────────────
+
+echo "=== stamp-version script strictness ==="
+
+STAMP_SCRIPT="$SCRIPT_DIR/.github/scripts/stamp-version"
+
+# Fixture README with the release banner line the script stamps.
+cat > README.md <<'MDEOF'
+# fixture
+║             Based on Claude Code (v0.0.0)                                 ║
+MDEOF
+cat > pyproject.toml <<'TOMLEOF'
+[project]
+name = "fixture"
+version = "0.0.0"
+TOMLEOF
+cp core/config/__init__.py core/config/__init__.py.orig
+cp CITATION.cff CITATION.cff.orig
+
+# Happy path: every present target stamps, exit 0.
+if OUT=$(python3 "$STAMP_SCRIPT" v9.9.9 2>&1); then
+    pass "stamp-version exits 0 with all targets present"
+else
+    fail "stamp-version exits 0 with all targets present (got: $OUT)"
+fi
+assert_contains "script stamped config"    "$(cat core/config/__init__.py)" 'VERSION = "9.9.9"'
+assert_contains "script stamped CITATION"  "$(cat CITATION.cff)"            'version: "9.9.9"'
+assert_contains "script stamped pyproject" "$(cat pyproject.toml)"          'version = "9.9.9"'
+assert_contains "script stamped README"    "$(cat README.md)"               "(v9.9.9)"
+
+# A present file whose pattern misses must FAIL the run and be named —
+# warn-only per-file misses shipped stale versions flagged only in logs.
+echo "# banner line gone" > README.md
+if OUT=$(python3 "$STAMP_SCRIPT" v9.9.10 2>&1); then
+    fail "stamp-version fails when README banner pattern misses"
+else
+    pass "stamp-version fails when README banner pattern misses"
+fi
+assert_contains "miss failure names README.md" "$OUT" "README.md"
+
+# Absent pyproject.toml is an optional target — still exit 0.
+cat > README.md <<'MDEOF'
+║             Based on Claude Code (v0.0.0)                                 ║
+MDEOF
+rm -f pyproject.toml
+if OUT=$(python3 "$STAMP_SCRIPT" v9.9.11 2>&1); then
+    pass "stamp-version tolerates absent pyproject.toml"
+else
+    fail "stamp-version tolerates absent pyproject.toml (got: $OUT)"
+fi
+
+# Restore the fixture for the archive test below.
+rm -f README.md pyproject.toml
+cp core/config/__init__.py.orig core/config/__init__.py
+cp CITATION.cff.orig CITATION.cff
+rm -f core/config/__init__.py.orig CITATION.cff.orig
+echo ""
+
 # ── 6. Archive exclusions ──────────────────────────────────────────────
 
 echo "=== Archive exclusions ==="
