@@ -132,6 +132,11 @@ _MECHANISM_CWE_MAP: dict[str, list[str]] = {
     "prompt injection":    ["CWE-1336"],
     "indirect prompt injection": ["CWE-1336"],
     "llm injection":       ["CWE-1336"],
+    # CWE-480/481 are DELIBERATELY absent from _CWE_TOOL_MAP: no
+    # mechanical channel (cocci rule, semgrep rule, CodeQL query) in
+    # this repo detects operator confusion, so these classes must
+    # classify dark (human review), never clean-when-silent. The
+    # emissions stay so the class is still named in coverage records.
     "wrong operator":      ["CWE-480"],
     "assignment in conditional": ["CWE-480"],
     "use of incorrect operator": ["CWE-480"],

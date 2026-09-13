@@ -227,3 +227,19 @@ class TestGateResolutionIntegration:
             "CWE-1234", "", "", {"semgrep": True}, ran_tools={"semgrep"},
         )
         assert covered is False
+
+    def test_operator_confusion_classes_stay_dark(self):
+        """CWE-480/481 have mechanism-map emissions but deliberately no
+        _CWE_TOOL_MAP entry — no mechanical channel detects operator
+        confusion, so silence must read dark, never clean."""
+        from core.audit.tool_coverage import _CWE_TOOL_MAP, _extract_cwes
+        cwes = _extract_cwes("", "assignment in conditional", "")
+        assert "CWE-480" in cwes
+        assert "CWE-480" not in _CWE_TOOL_MAP
+        assert "CWE-481" not in _CWE_TOOL_MAP
+        covered = is_class_covered(
+            "", "assignment in conditional", "",
+            {"semgrep": True, "codeql": True},
+            ran_tools={"semgrep", "codeql"},
+        )
+        assert covered is False
