@@ -87,6 +87,25 @@ class TestGroupKey(unittest.TestCase):
         f = {"file": "a.c", "function": "main", "line": 10}
         self.assertEqual(group_key(f), ("a.c", "main", ""))
 
+    def test_file_path_shape_keys_like_file(self):
+        """Orchestrated /agentic findings carry ``file_path``; both
+        serialised shapes must land in the same group — pre-fix every
+        agentic finding grouped under file ""."""
+        scan = {"file": "a.c", "function": "main", "vuln_type": "xss"}
+        agentic = {"file_path": "a.c", "function": "main",
+                   "vuln_type": "xss"}
+        self.assertEqual(group_key(scan), group_key(agentic))
+        self.assertEqual(group_key(agentic), ("a.c", "main", "xss"))
+
+    def test_file_path_findings_in_different_files_stay_separate(self):
+        findings = [
+            {"file_path": "a.c", "function": "main", "line": 5,
+             "vuln_type": "buffer_overflow"},
+            {"file_path": "b.c", "function": "main", "line": 5,
+             "vuln_type": "buffer_overflow"},
+        ]
+        self.assertEqual(count_vulns(findings), 2)
+
 
 class TestGroupFindings(unittest.TestCase):
 

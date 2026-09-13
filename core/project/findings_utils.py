@@ -97,9 +97,15 @@ def group_key(finding: dict[str, Any]) -> tuple[str, str, str]:
 
     Findings with the same group key are likely the same logical bug
     (e.g. TOCTOU check at line 7 and use at line 10).
+
+    Uses :func:`finding_file` for the same reason as ``dedup_key``:
+    orchestrated /agentic findings carry ``file_path``, not ``file``,
+    and keying them all under file ``""`` collapsed same-function /
+    same-type findings in DIFFERENT files into one "vuln" across
+    `/project findings`, run summaries, and merge stats.
     """
     return (
-        finding.get("file", ""),
+        finding_file(finding),
         finding.get("function", ""),
         finding.get("vuln_type", ""),
     )
