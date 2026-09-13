@@ -265,3 +265,17 @@ def test_journaled_mark_suppresses_audit_gap(tmp_path):
         checklist, [], out_dir=fresh_run, project_dir=proj,
     )
     assert "f1" in {g["name"] for g in gaps}
+
+
+class TestBoundedReads:
+    def test_every_load_json_is_capped(self):
+        """Run-dir/operator JSON reads must carry the shared 64MB
+        artifact ceiling — the sibling raptor-review caps the same
+        files, calling an unbounded read "an OOM lever"."""
+        import re
+        src = CLI.read_text(encoding="utf-8")
+        for m in re.finditer(r"load_json\(([^;]*?)\)\s", src):
+            call = m.group(1)
+            assert "max_bytes" in call, (
+                f"uncapped load_json call: load_json({call})"
+            )
