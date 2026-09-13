@@ -262,12 +262,23 @@ class TestPromoteToProject:
             (concepts_dir / "domain-model.json").read_text())
         assert promoted["concepts"][0]["id"] == "c1"
 
+    @staticmethod
+    def _rl_item(item_id: str, **overrides) -> dict:
+        item = {
+            "id": item_id,
+            "question": f"question {item_id}",
+            "source_command": "audit",
+            "resolved": False,
+        }
+        item.update(overrides)
+        return item
+
     def test_promotes_reading_list(self, tmp_path):
         concepts_dir = tmp_path / "concepts"
         concepts_dir.mkdir()
         run_dir = tmp_path / "run_001"
         run_dir.mkdir()
-        rl = {"items": [{"question": "q1", "resolved": True}]}
+        rl = {"items": [self._rl_item("rl-1", resolved=True)]}
         (run_dir / "reading-list.json").write_text(
             json.dumps(rl), encoding="utf-8")
 
@@ -276,6 +287,90 @@ class TestPromoteToProject:
         promoted = json.loads(
             (concepts_dir / "reading-list.json").read_text())
         assert promoted["items"][0]["resolved"] is True
+
+    def test_reading_list_promotion_merges(self, tmp_path):
+        """Promotion folds the run's items into the canonical list —
+        a byte-copy would erase items a concurrent run queued after
+        this run seeded (lost update)."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        run_dir = tmp_path / "run_001"
+        run_dir.mkdir()
+        # Canonical has an item this run never saw (concurrent writer)
+        # plus one the run resolves.
+        canonical = {"items": [
+            self._rl_item("rl-concurrent"),
+            self._rl_item("rl-shared"),
+        ]}
+        (concepts_dir / "reading-list.json").write_text(
+            json.dumps(canonical), encoding="utf-8")
+        run = {"items": [self._rl_item("rl-shared", resolved=True)]}
+        (run_dir / "reading-list.json").write_text(
+            json.dumps(run), encoding="utf-8")
+
+        _loop._promote_to_project(run_dir, concepts_dir)
+
+        promoted = json.loads(
+            (concepts_dir / "reading-list.json").read_text())
+        by_id = {i["id"]: i for i in promoted["items"]}
+        assert set(by_id) == {"rl-concurrent", "rl-shared"}
+        assert by_id["rl-shared"]["resolved"] is True
+
+    def test_domain_model_promotion_merges(self, tmp_path):
+        """The domain model merges into the canonical copy (run wins
+        per id, everything else accumulates) and dict-level extras
+        like subject_title survive."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        run_dir = tmp_path / "run_001"
+        run_dir.mkdir()
+        canonical = {
+            "concepts": [
+                {"id": "other-run", "name": "B", "description": "d"},
+            ],
+            "invariants": [], "contracts": [],
+            "architecture": {"style": "pipeline"},
+        }
+        (concepts_dir / "domain-model.json").write_text(
+            json.dumps(canonical), encoding="utf-8")
+        run = {
+            "concepts": [
+                {"id": "this-run", "name": "A", "description": "d"},
+            ],
+            "invariants": [], "contracts": [],
+            "subject_title": "My Target",
+        }
+        (run_dir / "domain-model.json").write_text(
+            json.dumps(run), encoding="utf-8")
+
+        _loop._promote_to_project(run_dir, concepts_dir)
+
+        promoted = json.loads(
+            (concepts_dir / "domain-model.json").read_text())
+        ids = {c["id"] for c in promoted["concepts"]}
+        assert ids == {"other-run", "this-run"}
+        assert promoted["subject_title"] == "My Target"
+        assert promoted["architecture"] == {"style": "pipeline"}
+
+    def test_patterns_promotion_merges(self, tmp_path):
+        """A narrowly scoped run's patterns.json must never replace
+        the whole-tree accumulation — merge keyed by pattern name."""
+        concepts_dir = tmp_path / "concepts"
+        concepts_dir.mkdir()
+        run_dir = tmp_path / "run_001"
+        run_dir.mkdir()
+        (concepts_dir / "patterns.json").write_text(json.dumps({
+            "patterns": {"old_fn": {"role": "allocator"}},
+        }), encoding="utf-8")
+        (run_dir / "patterns.json").write_text(json.dumps({
+            "patterns": {"new_fn": {"role": "validator"}},
+        }), encoding="utf-8")
+
+        _loop._promote_to_project(run_dir, concepts_dir)
+
+        promoted = json.loads(
+            (concepts_dir / "patterns.json").read_text())
+        assert set(promoted["patterns"]) == {"old_fn", "new_fn"}
 
     def test_none_concepts_dir_is_noop(self, tmp_path):
         run_dir = tmp_path / "run_001"

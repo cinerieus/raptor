@@ -27,7 +27,6 @@ import argparse
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # ─── trust-marker check (do not import; inline by design) ───
@@ -203,35 +202,89 @@ def _load_prior_knowledge(output_dir: Path, concepts_dir: Path | None) -> None:
 
 
 def _promote_to_project(output_dir: Path, concepts_dir: Path | None) -> None:
+    """Promote run artifacts to the project concepts store — by MERGE.
+
+    A byte-copy here loses updates: ``run_study`` has already
+    merge-promoted this run's domain model into the canonical copy
+    (core.concepts.study._promote_to_project), and a concurrent run
+    may have contributed between that promote and this call, so every
+    promotion below folds the run's artifact INTO the canonical file
+    instead of replacing it. The domain model goes through the core
+    merge implementation so there is exactly one promotion semantics
+    to maintain.
+    """
     if concepts_dir is None:
         return
     promoted = 0
-    for name in ("domain-model.json", "reading-list.json", "patterns.json"):
-        src = output_dir / name
-        if not src.is_file():
-            continue
-        dst = concepts_dir / name
+
+    dm_src = output_dir / "domain-model.json"
+    if dm_src.is_file():
         try:
-            fd, tmp_name = tempfile.mkstemp(
-                dir=str(concepts_dir), suffix=".tmp", prefix=f".{name}.")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(src.read_text(encoding="utf-8"))
-                Path(tmp_name).rename(dst)
-            except BaseException:
-                Path(tmp_name).unlink(missing_ok=True)
-                raise
-        except OSError as exc:
-            print(f"study-loop: WARNING: failed to promote {name}: {exc}",
-                  file=sys.stderr)
-            continue
-        promoted += 1
+            from core.concepts.study import merge_promote_domain_model
+            merge_promote_domain_model(
+                dm_src, concepts_dir / "domain-model.json")
+            promoted += 1
+        except (OSError, ValueError) as exc:
+            print("study-loop: WARNING: failed to promote "
+                  f"domain-model.json: {exc}", file=sys.stderr)
+
+    rl_src = output_dir / "reading-list.json"
+    if rl_src.is_file():
+        try:
+            from core.concepts.reading_list import ReadingList
+            run_list = ReadingList.load(rl_src)
+            # Folds in items already on disk at the canonical path;
+            # the run's own item states win for ids it knows.
+            run_list.save_merged(concepts_dir / "reading-list.json")
+            promoted += 1
+        except (OSError, ValueError, TypeError) as exc:
+            # TypeError: a torn/hand-edited run list with items missing
+            # required fields must degrade to a warning, not a crash.
+            print("study-loop: WARNING: failed to promote "
+                  f"reading-list.json: {exc}", file=sys.stderr)
+
+    pat_src = output_dir / "patterns.json"
+    if pat_src.is_file():
+        try:
+            _merge_promote_patterns(pat_src, concepts_dir / "patterns.json")
+            promoted += 1
+        except (OSError, ValueError) as exc:
+            print("study-loop: WARNING: failed to promote "
+                  f"patterns.json: {exc}", file=sys.stderr)
+
     # Only report success when something actually landed — a run that
-    # produced no artifacts (or whose copies all failed) must not claim
-    # the project concepts dir was refreshed.
+    # produced no artifacts (or whose promotions all failed) must not
+    # claim the project concepts dir was refreshed.
     if promoted:
         print(f"study-loop: promoted domain model to {concepts_dir}",
               file=sys.stderr)
+
+
+def _merge_promote_patterns(src: Path, canonical: Path) -> None:
+    """Merge a run's ``patterns.json`` into the canonical copy.
+
+    Keyed by pattern name, run wins per key — a narrowly scoped run
+    must never replace the whole-tree accumulation.
+    """
+    run_data = load_json(src, strict=True,
+                         max_bytes=_MAX_STUDY_ARTIFACT_BYTES) or {}
+    if not isinstance(run_data, dict):
+        return
+    merged = {}
+    if canonical.is_file():
+        prior = load_json(canonical, strict=True,
+                          max_bytes=_MAX_STUDY_ARTIFACT_BYTES)
+        if isinstance(prior, dict):
+            merged = prior
+    patterns = merged.get("patterns")
+    if not isinstance(patterns, dict):
+        patterns = {}
+    run_patterns = run_data.get("patterns")
+    if isinstance(run_patterns, dict):
+        patterns.update(run_patterns)
+    merged.update({k: v for k, v in run_data.items() if k != "patterns"})
+    merged["patterns"] = patterns
+    save_json(canonical, merged)
 
 
 def _store_in_sage(output_dir: Path, target: str) -> None:

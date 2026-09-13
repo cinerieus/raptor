@@ -269,10 +269,6 @@ def _promote_to_project(per_run_path: Path, output_dir: Path) -> None:
     ``project.json`` marker that ProjectManager writes, or lives under
     ``out/projects/``).
     """
-    import os
-    import shutil
-    import tempfile
-
     # Promotion is a durable project-store WRITE: the run pin decides
     # the destination. Pre-fix the parent-shape probe let an --out run
     # placed under project B's dir promote project A's domain model
@@ -313,38 +309,87 @@ def _promote_to_project(per_run_path: Path, output_dir: Path) -> None:
     concepts_dir.mkdir(parents=True, exist_ok=True)
     canonical = concepts_dir / "domain-model.json"
 
+    try:
+        merge_promote_domain_model(per_run_path, canonical)
+    except OSError:
+        logger.debug("domain-model promotion failed", exc_info=True)
+
+
+def merge_promote_domain_model(per_run_path: Path,
+                               canonical: Path) -> None:
+    """Fold a per-run domain model into the *canonical* copy.
+
+    THE promotion write for domain models — every promoter (the
+    in-run promote above, the study-loop wrapper) must route through
+    it so there is exactly one merge semantics to maintain. MERGE
+    into the canonical model, never replace it: a reading-list-scoped
+    (or zero-item) pass produces a tiny per-run model, and an
+    unconditional copy would clobber the project's accumulated
+    knowledge with that subset (and lose a concurrent run's
+    contribution landed since this run seeded). Merge semantics match
+    the in-run prior merge: the new run wins on ID collisions,
+    everything else accumulates. Raises OSError on write failure —
+    callers decide how loudly to report.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    if canonical.is_file():
+        canon_model = DomainModel.load(canonical)
+        run_model = DomainModel.load(per_run_path)
+        merged = _merge_domain_models(canon_model, run_model)
+        # Carry non-schema top-level keys through the merge — the
+        # study loop attaches dict-level extras (subject_title,
+        # overview_summary, architecture, struct_definitions,
+        # struct_annotations) that DomainModel.load drops; losing
+        # them here forces every subsequent run to re-pay the
+        # overview-synthesis LLM call. Run wins per key, canonical
+        # fills the rest.
+        import dataclasses
+        import json as _json
+
+        from core.atomic_fs import write_text_atomically
+        schema_keys = {
+            f.name for f in dataclasses.fields(DomainModel)
+        }
+        extras: dict[str, Any] = {}
+        for raw_path in (canonical, per_run_path):
+            with contextlib.suppress(OSError, ValueError):
+                raw = _json.loads(
+                    raw_path.read_text(encoding="utf-8"),
+                )
+                if isinstance(raw, dict):
+                    extras.update({
+                        k: v for k, v in raw.items()
+                        if k not in schema_keys
+                    })
+        final = {**dataclasses.asdict(merged), **extras}
+        write_text_atomically(
+            canonical, _json.dumps(final, indent=2) + "\n",
+        )
+        logger.info(
+            "merged domain-model.json into %s "
+            "(%d concepts, %d invariants, %d contracts)",
+            canonical, len(merged.concepts),
+            len(merged.invariants), len(merged.contracts),
+        )
+        return
     tmp = None
     try:
-        if canonical.is_file():
-            # MERGE into the canonical model, never replace it: a
-            # reading-list-scoped (or zero-item) pass produces a tiny
-            # per-run model, and an unconditional copy would clobber
-            # the project's accumulated knowledge with that subset.
-            # Merge semantics match the in-run prior merge: the new
-            # run wins on ID collisions, everything else accumulates.
-            canon_model = DomainModel.load(canonical)
-            run_model = DomainModel.load(per_run_path)
-            merged = _merge_domain_models(canon_model, run_model)
-            merged.save(canonical)
-            logger.info(
-                "merged domain-model.json into %s "
-                "(%d concepts, %d invariants, %d contracts)",
-                canonical, len(merged.concepts),
-                len(merged.invariants), len(merged.contracts),
-            )
-            return
         fd, tmp = tempfile.mkstemp(
-            dir=str(concepts_dir), suffix=".tmp", prefix="domain-model-",
+            dir=str(canonical.parent), suffix=".tmp",
+            prefix="domain-model-",
         )
         os.close(fd)
         shutil.copy2(str(per_run_path), tmp)
         Path(tmp).rename(canonical)
-        logger.info("promoted domain-model.json to %s", canonical)
     except OSError:
-        logger.debug("domain-model promotion failed", exc_info=True)
         if tmp:
             with contextlib.suppress(OSError):
                 Path(tmp).unlink(missing_ok=True)
+        raise
+    logger.info("promoted domain-model.json to %s", canonical)
 
 
 def _is_under_projects_base(directory: Path) -> bool:
