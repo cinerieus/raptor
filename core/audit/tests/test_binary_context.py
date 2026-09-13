@@ -312,6 +312,50 @@ class TestRealRedbDispatch:
         assert ctx["representation"] == "decompilation"
 
 
+class TestRedbLoadBounded:
+    """re-database.json is size-gated: over-budget refuses (raise from
+    load_redb, degrade in assemble), never buffers the whole file."""
+
+    def _write_redb(self, tmp_path):
+        import json as _json
+        func = _make_func("vuln", 0x1000, decomp="void vuln(void){}")
+        db = _make_db(functions=[func])
+        p = tmp_path / "re-database.json"
+        p.write_text(_json.dumps(db.to_dict()))
+        return p
+
+    def test_over_budget_refused(self, tmp_path, monkeypatch):
+        import core.audit.binary_context as bc
+        from core.json.utils import JsonBudgetExceededError
+        p = self._write_redb(tmp_path)
+        monkeypatch.setattr(bc, "_MAX_REDB_BYTES", 16)
+        import pytest
+        with pytest.raises(JsonBudgetExceededError):
+            bc.load_redb(p)
+
+    def test_over_budget_assemble_degrades_not_crashes(
+        self, tmp_path, monkeypatch,
+    ):
+        import core.audit.binary_context as bc
+        self._write_redb(tmp_path)
+        monkeypatch.setattr(bc, "_MAX_REDB_BYTES", 16)
+        ctx = bc.assemble_binary_context(
+            target_path=tmp_path,
+            file_path="binary:target",
+            function_name="vuln",
+            out_dir=tmp_path,
+        )
+        assert ctx["representation"] == "unknown"
+        assert "not found" in ctx["source"]
+
+    def test_under_budget_loads_and_caches(self, tmp_path):
+        import core.audit.binary_context as bc
+        p = self._write_redb(tmp_path)
+        db1 = bc.load_redb(p)
+        assert [f.name for f in db1.functions] == ["vuln"]
+        assert bc.load_redb(p) is db1  # (path, mtime) cache intact
+
+
 class TestCollisionSuffix:
     def test_duplicate_names_get_address_suffix(self):
         from core.inventory.binary_builder import build_binary_checklist

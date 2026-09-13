@@ -15,7 +15,6 @@ from a scanned repo.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -163,8 +162,20 @@ def find_redb(out_dir: Optional[Path], target_path: Optional[Path]) -> Optional[
     return None
 
 
+#: re-database.json read ceiling. RAPTOR-written, but derived from a
+#: hostile binary's decompilation/symbols — a pathological import can
+#: balloon it. Parity with the unit's other 64 MiB artifact budgets.
+_MAX_REDB_BYTES = 64 * 1024 * 1024
+
+
 def load_redb(redb_path: Path):
-    """Load an REDatabase from disk, cached on (path, mtime)."""
+    """Load an REDatabase from disk, cached on (path, mtime).
+
+    Size-gated (:data:`_MAX_REDB_BYTES`): an over-budget file raises
+    :class:`~core.json.utils.JsonBudgetExceededError` (a ``ValueError``,
+    so existing malformed-input handlers degrade the same way).
+    """
+    from core.json import load_json_bounded
     from packages.ghidra.model import REDatabase
 
     key = str(Path(redb_path).resolve())
@@ -172,8 +183,9 @@ def load_redb(redb_path: Path):
     cached = _REDB_CACHE.get(key)
     if cached and cached[0] == mtime:
         return cached[1]
-    with open(redb_path) as f:
-        db = REDatabase.from_dict(json.load(f))
+    db = REDatabase.from_dict(
+        load_json_bounded(redb_path, max_bytes=_MAX_REDB_BYTES)
+    )
     _REDB_CACHE[key] = (mtime, db)
     return db
 
