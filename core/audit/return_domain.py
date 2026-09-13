@@ -649,6 +649,8 @@ def _constants_for_root(
         name: vals[0] for name, vals in defs.items() if len(vals) == 1
     }
     if not budget.truncated:
+        while len(_CONSTANTS_CACHE) >= _MAX_CONSTANTS_CACHE:
+            _CONSTANTS_CACHE.pop(next(iter(_CONSTANTS_CACHE)))
         _CONSTANTS_CACHE[cache_key] = table
     return table
 
@@ -921,10 +923,25 @@ def _guarded_jump_of_condition_assign(assign_node, src: bytes, var: str):
 
 _DOMAIN_CACHE: dict[tuple[str, tuple[str, ...]], ReturnDomain | None] = {}
 
+# Caps: caches are content-unstamped (keys are names/paths, cleared at
+# each sweep entry), so bounding is the backstop against a pathological
+# callee population in one long-lived process. A run's working set is
+# far below both caps; eviction is FIFO (oldest insertion first).
+_MAX_DOMAIN_CACHE = 4096
+_MAX_CONSTANTS_CACHE = 32
+
 
 def clear_cache() -> None:
     _DOMAIN_CACHE.clear()
     _CONSTANTS_CACHE.clear()
+
+
+def _cache_domain(
+    key: tuple[str, tuple[str, ...]], value: ReturnDomain | None,
+) -> None:
+    while len(_DOMAIN_CACHE) >= _MAX_DOMAIN_CACHE:
+        _DOMAIN_CACHE.pop(next(iter(_DOMAIN_CACHE)))
+    _DOMAIN_CACHE[key] = value
 
 
 def derive_return_domain(
@@ -949,7 +966,7 @@ def derive_return_domain(
     if not budget.truncated:
         # A truncated derivation must not poison the cache — a later
         # caller with a fresh budget deserves the full analysis.
-        _DOMAIN_CACHE[key] = result
+        _cache_domain(key, result)
     return result
 
 
@@ -1190,6 +1207,11 @@ def detect_return_domain_mismatches(
     in-tree definition, an unproven domain, or a budget truncation
     yields nothing.
     """
+    # Sweep entry = run boundary for this module's caches. Keys carry
+    # no content signal, so a prior sweep's domains/constants (same
+    # process, possibly changed tree) must not be served; within one
+    # sweep the tree is stable and the caches hit freely.
+    clear_cache()
     budget = _Budget(budget_s)
     findings: list[ReturnDomainMismatch] = []
     for fp, source in source_texts.items():

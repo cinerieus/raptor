@@ -578,3 +578,65 @@ class TestConstantsBudget:
         out = rd._constants_for_root(tmp_path, rd._Budget(20.0))
         assert out.get("ERR_FATAL") == -2
         assert str(tmp_path) in rd._CONSTANTS_CACHE
+
+
+class TestCacheLifecycle:
+    def test_domain_cache_hits_within_a_run(self, tmp_path):
+        import core.audit.return_domain as rd
+        (tmp_path / "err.c").write_text(
+            "int get_err(void) { return -2; }\n",
+        )
+        clear_cache()
+        calls = []
+        real = rd._derive
+
+        def _counting(*a, **kw):
+            calls.append(1)
+            return real(*a, **kw)
+
+        rd._derive = _counting
+        try:
+            first = derive_return_domain("get_err", [tmp_path])
+            second = derive_return_domain("get_err", [tmp_path])
+        finally:
+            rd._derive = real
+        assert first is not None and second is not None
+        assert len(calls) == 1  # second call served from cache
+
+    def test_new_sweep_does_not_serve_stale_content(self, tmp_path):
+        src = "void f(int x) { if (get_err() == -1) return; }\n"
+        (tmp_path / "err.c").write_text(
+            "int get_err(void) { return -2; }\n" + src,
+        )
+        clear_cache()
+        out = detect_return_domain_mismatches(
+            {"err.c": (tmp_path / "err.c").read_text()},
+            roots=[tmp_path],
+        )
+        assert len(out) == 1
+        # Content changes between runs; the sweep entry must not serve
+        # the prior run's cached domain.
+        (tmp_path / "err.c").write_text(
+            "int get_err(void) { return -1; }\n" + src,
+        )
+        out = detect_return_domain_mismatches(
+            {"err.c": (tmp_path / "err.c").read_text()},
+            roots=[tmp_path],
+        )
+        assert out == []
+
+    def test_domain_cache_bounded(self, tmp_path):
+        import core.audit.return_domain as rd
+        clear_cache()
+        for i in range(rd._MAX_DOMAIN_CACHE + 10):
+            rd._cache_domain((f"fn{i}", (str(tmp_path),)), None)
+        assert len(rd._DOMAIN_CACHE) <= rd._MAX_DOMAIN_CACHE
+
+    def test_constants_cache_bounded(self, tmp_path):
+        import core.audit.return_domain as rd
+        clear_cache()
+        for i in range(rd._MAX_CONSTANTS_CACHE + 5):
+            d = tmp_path / f"r{i}"
+            d.mkdir()
+            rd._constants_for_root(d, rd._Budget(20.0))
+        assert len(rd._CONSTANTS_CACHE) <= rd._MAX_CONSTANTS_CACHE
