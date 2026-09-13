@@ -126,6 +126,20 @@ class ElfMetadata:
     imports: set[str] = field(default_factory=set)
 
 
+def is_elf(path: "Path | str") -> bool:
+    """Cheap 4-byte ELF magic check — no subprocess, no full parse.
+
+    ``False`` on any read error: an unreadable file is not a usable
+    ELF candidate for any caller (provenance probing, binary-oracle
+    auto-detect), so refusal and absence collapse to the same answer.
+    """
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == _ELF_MAGIC
+    except OSError:
+        return False
+
+
 def parse_elf(path: Path) -> ElfMetadata | None:
     """Parse ``path`` as ELF and return its capability-relevant
     metadata, or ``None`` on any read / parse failure.

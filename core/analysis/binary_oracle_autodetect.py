@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TYPE_CHECKING
 
+from core.binary.elf import is_elf
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -301,13 +303,9 @@ def _classify_candidate(p: Path) -> _Candidate | None:
 
 
 def _is_elf(path: Path) -> bool:
-    """Cheap 4-byte ELF magic check — no subprocess. False on any read
-    error (unreadable file is not a usable candidate anyway)."""
-    try:
-        with Path(path).open("rb") as fh:
-            return fh.read(4) == b"\x7fELF"
-    except OSError:
-        return False
+    """Shared magic check — core.binary.elf.is_elf (kept as the
+    module-local name callers and patches use)."""
+    return is_elf(path)
 
 
 def _has_dwarf(path: Path) -> bool:

@@ -25,6 +25,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from core.binary.elf import is_elf
+
 logger = logging.getLogger(__name__)
 
 # Compiler-fortified libc entry points (``strcpy`` → ``__strcpy_chk``).
@@ -35,8 +37,6 @@ _SECTION_ROW_RE = re.compile(
     r"^\s*\[\s*\d+\]\s+(\S+)\s+(\S+)\s+[0-9a-fA-F]+\s+"
     r"([0-9a-fA-F]+)\s+([0-9a-fA-F]+)"
 )
-
-_ELF_MAGIC = b"\x7fELF"
 
 # SHF_COMPRESSED section header ch_type values (Elf_Chdr).
 _ELFCOMPRESS_TYPES = frozenset({1, 2})  # ZLIB, ZSTD
@@ -105,11 +105,9 @@ _PROBE_CACHE_MAX = 32
 
 
 def _is_elf(binary_path: Path) -> bool:
-    try:
-        with open(binary_path, "rb") as f:
-            return f.read(4) == _ELF_MAGIC
-    except OSError:
-        return False
+    """Shared magic check — core.binary.elf.is_elf (kept as the
+    module-local name callers and patches use)."""
+    return is_elf(binary_path)
 
 
 def probe_binary(binary_path: "Path | str") -> Dict[str, Any]:
