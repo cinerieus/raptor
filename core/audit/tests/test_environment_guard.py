@@ -72,6 +72,47 @@ class _Clock:
         self.t += s
 
 
+class _BarrierFs(_FakeFs):
+    """``_FakeFs`` with measurement barriers.
+
+    Real-thread tests wait for the worker to demonstrably reach a
+    loop (its statvfs measurement observed) instead of sleeping a
+    wall-clock guess and asserting a state the thread may not have
+    reached yet — a stalled thread start made those asserts pass for
+    the wrong reason, and latency bounds measured scheduler load, not
+    guard logic."""
+
+    def __init__(self, stat: SimpleNamespace) -> None:
+        super().__init__(stat)
+        self.guard: EnvironmentGuard | None = None
+        #: any measurement at all (the breaker's probe loop measures
+        #: on its first probe attempt, before any sleep)
+        self.first_measure = _threading.Event()
+        #: a measurement taken while the guard was paused — only the
+        #: watchdog wait loop measures in that state
+        self.paused_measure = _threading.Event()
+        self._cond = _threading.Condition()
+        self._measured_threads: set[_threading.Thread] = set()
+
+    def __call__(self, path: str) -> SimpleNamespace:
+        self.first_measure.set()
+        g = self.guard
+        if g is not None and g._paused:
+            self.paused_measure.set()
+        with self._cond:
+            self._measured_threads.add(_threading.current_thread())
+            self._cond.notify_all()
+        return super().__call__(path)
+
+    def wait_for_thread(self, th: _threading.Thread,
+                        timeout: float = 10.0) -> bool:
+        """True once *th* has taken a measurement (i.e. reached a
+        code path that measures); False on timeout."""
+        with self._cond:
+            return self._cond.wait_for(
+                lambda: th in self._measured_threads, timeout)
+
+
 # ── Preflight ─────────────────────────────────────────────────────────
 
 
@@ -1098,17 +1139,26 @@ class TestFanOutPauseParity:
         import core.audit.environment as env_mod
         monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
         monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
-        fs = _FakeFs(_stat(1 * 1024 * 1024))
+        fs = _BarrierFs(_stat(1 * 1024 * 1024))
         g = self._real_guard(tmp_path, fs)
+        fs.guard = g
 
         th_a, a_done = self._tick_in_thread(g)
-        _time.sleep(0.3)
+        # Barrier: a measurement observed while the guard is paused
+        # can only come from the watchdog wait loop — A is inside it.
+        assert fs.paused_measure.wait(timeout=10)
         assert not a_done.is_set()  # A is inside the pause loop
 
         # Sibling B ticks within the check interval: it must gate on
         # the active pause, not skip measurement and dispatch.
+        # Joiners skip the pause-floor sweep, so B's FIRST measurement
+        # can only come from inside the wait loop; a rate-limiter
+        # pass-through would return without ever measuring and this
+        # barrier would time out.
         th_b, b_done = self._tick_in_thread(g)
-        _time.sleep(0.3)
+        assert fs.wait_for_thread(th_b), (
+            "sibling ticked through the rate limiter during a pause"
+        )
         assert not b_done.is_set(), (
             "sibling ticked through the rate limiter during a pause"
         )
@@ -1125,22 +1175,25 @@ class TestFanOutPauseParity:
         import core.audit.environment as env_mod
         monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
         monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
-        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+        fs = _BarrierFs(_stat(1 * 1024 * 1024))
+        g = self._real_guard(tmp_path, fs)
+        fs.guard = g
 
-        released_after: list[float] = []
+        released = _threading.Event()
 
         def _run() -> None:
-            t0 = _time.monotonic()
             g.tick()
-            released_after.append(_time.monotonic() - t0)
+            released.set()
 
         th = _threading.Thread(target=_run, daemon=True)
         th.start()
-        _time.sleep(0.3)
-        assert not released_after  # paused
+        assert fs.paused_measure.wait(timeout=10)
+        assert not released.is_set()  # inside the pause loop
         g._conclude("external conclusion from another thread")
-        th.join(timeout=5)
-        assert released_after and released_after[0] < 1.5
+        # Released by the conclusion, not by the (30s) pause bound —
+        # how fast the scheduler runs the thread is not under test.
+        th.join(timeout=10)
+        assert released.is_set()
 
     def test_conclusion_releases_probing_worker_promptly(
         self, tmp_path, monkeypatch,
@@ -1151,24 +1204,28 @@ class TestFanOutPauseParity:
             env_mod, "BREAKER_PROBE_BACKOFF_INITIAL_S", 0.05,
         )
         monkeypatch.setattr(env_mod, "BREAKER_PROBE_BACKOFF_MAX_S", 0.05)
-        g = self._real_guard(tmp_path, _FakeFs(_stat(1 * 1024 * 1024)))
+        fs = _BarrierFs(_stat(1 * 1024 * 1024))
+        g = self._real_guard(tmp_path, fs)
+        fs.guard = g
         for i in range(BREAKER_TRIP_COUNT):
             g.note_dispatch_failure(f"f{i}.c:fn{i}", _wrapped(errno.ENOSPC))
 
-        released_after: list[float] = []
+        released = _threading.Event()
 
         def _run() -> None:
-            t0 = _time.monotonic()
             g.tick()
-            released_after.append(_time.monotonic() - t0)
+            released.set()
 
         th = _threading.Thread(target=_run, daemon=True)
         th.start()
-        _time.sleep(0.3)
-        assert not released_after  # inside the probe/backoff loop
+        # Barrier: the tripped breaker's first measurement happens
+        # inside the probe loop (the probe runs before any backoff).
+        assert fs.first_measure.wait(timeout=10)
+        assert not released.is_set()  # inside the probe/backoff loop
         g._conclude("external conclusion")
-        th.join(timeout=5)
-        assert released_after and released_after[0] < 1.5
+        # Released by the conclusion, not by the (30s) probe bound.
+        th.join(timeout=10)
+        assert released.is_set()
 
     def test_sigterm_abort_releases_paused_tick_promptly(
         self, tmp_path, monkeypatch,
@@ -1177,24 +1234,27 @@ class TestFanOutPauseParity:
         monkeypatch.setattr(env_mod, "WATCHDOG_MAX_PAUSE_S", 30.0)
         monkeypatch.setattr(env_mod, "WATCHDOG_POLL_S", 0.05)
         flag = _threading.Event()
+        fs = _BarrierFs(_stat(1 * 1024 * 1024))
         g = self._real_guard(
-            tmp_path, _FakeFs(_stat(1 * 1024 * 1024)),
+            tmp_path, fs,
             abort_check=flag.is_set,
         )
+        fs.guard = g
 
-        released_after: list[float] = []
+        released = _threading.Event()
 
         def _run() -> None:
-            t0 = _time.monotonic()
             g.tick()
-            released_after.append(_time.monotonic() - t0)
+            released.set()
 
         th = _threading.Thread(target=_run, daemon=True)
         th.start()
-        _time.sleep(0.3)
+        assert fs.paused_measure.wait(timeout=10)
+        assert not released.is_set()  # inside the pause loop
         flag.set()
-        th.join(timeout=5)
-        assert released_after and released_after[0] < 1.5
+        # Released by the abort, not by the (30s) pause bound.
+        th.join(timeout=10)
+        assert released.is_set()
         # Deliberate parity: the abort releases the wait WITHOUT a
         # conclusion — the caller's adjacent SIGTERM rails own it.
         assert not g.concluded
