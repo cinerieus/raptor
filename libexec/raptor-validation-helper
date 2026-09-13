@@ -813,13 +813,19 @@ def prepare_B(workdir, target=None):
     for finding in findings:
         if finding.get("status") == "disproven":
             continue
+        # Diagnostics tolerate id-less findings (the merge path does,
+        # so the WARN branch is exactly where one shows up) and
+        # non-dict summaries — findings.json is LLM-authored and
+        # schema validation is advisory. A KeyError here wedges the
+        # pipeline AFTER the stage file was consumed and deleted.
+        fid = finding.get("id", "?")
         sa = finding.get("stage_a_summary")
         if not sa:
-            print(f"  WARN: {finding['id']} missing stage_a_summary — add it", file=sys.stderr)
-        elif not all(k in sa for k in ("confidence", "status")):
-            print(f"  WARN: {finding['id']} stage_a_summary incomplete — needs confidence, status", file=sys.stderr)
+            print(f"  WARN: {fid} missing stage_a_summary — add it", file=sys.stderr)
+        elif not isinstance(sa, dict) or not all(k in sa for k in ("confidence", "status")):
+            print(f"  WARN: {fid} stage_a_summary incomplete — needs confidence, status", file=sys.stderr)
         if not finding.get("origin"):
-            print(f"  WARN: {finding['id']} missing origin field", file=sys.stderr)
+            print(f"  WARN: {fid} missing origin field", file=sys.stderr)
 
     # --- ast_view enrichment ---
     # Attach a compact per-function AST view (signature, calls
@@ -912,8 +918,14 @@ def prepare_B(workdir, target=None):
     for finding in findings:
         if finding.get("status") == "disproven":
             continue
-        sa = finding.get("stage_a_summary", {})
-        poc = finding.get("poc", {})
+        # poc / stage_a_summary may be bare strings (LLM-authored,
+        # advisory schema) — same guard as _finding_poc_payload.
+        sa = finding.get("stage_a_summary")
+        if not isinstance(sa, dict):
+            sa = {}
+        poc = finding.get("poc")
+        if not isinstance(poc, dict):
+            poc = {}
         fid = finding.get("id")
         if not fid:
             continue
@@ -1084,11 +1096,12 @@ def prepare_C(workdir, target=None):
         print("✗ findings.json not found — cannot run stage C", file=sys.stderr)
         sys.exit(1)
     for finding in _active(findings_data):
+        fid = finding.get("id", "?")
         sb = finding.get("stage_b_summary")
         if not sb:
-            print(f"  WARN: {finding['id']} missing stage_b_summary — add it", file=sys.stderr)
-        elif not all(k in sb for k in ("hypothesis_id", "hypothesis_status", "proximity")):
-            print(f"  WARN: {finding['id']} stage_b_summary incomplete", file=sys.stderr)
+            print(f"  WARN: {fid} missing stage_b_summary — add it", file=sys.stderr)
+        elif not isinstance(sb, dict) or not all(k in sb for k in ("hypothesis_id", "hypothesis_status", "proximity")):
+            print(f"  WARN: {fid} stage_b_summary incomplete", file=sys.stderr)
 
     # --- Pre-check findings against inventory ---
     checklist = load_json(Path(workdir) / "checklist.json")
@@ -1112,13 +1125,13 @@ def prepare_C(workdir, target=None):
             inv = inv_files.get(normalised) if normalised else None
         if inv is None:
             finding["checklist_verified"] = False
-            print(f"  C0 FAIL: {finding['id']} — file '{fpath}' not in inventory", file=sys.stderr)
+            print(f"  C0 FAIL: {finding.get('id', '?')} — file '{fpath}' not in inventory", file=sys.stderr)
         # "line" is LLM-authored (advisory schema): a non-int value
         # can't be range-checked, so it just skips this comparison
         # instead of raising a str/int TypeError.
         elif isinstance(fline, int) and fline > inv.get("lines", 0):
             finding["checklist_verified"] = False
-            print(f"  C0 FAIL: {finding['id']} — line {fline} > file length {inv['lines']}", file=sys.stderr)
+            print(f"  C0 FAIL: {finding.get('id', '?')} — line {fline} > file length {inv['lines']}", file=sys.stderr)
         else:
             finding["checklist_verified"] = True
 
@@ -1222,14 +1235,15 @@ def prepare_D(workdir, target=None):
     for finding in data["findings"]:
         if finding.get("status") == "disproven":
             continue
+        fid = finding.get("id", "?")
         sc = finding.get("stage_c_summary")
         if not sc:
-            print(f"  WARN: {finding['id']} missing stage_c_summary — add it", file=sys.stderr)
-        elif not isinstance(sc.get("checks"), dict):
-            print(f"  WARN: {finding['id']} stage_c_summary.checks must be a dict "
+            print(f"  WARN: {fid} missing stage_c_summary — add it", file=sys.stderr)
+        elif not isinstance(sc, dict) or not isinstance(sc.get("checks"), dict):
+            print(f"  WARN: {fid} stage_c_summary.checks must be a dict "
                   f"with keys: {REQUIRED_CHECKS}", file=sys.stderr)
         elif not all(k in sc["checks"] for k in REQUIRED_CHECKS):
-            print(f"  WARN: {finding['id']} stage_c_summary.checks incomplete", file=sys.stderr)
+            print(f"  WARN: {fid} stage_c_summary.checks incomplete", file=sys.stderr)
 
     # Count the Stage C verdict from stage_c_summary.passed — that is
     # where the stage-c.json contract (STAGE_SCHEMA_HINTS["C"]) puts
@@ -1242,11 +1256,15 @@ def prepare_D(workdir, target=None):
     # fallback for producers (e.g. the Python orchestrator) that set
     # the verdict there instead.
     def _c_verdict(f):
-        summary = f.get("stage_c_summary") or {}
-        if isinstance(summary.get("passed"), bool):
+        # Both summaries may be bare strings (LLM-authored, advisory
+        # schema) — only dict shapes carry a verdict.
+        summary = f.get("stage_c_summary")
+        if isinstance(summary, dict) and isinstance(
+                summary.get("passed"), bool):
             return summary["passed"]
-        sanity = f.get("sanity_check") or {}
-        if isinstance(sanity.get("passed"), bool):
+        sanity = f.get("sanity_check")
+        if isinstance(sanity, dict) and isinstance(
+                sanity.get("passed"), bool):
             return sanity["passed"]
         return None
 
@@ -1293,7 +1311,7 @@ def prepare_D(workdir, target=None):
         if finding["test_code_flag"]:
             label = finding.get("likely_test_harness", "?")
             print(
-                f"  D-1 FLAG: {finding['id']} test path "
+                f"  D-1 FLAG: {finding.get('id', '?')} test path "
                 f"(likely_test_harness={label}): {fpath}"
             )
 
@@ -1301,9 +1319,14 @@ def prepare_D(workdir, target=None):
     for finding in data.get("findings", []):
         if finding.get("status") == "disproven":
             continue
+        # Bare-string summaries carry no evidence fields (LLM-
+        # authored, advisory schema) — treat as absent.
         a = finding.get("stage_a_summary", {})
         b = finding.get("stage_b_summary", {})
         c = finding.get("stage_c_summary", {})
+        a = a if isinstance(a, dict) else {}
+        b = b if isinstance(b, dict) else {}
+        c = c if isinstance(c, dict) else {}
         if a or b or c:
             finding.setdefault("ruling", {})
             finding["ruling"]["evidence_synthesis"] = {
@@ -2113,11 +2136,12 @@ def prepare_E(workdir, target=None, dynamic=None, build=None,
             continue
         if finding.get("ruling", {}).get("status") == "ruled_out":
             continue
+        fid = finding.get("id", "?")
         sd = finding.get("stage_d_summary")
         if not sd:
-            print(f"  WARN: {finding['id']} missing stage_d_summary — add it", file=sys.stderr)
-        elif "ruling" not in sd:
-            print(f"  WARN: {finding['id']} stage_d_summary missing 'ruling' key", file=sys.stderr)
+            print(f"  WARN: {fid} missing stage_d_summary — add it", file=sys.stderr)
+        elif not isinstance(sd, dict) or "ruling" not in sd:
+            print(f"  WARN: {fid} stage_d_summary missing 'ruling' key", file=sys.stderr)
 
     ruled_out = sum(1 for f in data["findings"]
                     if f.get("ruling", {}).get("status") == "ruled_out")

@@ -219,3 +219,75 @@ class TestFastPathIdCollisions:
         second = load_json(tmp_path / "hypotheses.json")
         assert [h["id"] for h in second] == [h["id"] for h in first]
         assert len(load_json(tmp_path / "attack-paths.json")) == 2
+
+
+class TestIdlessFindingDiagnostics:
+    """The id-less finding is exactly the one that takes the WARN
+    branch — a KeyError there wedges the pipeline AFTER the stage
+    file was consumed and deleted, and every re-run crashes the same
+    way from the persisted findings.json."""
+
+    def test_prepare_b_warn_path_tolerates_missing_id(self, tmp_path,
+                                                      capsys):
+        mod = _load_helper()
+        f = _finding("FIND-1")
+        del f["id"]
+        del f["stage_a_summary"]
+        _write(tmp_path, "findings.json", {"stage": "A", "findings": [f]})
+        mod.prepare_B(str(tmp_path))  # must not KeyError
+        err = capsys.readouterr().err
+        assert "missing stage_a_summary" in err
+
+    def test_prepare_c_warn_and_c0_paths_tolerate_missing_id(
+            self, tmp_path, capsys):
+        mod = _load_helper()
+        _write(tmp_path, "checklist.json",
+               {"files": [{"path": "a.c", "lines": 10}]})
+        f = _finding("FIND-1", file="not-in-inventory.c")
+        del f["id"]
+        _write(tmp_path, "findings.json", {"stage": "B", "findings": [f]})
+        mod.prepare_C(str(tmp_path))  # must not KeyError
+        err = capsys.readouterr().err
+        assert "missing stage_b_summary" in err
+        assert "C0 FAIL" in err
+
+    def test_prepare_d_warn_path_tolerates_missing_id(self, tmp_path,
+                                                      capsys):
+        mod = _load_helper()
+        f = _finding("FIND-1")
+        del f["id"]
+        _write(tmp_path, "findings.json", {"stage": "C", "findings": [f]})
+        mod.prepare_D(str(tmp_path))  # must not KeyError
+        err = capsys.readouterr().err
+        assert "missing stage_c_summary" in err
+
+
+class TestNonDictSummaries:
+    """poc / stage summaries may be bare strings — findings.json is
+    LLM-authored and schema validation is advisory; the same file
+    already guards this shape in _finding_poc_payload."""
+
+    def test_prepare_b_tolerates_string_poc_and_summary(self, tmp_path):
+        mod = _load_helper()
+        _write(tmp_path, "findings.json", {
+            "stage": "A",
+            "findings": [_finding(
+                "FIND-1", status="poc_success",
+                poc="segfault at 0x41414141",
+                stage_a_summary="high",
+            )],
+        })
+        mod.prepare_B(str(tmp_path))  # must not AttributeError
+        data = load_json(tmp_path / "findings.json")
+        assert len(data["findings"]) == 1
+
+    def test_prepare_d_tolerates_string_stage_c_summary(self, tmp_path,
+                                                        capsys):
+        mod = _load_helper()
+        _write(tmp_path, "findings.json", {
+            "stage": "C",
+            "findings": [_finding("FIND-1", stage_c_summary="passed")],
+        })
+        mod.prepare_D(str(tmp_path))  # must not AttributeError
+        err = capsys.readouterr().err
+        assert "must be a dict" in err
