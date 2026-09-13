@@ -11,7 +11,13 @@ Falls back to full scan when:
   - import parsing fails on enough files to make the graph unreliable
   - no changed-file list is available (schedule / workflow_dispatch)
 
-Usage (from GitHub Actions):
+The import-graph half of this module (build_graph, discover_py_files,
+transitive_dependents, init_imports) is the live library surface —
+test_scope.py and test_impact.py drive CI dispatch with it. The
+scoped-config emitter below (main()) has NO CI caller today:
+codeql.yml gates per-language matrix entries via compute_filters.py
+instead of consuming a scoped config. It remains usable standalone:
+
     python3 .github/scripts/codeql_scope.py \
         --changed-files /tmp/changed_files.txt \
         --base-config  .github/codeql/codeql-config.yml \
@@ -377,7 +383,8 @@ def write_scoped_config(
         # exclude_pip_21_3_build_dir_options) treats each paths: entry as a
         # directory to walk — file-level paths crash with NotADirectoryError.
         # Deduplicate to parent directories instead.
-        dirs = sorted(set(str(Path(p).parent) or "." for p in scoped_paths))
+        # str(Path("f.py").parent) is already "." for root-level files.
+        dirs = sorted({str(Path(p).parent) for p in scoped_paths})
         lines.append("paths:")
         lines.extend(f"  - {_yaml_val(d)}" for d in dirs)
         lines.append("")
