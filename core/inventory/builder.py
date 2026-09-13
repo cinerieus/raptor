@@ -1699,7 +1699,12 @@ def _process_single_file(
         # Call-graph extraction. The resolver in
         # core.analysis.reachability is language-agnostic; per-file
         # extractors emit the same FileCallGraph dataclass for
-        # whichever languages have a walker.
+        # whichever languages have a walker. The tree extract_items
+        # parsed (same grammar, same parse_text) is threaded through so
+        # the call-graph walkers don't tree-sitter-parse every file a
+        # second time; when the extractors' parse failed or the grammar
+        # is absent the walkers fall back to their own parse path.
+        _shared_tree = tree_cache.get("tree")
         if language == 'python':
             record['call_graph'] = extract_call_graph_python(parse_text).to_dict()
             # Module-level ``__all__`` is the explicit export contract.
@@ -1717,47 +1722,47 @@ def _process_single_file(
             # isn't installed. TS/TSX use the typescript grammar so typed
             # source (annotations, decorators, interfaces) parses.
             record['call_graph'] = extract_call_graph_javascript(
-                parse_text, language=language,
+                parse_text, language=language, _tree=_shared_tree,
             ).to_dict()
         elif language == 'go':
             record['call_graph'] = extract_call_graph_go(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'java':
             record['call_graph'] = extract_call_graph_java(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'rust':
             record['call_graph'] = extract_call_graph_rust(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'ruby':
             record['call_graph'] = extract_call_graph_ruby(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language in ('csharp', 'c_sharp'):
             record['call_graph'] = extract_call_graph_csharp(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'php':
             record['call_graph'] = extract_call_graph_php(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'lua':
             record['call_graph'] = extract_call_graph_lua(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'scala':
             record['call_graph'] = extract_call_graph_scala(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'kotlin':
             record['call_graph'] = extract_call_graph_kotlin(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'swift':
             record['call_graph'] = extract_call_graph_swift(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'c':
             # S5: wire the existing extract_call_graph_c into the
@@ -1769,7 +1774,7 @@ def _process_single_file(
             # was absent for every C scan. Closes RAPTOR's largest
             # whole-language reachability blind spot.
             record['call_graph'] = extract_call_graph_c(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         elif language == 'cpp':
             # S5: same wiring story for C++. _CppCallGraph inherits
@@ -1777,7 +1782,7 @@ def _process_single_file(
             # handling. Covers .cpp / .cc / .cxx / .hpp (per the
             # languages.py extension map).
             record['call_graph'] = extract_call_graph_cpp(
-                parse_text,
+                parse_text, _tree=_shared_tree,
             ).to_dict()
         # U4 (macro-masking): record the function names invoked inside
         # function-like macro bodies. tree-sitter sees a macro call as a

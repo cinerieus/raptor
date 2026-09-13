@@ -125,6 +125,34 @@ def _get_ts_parser(language_fn: Any) -> Any:
     return parser
 
 
+def _ts_tree(content: str, grammar_module: str, label: str,
+             pre_parsed: Any = None) -> Any:
+    """Return a tree-sitter Tree for *content*, or ``None``.
+
+    ``pre_parsed`` is a tree the caller already holds for this exact
+    text, parsed with the grammar ``grammar_module`` provides — the
+    inventory builder threads the tree from ``extract_items`` through
+    so each file is tree-sitter-parsed once per build instead of once
+    by the extractors and again here (the walkers only read
+    ``root_node``, so a tree from either module's Parser is
+    interchangeable). When ``pre_parsed`` is ``None`` the grammar is
+    imported and the text parsed here; ``None`` comes back when the
+    grammar isn't installed or the parse fails (callers degrade to an
+    empty :class:`FileCallGraph`).
+    """
+    if pre_parsed is not None:
+        return pre_parsed
+    mod = _import_grammar(grammar_module)
+    if mod is None:
+        return None
+    try:
+        parser = _get_ts_parser(mod.language)
+        return parser.parse(content.encode("utf-8", errors="replace"))
+    except Exception as e:                          # noqa: BLE001
+        logger.debug("call_graph: %s parse failed (%s)", label, e)
+        return None
+
+
 # Indirection-flag values. Strings (not enum) so they round-trip
 # through JSON cleanly without a from_dict shim.
 INDIRECTION_GETATTR = "getattr"
@@ -780,7 +808,8 @@ def _attribute_chain(node: ast.AST) -> list[str] | None:
 
 
 def extract_call_graph_javascript(
-    content: str, language: str = "javascript",
+    content: str, language: str = "javascript", *,
+    _tree: Any = None,
 ) -> FileCallGraph:
     """Walk a JavaScript / TypeScript / TSX source string via
     tree-sitter and return its :class:`FileCallGraph`.
@@ -807,24 +836,28 @@ def extract_call_graph_javascript(
     matching the Python ``from foo import y`` convention so the
     resolver's chain semantics work unchanged.
     """
-    if language in ("typescript", "tsx"):
-        ts_ts = _import_grammar("tree_sitter_typescript")
-        if ts_ts is None:
-            return FileCallGraph()
-        language_fn = (ts_ts.language_typescript
-                       if language == "typescript" else ts_ts.language_tsx)
-    else:
-        ts_js = _import_grammar("tree_sitter_javascript")
-        if ts_js is None:
-            return FileCallGraph()
-        language_fn = ts_js.language
+    tree = _tree
+    if tree is None:
+        # Grammar resolution varies by dialect, so this can't route
+        # through _ts_tree's module.language convention.
+        if language in ("typescript", "tsx"):
+            ts_ts = _import_grammar("tree_sitter_typescript")
+            if ts_ts is None:
+                return FileCallGraph()
+            language_fn = (ts_ts.language_typescript
+                           if language == "typescript" else ts_ts.language_tsx)
+        else:
+            ts_js = _import_grammar("tree_sitter_javascript")
+            if ts_js is None:
+                return FileCallGraph()
+            language_fn = ts_js.language
 
-    try:
-        parser = _get_ts_parser(language_fn)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                          # noqa: BLE001
-        logger.debug("call_graph: %s parse failed (%s)", language, e)
-        return FileCallGraph()
+        try:
+            parser = _get_ts_parser(language_fn)
+            tree = parser.parse(content.encode("utf-8", errors="replace"))
+        except Exception as e:                          # noqa: BLE001
+            logger.debug("call_graph: %s parse failed (%s)", language, e)
+            return FileCallGraph()
 
     walker = _JsCallGraph()
     walker.walk(tree.root_node)
@@ -1606,7 +1639,9 @@ def _go_bare_binding_names(path: str) -> list[str]:
     return names
 
 
-def extract_call_graph_go(content: str) -> FileCallGraph:
+def extract_call_graph_go(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Go source string via tree-sitter and return its
     :class:`FileCallGraph`.
 
@@ -1633,15 +1668,8 @@ def extract_call_graph_go(content: str) -> FileCallGraph:
     so ``http.HandlerFunc(...)`` resolves to ``"net/http" +
     ".HandlerFunc"`` for the resolver's chain comparison.
     """
-    ts_go = _import_grammar('tree_sitter_go')
-    if ts_go is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_go.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                          # noqa: BLE001
-        logger.debug("call_graph: Go parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_go", "Go", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _GoCallGraph()
@@ -1959,7 +1987,9 @@ class _GoCallGraph:
 # ---------------------------------------------------------------------------
 
 
-def extract_call_graph_java(content: str) -> FileCallGraph:
+def extract_call_graph_java(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Java source string via tree-sitter and return its
     :class:`FileCallGraph`.
 
@@ -1998,15 +2028,8 @@ def extract_call_graph_java(content: str) -> FileCallGraph:
     method-on-instance — out of scope; CodeQL is the right tool
     when type-aware reachability matters.
     """
-    ts_java = _import_grammar('tree_sitter_java')
-    if ts_java is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_java.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                          # noqa: BLE001
-        logger.debug("call_graph: Java parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_java", "Java", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _JavaCallGraph()
@@ -2539,7 +2562,9 @@ class _JavaCallGraph:
 # ===========================================================================
 
 
-def extract_call_graph_rust(content: str) -> FileCallGraph:
+def extract_call_graph_rust(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Rust source string via tree-sitter-rust and return its
     :class:`FileCallGraph`.
 
@@ -2564,15 +2589,8 @@ def extract_call_graph_rust(content: str) -> FileCallGraph:
     masking every macro-using file would gut the not_called signal —
     macro-generated call edges remain a documented limitation.
     """
-    ts_rust = _import_grammar('tree_sitter_rust')
-    if ts_rust is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_rust.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Rust parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_rust", "Rust", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _RustCallGraph()
@@ -3023,7 +3041,9 @@ class _RustCallGraph:
 # ===========================================================================
 
 
-def extract_call_graph_ruby(content: str) -> FileCallGraph:
+def extract_call_graph_ruby(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Ruby source string via tree-sitter-ruby and return its
     :class:`FileCallGraph`.
 
@@ -3047,15 +3067,8 @@ def extract_call_graph_ruby(content: str) -> FileCallGraph:
     ``method_missing`` / etc. produce calls invisible to static
     analysis — same family of limitation as Python ``getattr``.
     """
-    ts_ruby = _import_grammar('tree_sitter_ruby')
-    if ts_ruby is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_ruby.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Ruby parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_ruby", "Ruby", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _RubyCallGraph()
@@ -3378,7 +3391,9 @@ class _RubyCallGraph:
 # ===========================================================================
 
 
-def extract_call_graph_csharp(content: str) -> FileCallGraph:
+def extract_call_graph_csharp(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a C# source string via tree-sitter-c-sharp and return
     its :class:`FileCallGraph`.
 
@@ -3396,15 +3411,8 @@ def extract_call_graph_csharp(content: str) -> FileCallGraph:
         ``Activator.CreateInstance(...)`` -> ``INDIRECTION_REFLECT``
       * ``Assembly.Load(...)`` -> ``INDIRECTION_IMPORTLIB``
     """
-    ts_cs = _import_grammar('tree_sitter_c_sharp')
-    if ts_cs is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_cs.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: C# parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_c_sharp", "C#", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _CSharpCallGraph()
@@ -3870,7 +3878,9 @@ class _CSharpCallGraph:
 # ===========================================================================
 
 
-def extract_call_graph_php(content: str) -> FileCallGraph:
+def extract_call_graph_php(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     r"""Walk a PHP source string via tree-sitter-php and return its
     :class:`FileCallGraph`.
 
@@ -3893,29 +3903,31 @@ def extract_call_graph_php(content: str) -> FileCallGraph:
       * ``include`` / ``require`` (with var) ->
         ``INDIRECTION_DYNAMIC_IMPORT``
     """
-    ts_php = _import_grammar('tree_sitter_php')
-    if ts_php is None:
-        return FileCallGraph()
+    tree = _tree
+    if tree is None:
+        ts_php = _import_grammar('tree_sitter_php')
+        if ts_php is None:
+            return FileCallGraph()
 
-    try:
-        # tree-sitter-php exports php_only / php (with HTML mixed).
-        # For .php files we use php_only, but tolerate either.
-        # NOT routed through _get_ts_parser because the language
-        # resolution path varies (language_php attr vs language()
-        # callable vs already-realised Language object) — cache
-        # identity-keying would either thrash or mis-hit. Per-call
-        # construction here; PHP parses are infrequent enough that
-        # the missed cache opportunity is acceptable.
-        from tree_sitter import Language as _PHPLanguage
-        from tree_sitter import Parser as _PHPParser
-        lang_fn = getattr(ts_php, "language_php", None) or ts_php.language()
-        if callable(lang_fn):
-            lang_fn = lang_fn()
-        parser = _PHPParser(_PHPLanguage(lang_fn))
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: PHP parse failed (%s)", e)
-        return FileCallGraph()
+        try:
+            # tree-sitter-php exports php_only / php (with HTML mixed).
+            # For .php files we use php_only, but tolerate either.
+            # NOT routed through _get_ts_parser because the language
+            # resolution path varies (language_php attr vs language()
+            # callable vs already-realised Language object) — cache
+            # identity-keying would either thrash or mis-hit. Per-call
+            # construction here; PHP parses are infrequent enough that
+            # the missed cache opportunity is acceptable.
+            from tree_sitter import Language as _PHPLanguage
+            from tree_sitter import Parser as _PHPParser
+            lang_fn = getattr(ts_php, "language_php", None) or ts_php.language()
+            if callable(lang_fn):
+                lang_fn = lang_fn()
+            parser = _PHPParser(_PHPLanguage(lang_fn))
+            tree = parser.parse(content.encode("utf-8", errors="replace"))
+        except Exception as e:                              # noqa: BLE001
+            logger.debug("call_graph: PHP parse failed (%s)", e)
+            return FileCallGraph()
 
     walker = _PhpCallGraph()
     walker.walk(tree.root_node)
@@ -4287,7 +4299,9 @@ class _PhpCallGraph:
 INDIRECTION_FN_POINTER = "fn_pointer"  # C/C++ call through a fn pointer var
 
 
-def extract_call_graph_c(content: str) -> FileCallGraph:
+def extract_call_graph_c(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a C source string via tree-sitter-c and return its
     :class:`FileCallGraph`.
 
@@ -4324,15 +4338,8 @@ def extract_call_graph_c(content: str) -> FileCallGraph:
         but the declarator walk only handles ANSI prototypes for
         signature/parameters extraction.
     """
-    ts_c = _import_grammar('tree_sitter_c')
-    if ts_c is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_c.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: C parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_c", "C", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _CCallGraph()
@@ -4742,7 +4749,9 @@ class _CCallGraph:
 #   * Lambdas are opaque: the call expression they appear in is still
 #     emitted, but a lambda *call* (``[]{...}()``) returns no chain.
 
-def extract_call_graph_cpp(content: str) -> FileCallGraph:
+def extract_call_graph_cpp(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a C++ source string via tree-sitter-cpp and return its
     :class:`FileCallGraph`.
 
@@ -4785,15 +4794,8 @@ def extract_call_graph_cpp(content: str) -> FileCallGraph:
       * ``using namespace ns;`` doesn't fold ``ns::`` qualifiers off
         of subsequent calls.
     """
-    ts_cpp = _import_grammar('tree_sitter_cpp')
-    if ts_cpp is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_cpp.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: C++ parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_cpp", "C++", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _CppCallGraph()
@@ -5467,7 +5469,9 @@ class _CppCallGraph(_CCallGraph):
         return None
 
 
-def extract_call_graph_lua(content: str) -> FileCallGraph:
+def extract_call_graph_lua(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Lua source string via tree-sitter-lua and return its
     :class:`FileCallGraph`.
 
@@ -5486,15 +5490,8 @@ def extract_call_graph_lua(content: str) -> FileCallGraph:
         first/second argument is the real callee
       * ``loadstring(...)`` / ``load(...)`` -> ``INDIRECTION_EVAL``
     """
-    ts_lua = _import_grammar('tree_sitter_lua')
-    if ts_lua is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_lua.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Lua parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_lua", "Lua", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _LuaCallGraph()
@@ -5724,7 +5721,9 @@ __all__ = [
 # Scala
 # ---------------------------------------------------------------------------
 
-def extract_call_graph_scala(content: str) -> FileCallGraph:
+def extract_call_graph_scala(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Scala source string via tree-sitter-scala and return its
     :class:`FileCallGraph`.
 
@@ -5742,15 +5741,8 @@ def extract_call_graph_scala(content: str) -> FileCallGraph:
       * ``f()`` → chain ``["f"]``; ``obj.m()`` → ``["obj", "m"]``;
         ``this.m()`` → receiver_class narrowing like Java
     """
-    ts_scala = _import_grammar('tree_sitter_scala')
-    if ts_scala is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_scala.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Scala parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_scala", "Scala", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _ScalaCallGraph()
@@ -5987,7 +5979,9 @@ def _flatten_dotted_chain(node, *, ident_types, binary_types,
 # Kotlin
 # ---------------------------------------------------------------------------
 
-def extract_call_graph_kotlin(content: str) -> FileCallGraph:
+def extract_call_graph_kotlin(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Kotlin source string via tree-sitter-kotlin and return
     its :class:`FileCallGraph`.
 
@@ -6010,15 +6004,8 @@ def extract_call_graph_kotlin(content: str) -> FileCallGraph:
     keep real node types — the walker descends ERROR nodes, so those
     declarations still contribute classes/functions/calls.
     """
-    ts_kotlin = _import_grammar('tree_sitter_kotlin')
-    if ts_kotlin is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_kotlin.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Kotlin parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_kotlin", "Kotlin", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _KotlinCallGraph()
@@ -6198,7 +6185,9 @@ class _KotlinCallGraph:
 # Swift
 # ---------------------------------------------------------------------------
 
-def extract_call_graph_swift(content: str) -> FileCallGraph:
+def extract_call_graph_swift(
+    content: str, *, _tree: Any = None,
+) -> FileCallGraph:
     """Walk a Swift source string via tree-sitter-swift and return its
     :class:`FileCallGraph`.
 
@@ -6221,15 +6210,8 @@ def extract_call_graph_swift(content: str) -> FileCallGraph:
       * ``f()`` → chain ``["f"]``; ``obj.m()`` → ``["obj", "m"]``;
         ``self.m()`` → receiver_class narrowing like Rust
     """
-    ts_swift = _import_grammar('tree_sitter_swift')
-    if ts_swift is None:
-        return FileCallGraph()
-
-    try:
-        parser = _get_ts_parser(ts_swift.language)
-        tree = parser.parse(content.encode("utf-8", errors="replace"))
-    except Exception as e:                              # noqa: BLE001
-        logger.debug("call_graph: Swift parse failed (%s)", e)
+    tree = _ts_tree(content, "tree_sitter_swift", "Swift", _tree)
+    if tree is None:
         return FileCallGraph()
 
     walker = _SwiftCallGraph()
