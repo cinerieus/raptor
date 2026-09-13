@@ -201,7 +201,16 @@ def _normalize_value(val: Any) -> str:
     if isinstance(val, bool):
         return str(val).lower()
     if isinstance(val, (list, tuple)):
-        return ",".join(str(v) for v in sorted(val))
+        try:
+            ordered = sorted(val)
+        except TypeError:
+            # Mixed-type list (extractor emitting e.g. [0, "err"]):
+            # bare sorted() raised and aborted the whole
+            # find_asymmetries pass. Type-tagged key keeps the
+            # normalisation deterministic without comparing across
+            # types.
+            ordered = sorted(val, key=lambda v: (type(v).__name__, str(v)))
+        return ",".join(str(v) for v in ordered)
     return str(val)
 
 

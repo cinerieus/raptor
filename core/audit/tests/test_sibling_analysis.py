@@ -591,3 +591,21 @@ class TestSemanticConsistencySanitizedView:
         auth = [f for f in findings if f.get("cwe") == "CWE-862"]
         assert len(auth) == 1
         assert auth[0]["function"] == "handle_gamma"
+
+
+class TestNormalizeValue:
+    def test_mixed_type_list_does_not_raise(self):
+        # An extractor emitting [0, "err"] aborted find_asymmetries
+        # with TypeError under bare sorted().
+        from core.audit.sibling_analysis import _normalize_value
+
+        out = _normalize_value([0, "err", None])
+        assert isinstance(out, str)
+        # Same content, any order -> same normalisation.
+        assert out == _normalize_value(["err", None, 0])
+
+    def test_homogeneous_list_order_unchanged(self):
+        from core.audit.sibling_analysis import _normalize_value
+
+        assert _normalize_value([10, 2]) == "2,10"
+        assert _normalize_value(["b", "a"]) == "a,b"
