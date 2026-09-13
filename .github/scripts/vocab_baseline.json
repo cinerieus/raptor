@@ -2307,27 +2307,6 @@
     "note": "Upstream BRANCH/CHANNEL terminology (master/main/trunk/develop/stable...) used to tell upstream branch-snapshot prerelease tags from org/fork suffixes in the fork-tag post-filter \u2014 cross-ecosystem VCS/release convention like the semver prerelease-channel allowance directly below it in this file's sibling (versions/semver.py::_PRERELEASE_KEYWORDS), not a target's learnable API vocabulary; new names are additions to community convention, not to any project surface.",
     "reviewed": "2026-08-31"
   },
-  "packages/sca/findings.py::_hygiene_finding_to_row": {
-    "count": 13,
-    "kind": "literal"
-  },
-  "packages/sca/findings.py::_license_finding_to_row": {
-    "count": 13,
-    "kind": "literal"
-  },
-  "packages/sca/findings.py::_scan_health_to_row": {
-    "count": 13,
-    "kind": "literal",
-    "note": "findings.json row-schema keys (same class as the other baselined row/to_dict builders), not function-name vocabulary"
-  },
-  "packages/sca/findings.py::_supply_chain_finding_to_row": {
-    "count": 13,
-    "kind": "literal"
-  },
-  "packages/sca/findings.py::_vuln_finding_to_row": {
-    "count": 13,
-    "kind": "literal"
-  },
   "packages/sca/harden.py::_write_report": {
     "count": 13,
     "kind": "literal"
@@ -2594,5 +2573,23 @@
     "kind": "literal",
     "note": "Serialization schema keys of the reproduction-result dataclass record (report JSON field names), not a name vocabulary \u2014 same class as project.py::to_dict.",
     "reviewed": "2026-08-28"
+  },
+  "packages/sca/findings.py::_row_envelope": {
+    "count": 13,
+    "kind": "literal",
+    "note": "findings.json row-schema envelope keys \u2014 the single shared builder that replaced the five per-kind row builders' identical 13-key envelope literals (their entries retired with the consolidation); persistence schema keys pinned byte-for-byte by the golden fixtures, not function-name vocabulary",
+    "reviewed": "2026-09-13"
+  },
+  "packages/sca/findings.py::_vuln_finding_to_row": {
+    "count": 28,
+    "kind": "literal",
+    "note": "per-kind sca-block field names of the findings.json row schema (the envelope moved to _row_envelope; this is the kind-specific payload that stays local by design) \u2014 persistence schema keys pinned by the golden fixtures, not function-name vocabulary",
+    "reviewed": "2026-09-13"
+  },
+  "packages/sca/findings.py::_hygiene_finding_to_row": {
+    "count": 11,
+    "kind": "literal",
+    "note": "per-kind sca-block field names of the findings.json row schema (the envelope moved to _row_envelope; this is the kind-specific payload that stays local by design) \u2014 persistence schema keys pinned by the golden fixtures, not function-name vocabulary",
+    "reviewed": "2026-09-13"
   }
 }

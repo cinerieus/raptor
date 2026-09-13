@@ -719,25 +719,64 @@ def write_findings_json(
     return len(rows)
 
 
+def _row_envelope(
+    *,
+    finding_id: str,
+    vuln_type: str,
+    file: str,
+    function: str,
+    severity: str,
+    suppressed: bool,
+    suppression_reason: str | None,
+    title: str,
+    description: str,
+    sca: dict[str, Any],
+) -> dict[str, Any]:
+    """The shared findings.json row envelope.
+
+    Every row builder emits this exact key set in this exact order —
+    the serialised shape is an on-disk contract (pinned byte-for-byte
+    by the golden fixtures), so the envelope lives in one place. The
+    per-kind payload stays in each builder's ``sca`` block: those
+    blocks deliberately differ per kind and are NOT unified here.
+
+    ``id`` duplicates ``finding_id`` for consumers of the generic
+    findings.json convention; ``line`` is fixed at 0 because SCA
+    findings attach to a manifest, not a source line.
+    """
+    return {
+        "id": finding_id,
+        "finding_id": finding_id,
+        "vuln_type": vuln_type,
+        "tool": "sca",
+        "file": file,
+        "function": function,
+        "line": 0,
+        "severity": severity,
+        "suppressed": suppressed,
+        "suppression_reason": suppression_reason,
+        "title": title,
+        "description": description,
+        # SCA-specific extension fields. Consumers that don't know about
+        # them ignore them; the schema explicitly allows extras.
+        "sca": sca,
+    }
+
+
 def _vuln_finding_to_row(f: VulnFinding) -> dict[str, Any]:
     primary = f.advisories[0] if f.advisories else None
     title = _vuln_title(f, primary)
-    return {
-        "id": f.finding_id,
-        "finding_id": f.finding_id,
-        "vuln_type": VULNERABLE_DEPENDENCY,
-        "tool": "sca",
-        "file": str(f.dependency.declared_in),
-        "function": f.dependency.name,
-        "line": 0,
-        "severity": f.severity,
-        "suppressed": f.suppressed,
-        "suppression_reason": f.suppression_reason,
-        "title": title,
-        "description": _describe_vuln(f),
-        # SCA-specific extension fields. Consumers that don't know about
-        # them ignore them; the schema explicitly allows extras.
-        "sca": {
+    return _row_envelope(
+        finding_id=f.finding_id,
+        vuln_type=VULNERABLE_DEPENDENCY,
+        file=str(f.dependency.declared_in),
+        function=f.dependency.name,
+        severity=f.severity,
+        suppressed=f.suppressed,
+        suppression_reason=f.suppression_reason,
+        title=title,
+        description=_describe_vuln(f),
+        sca={
             "ecosystem": f.dependency.ecosystem,
             "name": f.dependency.name,
             "alias_name": f.dependency.alias_name,
@@ -772,7 +811,7 @@ def _vuln_finding_to_row(f: VulnFinding) -> dict[str, Any]:
             "exploit_evidence": _exploit_evidence_summary(f.exploit_evidence),
             "related_findings": list(f.related_findings),
         },
-    }
+    )
 
 
 def _exploit_evidence_summary(ev) -> dict[str, Any] | None:
@@ -807,21 +846,17 @@ def _commented_severity(dep: Dependency, severity: str) -> str:
 
 
 def _hygiene_finding_to_row(f: HygieneFinding) -> dict[str, Any]:
-    severity = _commented_severity(f.dependency, f.severity)
-    return {
-        "id": f.finding_id,
-        "finding_id": f.finding_id,
-        "vuln_type": f"{HYGIENE_PREFIX}{f.kind}",
-        "tool": "sca",
-        "file": str(f.dependency.declared_in),
-        "function": f.dependency.name,
-        "line": 0,
-        "severity": severity,
-        "suppressed": f.suppressed,
-        "suppression_reason": f.suppression_reason,
-        "title": _kind_title(f.kind, f.dependency.name),
-        "description": f.detail,
-        "sca": {
+    return _row_envelope(
+        finding_id=f.finding_id,
+        vuln_type=f"{HYGIENE_PREFIX}{f.kind}",
+        file=str(f.dependency.declared_in),
+        function=f.dependency.name,
+        severity=_commented_severity(f.dependency, f.severity),
+        suppressed=f.suppressed,
+        suppression_reason=f.suppression_reason,
+        title=_kind_title(f.kind, f.dependency.name),
+        description=f.detail,
+        sca={
             "kind": f.kind,
             "ecosystem": f.dependency.ecosystem,
             "name": f.dependency.name,
@@ -834,25 +869,21 @@ def _hygiene_finding_to_row(f: HygieneFinding) -> dict[str, Any]:
             "commented_out": f.dependency.commented_out,
             "confidence": _confidence_summary(f.confidence),
         },
-    }
+    )
 
 
 def _supply_chain_finding_to_row(f: SupplyChainFinding) -> dict[str, Any]:
-    severity = _commented_severity(f.dependency, f.severity)
-    return {
-        "id": f.finding_id,
-        "finding_id": f.finding_id,
-        "vuln_type": f"{SUPPLY_CHAIN_PREFIX}{f.kind}",
-        "tool": "sca",
-        "file": str(f.dependency.declared_in),
-        "function": f.dependency.name,
-        "line": 0,
-        "severity": severity,
-        "suppressed": f.suppressed,
-        "suppression_reason": f.suppression_reason,
-        "title": _kind_title(f.kind, f.dependency.name),
-        "description": f.detail,
-        "sca": {
+    return _row_envelope(
+        finding_id=f.finding_id,
+        vuln_type=f"{SUPPLY_CHAIN_PREFIX}{f.kind}",
+        file=str(f.dependency.declared_in),
+        function=f.dependency.name,
+        severity=_commented_severity(f.dependency, f.severity),
+        suppressed=f.suppressed,
+        suppression_reason=f.suppression_reason,
+        title=_kind_title(f.kind, f.dependency.name),
+        description=f.detail,
+        sca={
             "kind": f.kind,
             "ecosystem": f.dependency.ecosystem,
             "name": f.dependency.name,
@@ -862,26 +893,22 @@ def _supply_chain_finding_to_row(f: SupplyChainFinding) -> dict[str, Any]:
             "evidence": dict(f.evidence),
             "confidence": _confidence_summary(f.confidence),
         },
-    }
+    )
 
 
 def _license_finding_to_row(f: Any) -> dict[str, Any]:
     kind_short = f.kind.replace('license_', '')
-    severity = _commented_severity(f.dependency, f.severity)
-    return {
-        "id": f.finding_id,
-        "finding_id": f.finding_id,
-        "vuln_type": f"{LICENSE_PREFIX}{kind_short}",
-        "tool": "sca",
-        "file": str(f.dependency.declared_in),
-        "function": f.dependency.name,
-        "line": 0,
-        "severity": severity,
-        "suppressed": f.suppressed,
-        "suppression_reason": f.suppression_reason,
-        "title": _kind_title(kind_short, f.dependency.name),
-        "description": f.detail,
-        "sca": {
+    return _row_envelope(
+        finding_id=f.finding_id,
+        vuln_type=f"{LICENSE_PREFIX}{kind_short}",
+        file=str(f.dependency.declared_in),
+        function=f.dependency.name,
+        severity=_commented_severity(f.dependency, f.severity),
+        suppressed=f.suppressed,
+        suppression_reason=f.suppression_reason,
+        title=_kind_title(kind_short, f.dependency.name),
+        description=f.detail,
+        sca={
             "kind": f.kind,
             "ecosystem": f.dependency.ecosystem,
             "name": f.dependency.name,
@@ -892,7 +919,7 @@ def _license_finding_to_row(f: Any) -> dict[str, Any]:
             "commented_out": f.dependency.commented_out,
             "confidence": _confidence_summary(f.confidence),
         },
-    }
+    )
 
 
 def _scan_health_to_row(h: dict[str, Any]) -> dict[str, Any]:
@@ -908,22 +935,18 @@ def _scan_health_to_row(h: dict[str, Any]) -> dict[str, Any]:
     sca_block: dict[str, Any] = {"kind": kind}
     if isinstance(evidence, dict):
         sca_block.update(evidence)
-    finding_id = f"{SCAN_HEALTH_PREFIX}{kind}"
-    return {
-        "id": finding_id,
-        "finding_id": finding_id,
-        "vuln_type": f"{SCAN_HEALTH_PREFIX}{kind}",
-        "tool": "sca",
-        "file": "",
-        "function": "",
-        "line": 0,
-        "severity": "info",
-        "suppressed": False,
-        "suppression_reason": None,
-        "title": kind.replace("_", " ").capitalize(),
-        "description": detail,
-        "sca": sca_block,
-    }
+    return _row_envelope(
+        finding_id=f"{SCAN_HEALTH_PREFIX}{kind}",
+        vuln_type=f"{SCAN_HEALTH_PREFIX}{kind}",
+        file="",
+        function="",
+        severity="info",
+        suppressed=False,
+        suppression_reason=None,
+        title=kind.replace("_", " ").capitalize(),
+        description=detail,
+        sca=sca_block,
+    )
 
 
 def _vuln_title(f: VulnFinding, primary: Advisory | None) -> str:
