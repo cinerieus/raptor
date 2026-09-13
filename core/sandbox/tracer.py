@@ -1684,8 +1684,13 @@ def trace(target_pid: int, run_dir: Path,
             except InterruptedError:
                 continue
             except ChildProcessError:
-                # All tracees gone — clean exit.
-                return 0
+                # All tracees gone — a near-normal exit shape (the
+                # ECHILD race vs the traced-set bookkeeping), not a
+                # crash: fall through to the post-loop audit_summary
+                # write like the set-empties path. Returning here
+                # used to skip the summary, so budget_truncated/drop
+                # counts silently read as "no drops" for such runs.
+                break
             except OSError as e:
                 logger.error("tracer: waitpid failed: %s", e)
                 return 4
