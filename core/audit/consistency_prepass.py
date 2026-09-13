@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from core.json import dumps_artifact
+from core.json import save_json
 
 from .callsite_consistency import (
     CalleeCensus,
@@ -1238,9 +1238,11 @@ def run_consistency_prepass(
     if out_dir is not None and census:
         try:
             path = Path(out_dir) / "return-census.json"
-            path.write_text(dumps_artifact(
-                census_to_dict(census), indent=1,
-            ))
+            # Atomic write (tempfile + rename): resume paths and
+            # operator tooling parse this artifact, and a torn
+            # write must surface as the previous file or none —
+            # never as truncated JSON.
+            save_json(path, census_to_dict(census))
             logger.info(
                 "return census: %d callees, %d LLM-free confirmations "
                 "(%d promote-capable), %d leads → %s",

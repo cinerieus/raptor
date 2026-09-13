@@ -397,9 +397,6 @@
     "artifacts:write_only_artifact::results.sarif": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
-    "artifacts:write_only_artifact::return-census.json": {
-      "note": "operator-facing receipt from the consistency channel (return-usage census); read by /review workflows, no in-repo production reader yet"
-    },
     "artifacts:write_only_artifact::rule-eval-results.json": {
       "note": "rule_eval outputs: operator-facing results JSON and human summary for the corpus rule-verification runner; read by the operator, never by production code"
     },
