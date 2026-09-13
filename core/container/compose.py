@@ -18,7 +18,11 @@ anchors, ``.env`` are applied by compose itself; the sanitizer must
 see what the daemon would run, not the raw text), then rebuilds each
 service from a KEY ALLOWLIST: every published port becomes
 ``127.0.0.1:0:<target>``, bind-mount sources must resolve inside the
-staging dir, ``build`` contexts are confined to the staging dir,
+staging dir (and may not nest under another container-writable bind —
+the daemon re-resolves sources at container start, so a writable
+parent is a symlink-swap TOCTOU; see
+``_refuse_writable_bind_overlaps``), ``build`` contexts are confined
+to the staging dir,
 ``cap_add`` is filtered to a safe-capability allowlist, devices are
 filtered to safe pseudo-devices unless the caller opts out,
 single-container-parity resource limits are injected per service, and
@@ -848,6 +852,103 @@ def _filter_volumes(volumes: list[Any], staging: Path) -> list[Any]:
     return kept
 
 
+def _bind_mounts(
+    volumes: Any, staging_real: str,
+) -> list[tuple[str, str, bool]]:
+    """``(source_text, resolved_source, writable)`` for each bind mount
+    in a sanitized ``volumes:`` list. Named/anonymous volumes and tmpfs
+    entries carry no host path and are skipped. Resolution mirrors
+    :func:`_filter_volumes._bind_source_ok` so both layers judge the
+    same path."""
+    out: list[tuple[str, str, bool]] = []
+    if not isinstance(volumes, list):
+        return out
+    for vol in volumes:
+        if isinstance(vol, str):
+            parts = vol.split(":")
+            if len(parts) < 2:
+                continue
+            source = parts[0].strip()
+            if not source.startswith(("/", ".")):
+                continue  # named volume
+            writable = True
+            if len(parts) >= 3:
+                writable = "ro" not in parts[-1].split(",")
+        elif isinstance(vol, dict):
+            if str(vol.get("type") or "volume") != "bind":
+                continue
+            source = str(vol.get("source") or "").strip()
+            writable = not vol.get("read_only")
+        else:
+            continue
+        if source.startswith("/"):
+            resolved = os.path.realpath(source)
+        else:
+            resolved = os.path.realpath(os.path.join(staging_real, source))
+        out.append((source, resolved, writable))
+    return out
+
+
+def _refuse_writable_bind_overlaps(
+    services: dict[str, Any], staging: Path,
+) -> None:
+    """Refuse bind layouts a container can re-point between sanitize
+    time and daemon mount time (bind-source TOCTOU).
+
+    Bind sources are approved at sanitize time via ``realpath`` — but
+    dockerd re-resolves the source path at every container START
+    (verified against a live daemon: a symlink swapped in after
+    approval is followed, including across ``docker restart``). A
+    service holding a WRITABLE bind of a staging directory can replace
+    any path component beneath it with a symlink to a host path; a
+    bind source nesting under that directory is then steered at the
+    host when its container starts later (``depends_on`` /
+    healthchecks make "later" attacker-schedulable) or restarts.
+    ``_prune_escaping_symlinks`` only removes links present at staging
+    time; this check closes the write channel that plants them
+    afterwards.
+
+    Trade-off, both directions: refusing only CROSS-service overlaps
+    would leave the same-service replay open (tamper, exit, restart
+    policy re-resolves the sibling mount); refusing ALL same-service
+    overlaps would reject common legitimate stacks (one service
+    binding ``./www`` rw plus ``./www/conf`` has no TOCTOU without a
+    restart — its mounts are resolved before its own code runs). So:
+    overlaps across services always refuse; overlaps within one
+    service refuse only when that service carries a restart policy
+    other than ``no``.
+    """
+    staging_real = str(staging.resolve())
+    binds: list[tuple[str, str, str, bool]] = []
+    restartable: dict[str, bool] = {}
+    for svc, spec in services.items():
+        if not isinstance(spec, dict):
+            continue
+        restart = str(spec.get("restart") or "no")
+        restartable[svc] = restart not in ("no", "none")
+        for source, resolved, writable in _bind_mounts(
+            spec.get("volumes"), staging_real,
+        ):
+            binds.append((svc, source, resolved, writable))
+    for svc_w, src_w, res_w, writable in binds:
+        if not writable:
+            continue
+        prefix = res_w + os.sep
+        for svc_o, src_o, res_o, _writable_o in binds:
+            if not res_o.startswith(prefix):
+                continue
+            if svc_o == svc_w and not restartable[svc_o]:
+                continue
+            raise ComposeError(
+                f"compose service {svc_o!r} bind source {src_o!r} lies "
+                f"under service {svc_w!r}'s writable bind {src_w!r} — "
+                "refusing (the writable container can swap a path "
+                "component for a symlink after sanitize-time approval; "
+                "the daemon re-resolves bind sources at container "
+                "start, steering the mount at a host path)"
+            )
+
+
 def _sanitize_build(build: Any, staging: Path, *, service: str) -> dict[str, Any]:
     """Confine a service ``build:`` block to the staging dir.
 
@@ -1192,6 +1293,9 @@ def _sanitize_model(
             str(name), spec, staging,
             labels=labels, allow_devices=allow_devices,
         )
+    # Stack-wide pass: per-service volume filtering cannot see the
+    # bind-source TOCTOU one service sets up against another.
+    _refuse_writable_bind_overlaps(out["services"], staging)
     if "volumes" in data:
         out["volumes"] = _sanitize_volume_defs(data["volumes"])
     # Egress isolation: every stack network — including the implicit

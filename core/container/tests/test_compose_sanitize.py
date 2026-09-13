@@ -901,3 +901,102 @@ def test_staging_budget_refuses_oversized_source(
     # Direction 2: under budget passes silently.
     monkeypatch.setattr(cco, "_STAGING_MAX_BYTES", 1 << 20)
     cco._require_stageable_size(src)
+
+
+# -- bind-source TOCTOU (writable-bind overlap) -------------------------------
+# Sanitize-time realpath approves a bind source; dockerd re-resolves it
+# at every container START (and restart). A service with a writable
+# bind of a staging directory can therefore swap a path component for a
+# symlink after approval, steering a nested bind at a host path when
+# its container starts later. The stack-wide overlap pass refuses the
+# enabling layouts.
+
+
+def test_bind_under_cross_service_writable_bind_refused(tmp_path: Path) -> None:
+    """The demonstrated sequence: A binds the staging root rw, plants
+    staging/link -> /, B (ordered after A) binds ./link/etc — the
+    daemon would mount host /etc into B."""
+    with pytest.raises(cco.ComposeError, match="writable bind"):
+        _sanitize(tmp_path, {
+            "services": {
+                "planter": {"image": "x", "volumes": [".:/staging:rw"]},
+                "victim": {
+                    "image": "y",
+                    "depends_on": {
+                        "planter": {"condition": "service_healthy"}},
+                    "volumes": ["./link/etc:/host-etc"],
+                },
+            },
+        })
+
+
+def test_bind_under_cross_service_writable_dict_bind_refused(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "www").mkdir()
+    with pytest.raises(cco.ComposeError, match="writable bind"):
+        _sanitize(tmp_path, {
+            "services": {
+                "a": {"image": "x", "volumes": [
+                    {"type": "bind", "source": "./www", "target": "/w"}]},
+                "b": {"image": "y", "volumes": ["./www/html:/h:ro"]},
+            },
+        })
+
+
+def test_bind_under_readonly_parent_kept(tmp_path: Path) -> None:
+    """A read-only parent bind grants no write channel — no TOCTOU."""
+    (tmp_path / "www" / "html").mkdir(parents=True)
+    doc = _sanitize(tmp_path, {
+        "services": {
+            "a": {"image": "x", "volumes": ["./www:/w:ro"]},
+            "b": {"image": "y", "volumes": ["./www/html:/h"]},
+        },
+    })
+    assert "./www:/w:ro" in doc["services"]["a"]["volumes"]
+    assert "./www/html:/h" in doc["services"]["b"]["volumes"]
+
+
+def test_disjoint_and_equal_bind_sources_kept(tmp_path: Path) -> None:
+    """Equal sources and disjoint siblings cannot be re-pointed: a
+    writable bind grants writes INSIDE its source, and replacing the
+    source itself needs write access to its parent."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    doc = _sanitize(tmp_path, {
+        "services": {
+            "one": {"image": "x", "volumes": ["./a:/a", "./b:/b:ro"]},
+            "two": {"image": "y", "volumes": ["./a:/shared:ro"]},
+        },
+    })
+    assert "./a:/a" in doc["services"]["one"]["volumes"]
+    assert "./a:/shared:ro" in doc["services"]["two"]["volumes"]
+
+
+def test_same_service_overlap_without_restart_kept(tmp_path: Path) -> None:
+    """One service binding both ./www rw and a nested path has no
+    TOCTOU on its own: its mounts are resolved before its own code
+    runs, and nothing restarts it."""
+    (tmp_path / "www" / "conf").mkdir(parents=True)
+    doc = _sanitize(tmp_path, {
+        "services": {
+            "web": {"image": "x",
+                    "volumes": ["./www:/w", "./www/conf:/c:ro"]},
+        },
+    })
+    assert "./www:/w" in doc["services"]["web"]["volumes"]
+    assert "./www/conf:/c:ro" in doc["services"]["web"]["volumes"]
+
+
+def test_same_service_overlap_with_restart_refused(tmp_path: Path) -> None:
+    """With a restart policy the single-service replay works: tamper,
+    exit, the restart re-resolves the sibling mount through the
+    planted symlink (verified live against dockerd)."""
+    (tmp_path / "www" / "conf").mkdir(parents=True)
+    with pytest.raises(cco.ComposeError, match="writable bind"):
+        _sanitize(tmp_path, {
+            "services": {
+                "web": {"image": "x", "restart": "always",
+                        "volumes": ["./www:/w", "./www/conf:/c:ro"]},
+            },
+        })
