@@ -77,16 +77,20 @@ def detect_uninit_leak_cpg(
     sink_pattern = "|".join(_COPY_SINK_NAMES)
     init_pattern = "|".join(_INIT_NAMES)
 
+    # local.name is matched with .contains, never interpolated into a
+    # regex: a variable name carrying regex metacharacters used to blow
+    # up .matches at query runtime (caught, but the whole CPG tier then
+    # fell back to regex).
     query = (
         f'cpg.method.name("{safe_fn}").local'
         f'.filter(_.typeFullName.matches(".*struct.*|.*union.*"))'
         f".map {{ local =>\n"
         f'  val sinks = cpg.method.name("{safe_fn}")'
         f'.ast.isCall.name("{sink_pattern}")'
-        f'.argument.filter(_.code.matches(".*" + local.name + ".*")).l\n'
+        f".argument.filter(_.code.contains(local.name)).l\n"
         f'  val inits = cpg.method.name("{safe_fn}")'
         f'.ast.isCall.name("{init_pattern}")'
-        f'.argument.filter(_.code.matches(".*" + local.name + ".*")).l\n'
+        f".argument.filter(_.code.contains(local.name)).l\n"
         f"  (local.name, local.typeFullName, "
         f"sinks.map(_.lineNumber.getOrElse(0)), "
         f"inits.nonEmpty)\n"
@@ -106,8 +110,11 @@ def detect_uninit_leak_cpg(
         sink_lines = item[2] if isinstance(item[2], list) else [item[2]]
         first_line = int(sink_lines[0]) if sink_lines else 0
 
+        # Longest name first: "copy_to_user" is a substring of
+        # "__copy_to_user", so tuple order used to misreport the
+        # underscored sink under the plain name.
         sink_name = "copy_to_user"
-        for sn in _COPY_SINK_NAMES:
+        for sn in sorted(_COPY_SINK_NAMES, key=len, reverse=True):
             if sn in str(item):
                 sink_name = sn
                 break
@@ -129,6 +136,10 @@ def detect_uninit_leak_cpg(
 
 # ── Tier 2: regex fallback ────────────────────────────────────────────
 
+# `send`/`write` are deliberately broad: narrowing them (e.g. to
+# kernel-only spellings) would drop real userspace/network info-leak
+# sinks, and this is an inject-mode detector — matches become LLM
+# leads, never hard verdicts, so over-match costs prompt noise only.
 _COPY_SINKS = re.compile(
     r"\b(copy_to_user|__copy_to_user|put_user|__put_user"
     r"|nla_put|skb_put_data|skb_copy_to_linear_data"
