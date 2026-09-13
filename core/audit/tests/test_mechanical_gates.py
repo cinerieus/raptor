@@ -755,3 +755,68 @@ class TestModuleConstantInvalidation:
         tree = _ast.parse("CMD = 'ls'\nOTHER = 3\n")
         constants = _collect_module_constants(tree)
         assert constants == {"CMD": "ls", "OTHER": 3}
+
+
+# ── A: threat-model item tokenisation ──
+
+
+class TestThreatModelItemTokenisation:
+    def test_prose_item_does_not_trust_unrelated_entry_points(self):
+        # "local config file parsing" must not turn entry points that
+        # happen to be named "file" or "parsing" into trusted ones.
+        cm = _context_map(
+            entries=[
+                _ep("EP-1", "file", "http"),
+                _ep("EP-2", "parsing", "http"),
+            ],
+            edges=[_edge("file", "sink_a"), _edge("parsing", "sink_b")],
+        )
+        tm = {"trusted_inputs": ["local config file parsing"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "untrusted"
+        assert prov["app.py:sink_b"][0]["trust"] == "untrusted"
+
+    def test_prose_untrusted_item_does_not_flip_trusted_types(self):
+        cm = _context_map(
+            entries=[_ep("EP-1", "parsing", "cli")],
+            edges=[_edge("parsing", "sink_a")],
+        )
+        tm = {"untrusted_inputs": ["all network parsing paths"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "trusted"
+
+    def test_whole_item_name_still_matches(self):
+        cm = _context_map(
+            entries=[_ep("EP-1", "argv", "python_api")],
+            edges=[_edge("argv", "sink_a")],
+        )
+        tm = {"trusted_inputs": ["argv"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "trusted"
+
+    def test_identifier_token_in_prose_still_matches(self):
+        cm = _context_map(
+            entries=[_ep("EP-1", "load_config", "python_api")],
+            edges=[_edge("load_config", "sink_a")],
+        )
+        tm = {"trusted_inputs": ["the load_config startup path"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "trusted"
+
+    def test_call_signature_token_still_matches(self):
+        cm = _context_map(
+            entries=[_ep("EP-1", "loadconf", "python_api")],
+            edges=[_edge("loadconf", "sink_a")],
+        )
+        tm = {"trusted_inputs": ["loadconf(path) at startup"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "trusted"
+
+    def test_untrusted_identifier_still_classifies(self):
+        cm = _context_map(
+            entries=[_ep("EP-1", "upload_handler", "cli")],
+            edges=[_edge("upload_handler", "sink_a")],
+        )
+        tm = {"untrusted_inputs": ["upload_handler (user upload)"]}
+        prov = build_provenance_map(cm, threat_model=tm)
+        assert prov["app.py:sink_a"][0]["trust"] == "untrusted"

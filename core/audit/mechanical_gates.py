@@ -134,6 +134,50 @@ def format_provenance_for_context(
     return "\n".join(lines)
 
 
+def _looks_like_identifier(word: str) -> bool:
+    """True for tokens shaped like code identifiers, not prose words.
+
+    Underscores, dots, and colons never appear in English prose words,
+    and camelCase needs both cases; plain lowercase (or ALL-CAPS
+    acronym) words like "file", "parsing", or "HTTP" are prose.
+    """
+    if not re.fullmatch(r"[A-Za-z_][\w.:]*", word):
+        return False
+    return (
+        "_" in word
+        or "." in word
+        or ":" in word
+        or (word != word.lower() and word != word.upper())
+    )
+
+
+def _threat_model_names(items: list[Any]) -> set[str]:
+    """Matchable names from threat-model input items (lowercased).
+
+    Each item matches as a WHOLE name, plus any identifier-shaped
+    tokens it contains ("the load_config startup path" → "load_config";
+    "loadconf(path) at startup" → "loadconf"). Prose words are NOT
+    split out: an item like "local config file parsing" must not turn
+    every entry point named "file" or "parsing" into a trusted name —
+    the all-trusted branch renders a "Do not flag" instruction, so an
+    over-broad allowlist here steers real findings into suppression.
+    """
+    names: set[str] = set()
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        names.add(text.lower())
+        for word in text.split():
+            had_signature = "(" in word and not word.startswith("(")
+            word = word.split("(")[0].strip(".,;:()")
+            if not word or word.startswith("—"):
+                continue
+            if had_signature or _looks_like_identifier(word):
+                names.add(word.lower())
+    return names
+
+
 def _classify_entry_points(
     entries: list[Any],
     threat_model: dict[str, Any] | None,
@@ -146,18 +190,12 @@ def _classify_entry_points(
     trusted_names: set[str] = set()
     untrusted_names: set[str] = set()
     if threat_model:
-        for item in threat_model.get("trusted_inputs") or []:
-            for word in str(item).split():
-                if "(" in word:
-                    word = word.split("(")[0]
-                if word and not word.startswith("—"):
-                    trusted_names.add(word.lower())
-        for item in threat_model.get("untrusted_inputs") or []:
-            for word in str(item).split():
-                if "(" in word:
-                    word = word.split("(")[0]
-                if word and not word.startswith("—"):
-                    untrusted_names.add(word.lower())
+        trusted_names = _threat_model_names(
+            threat_model.get("trusted_inputs") or [],
+        )
+        untrusted_names = _threat_model_names(
+            threat_model.get("untrusted_inputs") or [],
+        )
 
     _UNTRUSTED_TYPES = {
         "socket", "http", "https", "rpc", "grpc", "graphql",
