@@ -2620,12 +2620,18 @@ def _print_annotations(
     """
     from core.annotations import iter_all_annotations
 
+    from .findings_utils import safe_run_mtime
+
     # Candidate annotation roots: one per run dir + the project root.
     roots = []
     for rd in project.get_run_dirs(sweep=False):
         ann_dir = rd / "annotations"
         if ann_dir.exists():
-            roots.append((rd.stat().st_mtime, ann_dir))
+            # safe_run_mtime: the run dir can vanish between the
+            # exists() probe and the stat (concurrent /project clean,
+            # manual rm) — a vanished dir sorts oldest instead of
+            # crashing the listing.
+            roots.append((safe_run_mtime(rd), ann_dir))
     project_ann = Path(project.output_dir) / "annotations"
     if project_ann.exists():
         # Project-level annotations win over run-level (operator
