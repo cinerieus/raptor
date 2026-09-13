@@ -214,7 +214,16 @@ def save_project_context(ctx: ProjectContext, out_dir: Path) -> Path:
         try:
             return _atomic_write(ctx, target)
         except OSError:
-            pass
+            # The fallback FORKS the store: this run's learnings land
+            # in the run dir while the project-level file stays stale,
+            # and later runs read the project copy. Loud so the
+            # operator can fix the permission/disk issue and re-merge.
+            logger.warning(
+                "project-context write to %s failed — falling back to "
+                "the run directory %s (learnings recorded there will "
+                "not be visible to other runs of this project)",
+                target, out_dir, exc_info=True,
+            )
 
     target = out_dir / "project-context.json"
     try:
@@ -243,6 +252,12 @@ def add_learning(
     if category not in VALID_CATEGORIES:
         msg = f"invalid category {category!r}; valid: {sorted(VALID_CATEGORIES)}"
         raise ValueError(msg)
+    # Load→append→save is last-writer-wins across concurrent sessions
+    # sharing a project: two simultaneous add_learning calls can drop
+    # one learning. Learnings are advisory review hints (never verdict
+    # state), sessions rarely write concurrently, and the file write
+    # itself is atomic — accepted; revisit with a lock if this ever
+    # carries authority.
     ctx = load_project_context(out_dir)
     learning = Learning(
         text=text,
