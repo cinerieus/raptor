@@ -6,6 +6,8 @@ function metadata to scanner findings.
 """
 
 import os
+import threading
+from collections import OrderedDict
 from typing import Any
 
 from core.paths import strip_file_uri, to_repo_relative
@@ -23,6 +25,78 @@ def normalise_path(path: str, repo_root: str) -> str:
     result = to_repo_relative(path, repo_root, outside_root="relative")
     assert result is not None  # "relative" mode never returns None
     return result
+
+
+# Path index per (checklist "files" list, repo_root): normalised entry
+# path → the file entries carrying it, in checklist order (duplicate
+# paths are legal — e.g. a follow-on entry splitting generated vs
+# handwritten functions — so the value is a list, preserving the
+# cross-entry fuzzy-fallback semantics of the original linear scan).
+#
+# Kept OUTSIDE the checklist dict on purpose: stashing the index on the
+# checklist would survive into json.dumps of an enriched checklist and
+# silently double every file entry in the serialised output (the index
+# holds references to the same entry dicts).
+#
+# The cache VALUE keeps a strong reference to the exact ``files`` list
+# object. That is the identity guarantee: while an entry is cached,
+# ``id(files)`` cannot be recycled by a new list, so a key hit plus the
+# ``is`` check below can never serve a stale index to a different
+# checklist. Appends are caught by the stored length; in-place PATH
+# mutation of an already-indexed entry is not detected (nothing in the
+# enrichment pipeline rewrites entry paths mid-run) — item/line edits
+# are always safe because lookups read the live entry dicts.
+#
+# Bound trade-off: larger keeps more checklists' indexes (and their
+# files lists) pinned in memory — checklists on big targets reach tens
+# of MB, so an unbounded map leaks entire inventories in long-lived
+# processes; smaller thrashes when callers alternate between
+# checklists (rebuild is the old O(files) scan plus dict inserts, paid
+# per miss). The enrichment hot path works one checklist at a time —
+# a handful of live checklists (project merge views, tests) fits in 8.
+_INDEX_CACHE_MAX = 8
+_INDEX_CACHE: OrderedDict[
+    tuple[int, str], tuple[list, int, dict[str, list[dict[str, Any]]]],
+] = OrderedDict()
+_INDEX_LOCK = threading.Lock()
+
+
+def _file_index(checklist: dict[str, Any],
+                repo_root: str) -> dict[str, list[dict[str, Any]]]:
+    """Return the ``{normalised_path: [file_entry, ...]}`` index for
+    *checklist*, building (and LRU-caching) it on first use.
+
+    Replaces the per-lookup linear scan that re-normalised every file
+    path in the inventory — O(findings x files) path arithmetic in the
+    agentic enrichment hot path; each entry path is now normalised once
+    per (checklist, repo_root).
+    """
+    files = checklist.get("files", [])
+    # Only plain lists are cached — anything else (exotic caller-built
+    # container) still gets indexed, just per call, preserving the old
+    # scan's duck-typing.
+    cacheable = isinstance(files, list)
+    key = (id(files), repo_root)
+    if cacheable:
+        with _INDEX_LOCK:
+            cached = _INDEX_CACHE.get(key)
+            if (cached is not None and cached[0] is files
+                    and cached[1] == len(files)):
+                _INDEX_CACHE.move_to_end(key)
+                return cached[2]
+
+    index: dict[str, list[dict[str, Any]]] = {}
+    for file_entry in files:
+        entry_path = normalise_path(file_entry.get("path", ""), repo_root)
+        index.setdefault(entry_path, []).append(file_entry)
+
+    if cacheable:
+        with _INDEX_LOCK:
+            _INDEX_CACHE[key] = (files, len(files), index)
+            _INDEX_CACHE.move_to_end(key)
+            while len(_INDEX_CACHE) > _INDEX_CACHE_MAX:
+                _INDEX_CACHE.popitem(last=False)
+    return index
 
 
 def lookup_function(checklist: dict[str, Any], file_path: str, line: int,
@@ -81,11 +155,7 @@ def lookup_function(checklist: dict[str, Any], file_path: str, line: int,
     # (correct — we found what we want); the fuzzy fallback now
     # considers every entry's items before deciding.
     best_fuzzy = None
-    for file_entry in checklist.get("files", []):
-        entry_path = normalise_path(file_entry.get("path", ""), repo_root)
-        if entry_path != norm_path:
-            continue
-
+    for file_entry in _file_index(checklist, repo_root).get(norm_path, ()):
         for func in (file_entry.get("items", file_entry.get("functions", [])) or []):
             # Only FUNCTION items enclose a "function" — globals, macros,
             # classes, top_level and interstitial are not callable units, so a
