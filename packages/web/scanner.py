@@ -671,20 +671,45 @@ class WebScanner:
         logger.info("Running %d unauthenticated checks", len(check_classes))
         discovery_ctx = self._merged_discovery_ctx(discovery, crawl_data)
 
-        for cls in check_classes:
-            errors_before = getattr(self.client, "transport_errors", 0)
-            try:
-                results = self._instantiate_check(cls).run(
-                    self.client, self.base_url, session=None, discovery=discovery_ctx,
+        # Unauthenticated posture must be measured unauthenticated. When
+        # Phase 1 authenticated the scan, self.client's cookie jar holds
+        # the operator session — running these checks on it (a) measures
+        # CORS/cache/cookie posture in the wrong auth context, and (b)
+        # lets the login-probing checks clobber the session: a framework
+        # that rotates or invalidates the cookie on a login POST logs
+        # the scan out mid-phase (Phase 5 then skips ALL authenticated
+        # checks), and a successful default-credential login replaces
+        # the operator's principal for the rest of the scan. A fresh
+        # client (separate cookie jar, same scope/policy/rate limit)
+        # isolates them.
+        probe_client = self.client
+        unauth_client: WebClient | None = None
+        if self.session is not None:
+            unauth_client = self._make_principal_client()
+            probe_client = unauth_client
+
+        try:
+            for cls in check_classes:
+                errors_before = getattr(probe_client, "transport_errors", 0)
+                try:
+                    results = self._instantiate_check(cls).run(
+                        probe_client, self.base_url,
+                        session=None, discovery=discovery_ctx,
+                    )
+                    for r in results:
+                        if not r.passed:
+                            findings.append(
+                                self._to_finding(r, "unauthenticated"),
+                            )
+                except Exception as e:
+                    self._record_check_failure("passive_checks", cls.__name__, e)
+                self._record_check_degradation(
+                    "passive_checks", cls.__name__, errors_before,
+                    client=probe_client,
                 )
-                for r in results:
-                    if not r.passed:
-                        findings.append(self._to_finding(r, "unauthenticated"))
-            except Exception as e:
-                self._record_check_failure("passive_checks", cls.__name__, e)
-            self._record_check_degradation(
-                "passive_checks", cls.__name__, errors_before,
-            )
+        finally:
+            if unauth_client is not None:
+                unauth_client.close()
         self._log_check_failures("Phase 4", "passive_checks")
         logger.info("Phase 4 complete: %d findings", len(findings))
         self._phases_completed.append("passive_checks")
@@ -704,14 +729,19 @@ class WebScanner:
 
     def _record_check_degradation(
         self, phase: str, check_name: str, errors_before: int,
+        client: WebClient | None = None,
     ) -> None:
         """Individual checks swallow their own probe exceptions by
         design, so a check that returns [] because the target died,
         rate-limited, or WAF-banned mid-scan is indistinguishable from
         one that ran clean. The client counts transport failures; a
         per-check delta means the check's coverage is degraded — the
-        report must say so instead of presenting a clean pass."""
-        errors_now = getattr(self.client, "transport_errors", 0)
+        report must say so instead of presenting a clean pass.
+
+        ``client`` selects which client's counter to diff (phases that
+        probe through a phase-scoped client pass it); default is the
+        shared scan client."""
+        errors_now = getattr(client or self.client, "transport_errors", 0)
         if not isinstance(errors_now, int) or not isinstance(errors_before, int):
             return  # client double without the counter
         errors = errors_now - errors_before
@@ -826,8 +856,30 @@ class WebScanner:
         if not self.session:
             return []
         if self.auth_manager and not self.auth_manager.verify(self.client, self.session):
-            logger.warning("Session expired before authenticated checks -- skipping")
-            return []
+            # Session-integrity assertion: earlier phases must not have
+            # cost the scan its principal. If the session died anyway
+            # (server-side timeout, global invalidation), losing the
+            # whole authenticated tier silently is the worst outcome —
+            # try one re-authentication before giving up, and say
+            # loudly which way it went.
+            logger.warning(
+                "Session expired before authenticated checks -- "
+                "re-authenticating",
+            )
+            try:
+                self.session = self.auth_manager.authenticate(self.client)
+                logger.info(
+                    "Re-authentication succeeded (mode: %s) -- "
+                    "authenticated checks proceed", self.session.mode,
+                )
+            except AuthenticationError as e:
+                logger.warning(
+                    "Re-authentication failed -- skipping ALL "
+                    "authenticated checks (coverage loss): %s",
+                    self._redact(str(e)),
+                )
+                self.session = None
+                return []
         findings = []
         check_classes = self._authorized_checks(registry.authenticated())
         logger.info("Running %d authenticated checks", len(check_classes))

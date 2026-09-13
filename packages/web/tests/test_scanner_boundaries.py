@@ -492,6 +492,116 @@ class TestThreeGateVetoes(unittest.TestCase):
         self.assertEqual(finding["oracle_signal"], "xss_reflected_unescaped")
 
 
+class _RecordingCheck:
+    """Records which client each run() call received."""
+
+    check_id = "V0.0.9"
+    risk = "passive"
+    __name__ = "RecordingCheck"
+    seen_clients: list = []
+
+    def __init__(self, llm=None):
+        pass
+
+    def run(self, client, *args, **kwargs):
+        type(self).seen_clients.append(client)
+        return []
+
+
+class TestPhase4AuthContextIsolation(unittest.TestCase):
+    """Unauthenticated checks must not probe through (or clobber) the
+    authenticated scan session."""
+
+    def _run_passive(self, scanner):
+        _RecordingCheck.seen_clients = []
+        discovery = _discovery_mock()
+        with patch(
+            "packages.web.checks.registry.unauthenticated",
+            return_value=[_RecordingCheck],
+        ):
+            scanner.execution_policy = MagicMock()
+            scanner._phase_passive_checks(discovery, {})
+        return _RecordingCheck.seen_clients
+
+    def test_authenticated_scan_probes_through_fresh_client(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            scanner.session = SimpleNamespace(authenticated=True, mode="form")
+            fresh = MagicMock()
+            fresh.transport_errors = 0
+            with patch.object(
+                scanner, "_make_principal_client", return_value=fresh,
+            ) as make_client:
+                seen = self._run_passive(scanner)
+            make_client.assert_called_once_with()
+            self.assertEqual(seen, [fresh])
+            self.assertNotIn(scanner.client, seen)
+            fresh.close.assert_called_once_with()
+
+    def test_unauthenticated_scan_keeps_shared_client(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            self.assertIsNone(scanner.session)
+            scanner.client.transport_errors = 0
+            with patch.object(scanner, "_make_principal_client") as make_client:
+                seen = self._run_passive(scanner)
+            make_client.assert_not_called()
+            self.assertEqual(seen, [scanner.client])
+
+
+class TestPhase5SessionIntegrity(unittest.TestCase):
+    """A dead session before Phase 5 gets one loud re-auth attempt; a
+    failed re-auth skips the tier loudly instead of silently."""
+
+    def _run_auth_checks(self, scanner):
+        _RecordingCheck.seen_clients = []
+        discovery = _discovery_mock()
+        with patch(
+            "packages.web.checks.registry.authenticated",
+            return_value=[_RecordingCheck],
+        ):
+            scanner.execution_policy = MagicMock()
+            return scanner._phase_auth_checks(discovery, {})
+
+    def test_expired_session_reauths_and_proceeds(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            scanner.client.transport_errors = 0
+            old = SimpleNamespace(authenticated=True, mode="form")
+            renewed = SimpleNamespace(authenticated=True, mode="form")
+            scanner.session = old
+            scanner.auth_manager = MagicMock()
+            scanner.auth_manager.verify.return_value = False
+            scanner.auth_manager.authenticate.return_value = renewed
+            with self.assertLogs("raptor", level="WARNING") as captured:
+                self._run_auth_checks(scanner)
+            scanner.auth_manager.authenticate.assert_called_once_with(
+                scanner.client,
+            )
+            self.assertIs(scanner.session, renewed)
+            self.assertEqual(_RecordingCheck.seen_clients, [scanner.client])
+            self.assertIn("re-authenticating", "\n".join(captured.output))
+
+    def test_failed_reauth_skips_tier_loudly(self):
+        from packages.web.auth import AuthenticationError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            scanner.session = SimpleNamespace(authenticated=True, mode="form")
+            scanner.auth_manager = MagicMock()
+            scanner.auth_manager.verify.return_value = False
+            scanner.auth_manager.authenticate.side_effect = (
+                AuthenticationError("still dead")
+            )
+            with self.assertLogs("raptor", level="WARNING") as captured:
+                findings = self._run_auth_checks(scanner)
+            self.assertEqual(findings, [])
+            self.assertIsNone(scanner.session)
+            self.assertEqual(_RecordingCheck.seen_clients, [])
+            joined = "\n".join(captured.output)
+            self.assertIn("skipping ALL authenticated checks", joined)
+
+
 class TestVerificationCarriesSiblingFields(unittest.TestCase):
     def test_verify_findings_passes_hit_base_data_to_oracle(self):
         """Phase 6v must replay the full detection-time field set —
