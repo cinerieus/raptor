@@ -29,6 +29,7 @@ from core.llm.methodology import load_methodology
 from core.smt_solver import BVProfile
 from core.smt_solver.path_feasibility import (
     PathCondition,
+    PathSMTResult,
     check_path_feasibility,
     check_path_feasibility_dual,
 )
@@ -284,6 +285,17 @@ SMT_INFEASIBLE_CONFIDENCE = 0.7
 # unsat — the case where the extra LLM condition-extraction calls buy
 # soundness (declaring a finding infeasible on path 1 alone while
 # path 2 is live is a false suppression).
+#
+# Soundness contract at the cap: the cap bounds WORK (per-path LLM
+# condition extraction + solver calls), never EVIDENCE. Refutation
+# requires every one of the result's paths to be checked-unsat; when
+# the result carries more paths than the cap allows, all-checked-unsat
+# is indeterminate and the finding falls through to full LLM analysis.
+# Trade-off, both directions: raising the cap buys refutation coverage
+# on many-flow results at the price of extra LLM extraction calls per
+# stubbornly-unsat finding; lowering it saves those calls but sends
+# more many-flow findings to the (more expensive) full analysis — it
+# can never widen refutation, because truncated coverage never refutes.
 MAX_SMT_PATHS = 3
 
 
@@ -869,10 +881,12 @@ class DataflowValidator:
         # total) before the expensive LLM call is skipped. The per-path
         # LLM condition extraction runs lazily: an alternative is only
         # extracted after all earlier paths came back unsat.
+        total_paths = 1 + len(dataflow.alternatives)
         candidate_paths = [dataflow, *dataflow.alternatives[:MAX_SMT_PATHS - 1]]
         refuted: list = []
         smt_result = None
         active_index = 0
+        smt_paths_checked = 1
         for path_index, candidate in enumerate(candidate_paths):
             conditions, profile_hint = self._extract_path_conditions(candidate, repo_path)
             profile = _infer_bv_profile(candidate.rule_id, profile_hint)
@@ -913,44 +927,78 @@ class DataflowValidator:
                 continue
             # sat or indeterminate — this path carries the analysis.
             active_index = path_index
+            smt_paths_checked = path_index + 1
             dataflow = candidate
             break
         else:
             paths_checked = len(candidate_paths)
-            if paths_checked == 1:
-                reasoning = (
-                    f"SMT analysis: {smt_result.reasoning}. Path conditions are mutually exclusive. "
-                    f"Confidence is capped at {SMT_INFEASIBLE_CONFIDENCE} because this formal verdict depends on "
-                    "LLM-extracted predicates which may have parsing or coverage limitations."
+            if total_paths > paths_checked:
+                # Truncated coverage: every CHECKED path is unsat, but
+                # the result carries paths the cap kept unchecked — a
+                # live path may be among them, so refuting here would
+                # be a false suppression. Demote to indeterminate and
+                # fall through to full LLM analysis on the primary
+                # path (the pre-SMT behavior).
+                self.logger.info(
+                    "SMT: %d of %d dataflow paths checked (all unsat) — "
+                    "cap %d truncated coverage; refutation requires all "
+                    "paths, proceeding to full analysis",
+                    paths_checked, total_paths, MAX_SMT_PATHS,
                 )
-                barriers = smt_result.unsatisfied
+                smt_paths_checked = paths_checked
+                smt_result = PathSMTResult(
+                    feasible=None,
+                    satisfied=[],
+                    unsatisfied=[
+                        f"path {i + 1}: {cond}"
+                        for i, r in enumerate(refuted)
+                        for cond in r.unsatisfied
+                    ],
+                    unknown=[],
+                    model={},
+                    smt_available=True,
+                    reasoning=(
+                        f"checked {paths_checked} of {total_paths} "
+                        f"dataflow paths (all unsat); "
+                        f"{total_paths - paths_checked} path(s) were not "
+                        f"SMT-checked, so infeasibility is unproven"
+                    ),
+                )
             else:
-                per_path = "; ".join(
-                    f"path {i + 1}: {r.reasoning}" for i, r in enumerate(refuted)
+                if paths_checked == 1:
+                    reasoning = (
+                        f"SMT analysis: {smt_result.reasoning}. Path conditions are mutually exclusive. "
+                        f"Confidence is capped at {SMT_INFEASIBLE_CONFIDENCE} because this formal verdict depends on "
+                        "LLM-extracted predicates which may have parsing or coverage limitations."
+                    )
+                    barriers = smt_result.unsatisfied
+                else:
+                    per_path = "; ".join(
+                        f"path {i + 1}: {r.reasoning}" for i, r in enumerate(refuted)
+                    )
+                    reasoning = (
+                        f"SMT analysis: all {paths_checked} dataflow paths refuted ({per_path}). "
+                        f"Confidence is capped at {SMT_INFEASIBLE_CONFIDENCE} because this formal verdict depends on "
+                        "LLM-extracted predicates which may have parsing or coverage limitations."
+                    )
+                    barriers = [
+                        f"path {i + 1}: {cond}"
+                        for i, r in enumerate(refuted)
+                        for cond in r.unsatisfied
+                    ]
+                return DataflowValidation(
+                    is_exploitable=False,
+                    confidence=SMT_INFEASIBLE_CONFIDENCE,
+                    sanitizers_effective=True,
+                    bypass_possible=False,
+                    bypass_strategy=None,
+                    attack_complexity="high",
+                    reasoning=reasoning,
+                    barriers=barriers,
+                    prerequisites=[],
+                    smt_path_index=paths_checked - 1,
+                    smt_paths_checked=paths_checked,
                 )
-                reasoning = (
-                    f"SMT analysis: all {paths_checked} dataflow paths refuted ({per_path}). "
-                    f"Confidence is capped at {SMT_INFEASIBLE_CONFIDENCE} because this formal verdict depends on "
-                    "LLM-extracted predicates which may have parsing or coverage limitations."
-                )
-                barriers = [
-                    f"path {i + 1}: {cond}"
-                    for i, r in enumerate(refuted)
-                    for cond in r.unsatisfied
-                ]
-            return DataflowValidation(
-                is_exploitable=False,
-                confidence=SMT_INFEASIBLE_CONFIDENCE,
-                sanitizers_effective=True,
-                bypass_possible=False,
-                bypass_strategy=None,
-                attack_complexity="high",
-                reasoning=reasoning,
-                barriers=barriers,
-                prerequisites=[],
-                smt_path_index=paths_checked - 1,
-                smt_paths_checked=paths_checked,
-            )
 
         # Fast-tier FP prefilter. Runs after SMT (a definitive
         # infeasibility verdict beats anything the cheap LLM can
@@ -983,7 +1031,7 @@ class DataflowValidator:
             self.llm.record_short_circuit()
             result = self._short_circuit_fp_dataflow_result(cheap_reasoning)
             result.smt_path_index = active_index
-            result.smt_paths_checked = active_index + 1
+            result.smt_paths_checked = smt_paths_checked
             return result
 
         # Path is sat or indeterminate — run full LLM analysis.
@@ -1120,7 +1168,7 @@ class DataflowValidator:
             # Path bookkeeping is ours, not the LLM's — overwrite
             # anything the response happened to carry.
             validation.smt_path_index = active_index
-            validation.smt_paths_checked = active_index + 1
+            validation.smt_paths_checked = smt_paths_checked
 
             self.logger.info(
                 "Dataflow validation: exploitable=%s, confidence=%.2f",
@@ -1163,7 +1211,7 @@ class DataflowValidator:
                 prerequisites=[],
                 error=str(e) or type(e).__name__,
                 smt_path_index=active_index,
-                smt_paths_checked=active_index + 1,
+                smt_paths_checked=smt_paths_checked,
             )
 
     def validate_finding(

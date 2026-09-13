@@ -523,18 +523,54 @@ class TestMultiPathSMT:
         assert "Path conditions are mutually exclusive" in result.reasoning
         assert result.smt_paths_checked == 1
 
-    def test_alternatives_capped_at_max_smt_paths(self):
-        v = _validator()
+    def _validate_with_alternatives(self, v, n_alternatives, smt_result):
         dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
         extra = v.extract_dataflow_from_sarif(_sarif_two_flows())
-        dp.alternatives = [extra, extra, extra, extra]
+        dp.alternatives = [extra] * n_alternatives
         with patch(
             "packages.codeql.dataflow_validator.check_path_feasibility_dual",
-            return_value=_smt(False, "c", ["u"]),
+            return_value=smt_result,
+        ), patch(
+            "core.llm.scorecard.prefilter_decision",
+            return_value=SimpleNamespace(short_circuit=False),
+        ), patch("core.llm.scorecard.record_prefilter_outcome"), patch(
+            "packages.codeql.dataflow_validator.load_methodology",
+            return_value="",
         ):
-            result = v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
-        assert result.smt_paths_checked == MAX_SMT_PATHS
+            return v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
+
+    def test_truncated_unsat_coverage_never_refutes(self):
+        # 5 total paths, cap 3: every CHECKED path is unsat, but two
+        # paths were never SMT-checked — a live path may be among
+        # them, so the finding must fall through to full LLM analysis
+        # instead of being refuted.
+        v = _validator()
+        result = self._validate_with_alternatives(
+            v, 4, _smt(False, "c", ["u"]),
+        )
+        assert result.is_exploitable is True  # full analysis ran
+        assert v.llm.generate_structured.call_count == 1
+        # The cap still bounds WORK: extraction ran once per checked
+        # path, never for the uncovered remainder.
         assert v._extract_path_conditions.call_count == MAX_SMT_PATHS
+        assert result.smt_paths_checked == MAX_SMT_PATHS
+        # The verdict is grounded on the primary path.
+        assert result.smt_path_index == 0
+
+    def test_full_coverage_at_exactly_the_cap_still_refutes(self):
+        # cap == total paths: coverage is complete, so all-unsat is a
+        # sound refutation — the cap must not weaken it.
+        v = _validator()
+        result = self._validate_with_alternatives(
+            v, MAX_SMT_PATHS - 1, _smt(False, "c", ["u"]),
+        )
+        assert result.is_exploitable is False
+        assert (
+            f"all {MAX_SMT_PATHS} dataflow paths refuted"
+            in result.reasoning
+        )
+        assert result.smt_paths_checked == MAX_SMT_PATHS
+        assert v.llm.generate_structured.call_count == 0
 
 
 class TestSignednessProfileSelection:
