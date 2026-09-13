@@ -3836,6 +3836,26 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 k: v for k, v in kwargs["env"].items()
                 if k != "_RAPTOR_KEEP_TRUST_MARKERS"
             }
+        elif _untrusted_workload:
+            from core.config import RaptorConfig as _RC
+            # Untrusted-class work (run_untrusted*): the child IS (or
+            # runs) the analysed artifact, so beyond the strip set the
+            # WHOLE RAPTOR_*/_RAPTOR name family goes. Allowlist
+            # survivors like RAPTOR_EF_* / RAPTOR_CI serve RAPTOR's
+            # own tool children, but to a hostile binary every one of
+            # them is a one-getenv "you are inside RAPTOR" tell and an
+            # anti-analysis trigger — same contract as the frida spawn
+            # path. Prefix-based (strip_target_exec_markers) so future
+            # RAPTOR_* allowlist additions cannot silently re-open the
+            # fingerprint. The keep-trust dispatch arm above is
+            # untouched: dispatch children consume the markers by
+            # contract. (_RAPTOR_ENV_RESTORE rides the prefix family;
+            # the explicit filter below stays for the other arms.)
+            _env_for_target = {
+                k: v for k, v in
+                _RC.strip_target_exec_markers(kwargs["env"]).items()
+                if k != "_RAPTOR_KEEP_TRUST_MARKERS"
+            }
         else:
             from core.config import RaptorConfig as _RC
             # RAPTOR_DIR (plus the other framework-identity values)
@@ -3845,7 +3865,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
             # self-anchor via __file__; the netns coordinator exports
             # its own), and to a target it is a pure "you are inside
             # RAPTOR at <checkout path>" tell. The old opt-in
-            # strip_trust_markers add is therefore subsumed.
+            # strip_trust_markers add is therefore subsumed. Trusted
+            # tool spawns KEEP the allowlisted RAPTOR_* knobs
+            # (RAPTOR_EF_* budgets, the RAPTOR_CI stamp): their
+            # children consume them by contract — only the
+            # untrusted-workload arm above strips the whole family.
             _env_for_target = {
                 k: v for k, v in kwargs["env"].items()
                 if k not in _RC.TARGET_ENV_STRIP_SET
