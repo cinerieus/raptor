@@ -2522,3 +2522,78 @@ def test_substitution_in_except_star_handler_does_not_dominate():
         "    return open(x)\n"                    # line 7 = sink
     )
     assert sb.substitution_dominates_sink(src, 6, 7, "x") is False
+
+
+# ---------------------------------------------------------------------------
+# Lexical branch-wrap: enclosing conditional keyword on the PREVIOUS
+# line of a guard_shaped validator.
+#
+# The guard's own `if` lives on the validator line, so a conditional
+# keyword on the nearest preceding non-blank line (opening no block
+# there) is always an ENCLOSING conditional — braceless, or with its
+# `{` landing on the guard line where the guard_shaped open-line
+# exemption would wave it through.
+# ---------------------------------------------------------------------------
+
+def test_lexical_guard_shaped_flags_braceless_enclosing_on_prev_line():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        "    if (strict)\n"                                        # line 3
+        '      if (!name.matches("[a-z]+")) return;\n'             # line 4 = guard
+        "    open(name);\n"                                        # line 5
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 4, 5, guard_shaped=True) is True
+
+
+def test_lexical_guard_shaped_flags_prev_line_keyword_with_brace_on_guard_line():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        "    if (strict)\n"                                        # line 3
+        '      { if (!name.matches("[a-z]+")) return; }\n'         # line 4 = guard
+        "    open(name);\n"                                        # line 5
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 4, 5, guard_shaped=True) is True
+
+
+def test_lexical_guard_shaped_plain_prev_statement_still_certifies():
+    """Two-direction: an ordinary statement on the previous line must
+    not read as an enclosing conditional."""
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        "    log(name);\n"                                         # line 3
+        '    if (!name.matches("[a-z]+")) return;\n'               # line 4 = guard
+        "    open(name);\n"                                        # line 5
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 4, 5, guard_shaped=True) is False
+
+
+def test_try_tier0_declined_on_prev_line_wrapped_java_guard(tmp_path: Path):
+    (tmp_path / "App.java").write_text(
+        "void load(String name) {\n"                                                              # line 1
+        "    if (strict)\n"                                                                       # line 2
+        '        if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException();\n'  # line 3
+        "    Files.readAllBytes(Paths.get(BASE, name));\n"                                        # line 4 = sink
+        "}\n"
+    )
+    diff = (
+        "@@ -1,3 +1,4 @@\n"
+        " void load(String name) {\n"
+        "     if (strict)\n"
+        '+        if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException();\n'
+        "     Files.readAllBytes(Paths.get(BASE, name));\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="App.java", sink_line=4, sink_class="pathtrav",
+        language="java",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE

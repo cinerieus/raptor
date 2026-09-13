@@ -984,9 +984,12 @@ def _lexical_validator_in_branch(
     whose exit-on-fail lives ON the matched line (``if
     (!x.matches("[a-z]+")) return;``): the guard line legitimately
     carries ONE conditional keyword and legitimately opens its own
-    conditional block, so the keyword-on-line / dangling-guard checks
-    are skipped and blocks OPENED on the validator line itself are
-    exempt from the closed-before-sink test.  A SECOND conditional
+    conditional block, so the single-keyword-on-line check is skipped
+    and blocks OPENED on the validator line itself are exempt from
+    the closed-before-sink test.  The preceding-line dangling scan
+    still applies — the guard's own ``if`` is on its line, so a
+    conditional keyword on the nearest preceding non-blank line is
+    always enclosing.  A SECOND conditional
     keyword on the guard line is an enclosing conditional collapsed
     onto it (``if (strict) { if (!ok) { return; } }``) and refuses —
     a block that both opens and closes on the guard line is invisible
@@ -998,25 +1001,30 @@ def _lexical_validator_in_branch(
     lines = source_text.splitlines()
     if not (0 < validator_line <= len(lines) and 0 < sink_line <= len(lines)):
         return True
+    scrubbed_validator = _LEXICAL_NOISE.sub(" ", lines[validator_line - 1])
     if not guard_shaped:
-        if _COND_BLOCK_KEYWORD.search(
-                _LEXICAL_NOISE.sub(" ", lines[validator_line - 1])):
+        if _COND_BLOCK_KEYWORD.search(scrubbed_validator):
             return True
-        # Dangling braceless guard: the nearest preceding non-blank
-        # scrubbed line carries a conditional keyword and opens no
-        # block — the validator line IS its guarded statement.
-        for prev_idx in range(validator_line - 2, -1, -1):
-            prev = _LEXICAL_NOISE.sub(" ", lines[prev_idx])
-            if not prev.strip():
-                continue
-            if _COND_BLOCK_KEYWORD.search(prev) and "{" not in prev:
-                return True
-            break
-    elif len(_COND_BLOCK_KEYWORD.findall(
-            _LEXICAL_NOISE.sub(" ", lines[validator_line - 1]))) >= 2:
+    elif len(_COND_BLOCK_KEYWORD.findall(scrubbed_validator)) >= 2:
         # The guard accounts for exactly one conditional keyword on
         # its own line; any further one wraps the guard conditionally.
         return True
+    # Dangling braceless conditional on the nearest preceding
+    # non-blank scrubbed line (a conditional keyword opening no block
+    # there): for a plain validator, the validator line IS its
+    # guarded statement; for guard_shaped, the guard's own ``if``
+    # lives on the validator line, so a preceding-line keyword is
+    # always an ENCLOSING conditional — braceless (`if (strict)` then
+    # the guard line), or with its `{` landing on the guard line,
+    # where the open-line exemption below would otherwise wave it
+    # through.
+    for prev_idx in range(validator_line - 2, -1, -1):
+        prev = _LEXICAL_NOISE.sub(" ", lines[prev_idx])
+        if not prev.strip():
+            continue
+        if _COND_BLOCK_KEYWORD.search(prev) and "{" not in prev:
+            return True
+        break
     # Each block gets a unique id so "still open at the sink" means the
     # SAME block, not merely the same nesting depth.
     stack: list[tuple[int, bool, int]] = []  # (block id, conditional?, open line)
