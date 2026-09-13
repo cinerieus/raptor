@@ -228,6 +228,15 @@ def _find_app_bundle(path: Path) -> Path | None:
 
 
 def _run_readonly_tool(argv: list[str]) -> str:
+    # Sandbox seam, documented deliberately: codesign/otool parse
+    # attacker-controlled Mach-O bytes under run_trusted (safe env +
+    # rlimits) rather than the full mount-ns/Landlock/seccomp sandbox
+    # that core.binary.inspect gives its allowlisted tools. These
+    # tools exist only on macOS, where the Linux sandbox stack does
+    # not apply — the full sandbox would degrade to exactly this
+    # posture there. If these invocations ever need to run on a Linux
+    # host, route them through the core.binary.inspect allowlist
+    # instead of widening run_trusted use.
     try:
         result = run_trusted(
             argv,

@@ -1387,7 +1387,10 @@ class CrashAnalyser:
         else:
             info["stack_canaries"] = "unknown"
             
-        # Check for NX/DEP
+        # Check for NX/DEP. otool under run_trusted is the documented
+        # darwin-only sandbox seam — see macho._run_readonly_tool: the
+        # tool exists only on macOS, where the Linux mount-ns/Landlock
+        # stack degrades to this posture anyway.
         try:
             result = _run_trusted(
                 ["otool", "-hv", str(self.binary)],  # macOS
@@ -1588,7 +1591,9 @@ class CrashAnalyser:
                 if symbol in result.stdout:
                     return True
                     
-            # Check for ASan runtime library dependencies
+            # Check for ASan runtime library dependencies. otool under
+            # run_trusted: documented darwin-only sandbox seam — see
+            # macho._run_readonly_tool.
             result = _run_trusted(
                 ["otool", "-L", str(self.binary)],
                 capture_output=True,
