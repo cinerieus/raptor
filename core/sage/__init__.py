@@ -4,6 +4,7 @@ from .client import SageClient
 from .config import SageConfig
 from .hooks import (
     compute_finding_source_hash,
+    finding_source_hashes,
     infer_codeql_build_from_sage_recall_row,
     parse_rule_metadata,
     recall_concepts_for_study,
@@ -16,6 +17,7 @@ from .hooks import (
     recall_context_for_sca,
     # Finding verdict — cross-run FP suppression
     recall_prior_finding_verdict,
+    recall_prior_fp_verdicts,
     recall_proven_rules,
     recall_verified_proven_rules,
     should_replay_rule,
@@ -33,6 +35,7 @@ __all__ = [
     "SageClient",
     "SageConfig",
     "compute_finding_source_hash",
+    "finding_source_hashes",
     "infer_codeql_build_from_sage_recall_row",
     "parse_rule_metadata",
     "recall_concepts_for_study",
@@ -41,6 +44,7 @@ __all__ = [
     "recall_context_for_fuzzing_strategy",
     "recall_context_for_sca",
     "recall_prior_finding_verdict",
+    "recall_prior_fp_verdicts",
     "recall_proven_rules",
     "recall_verified_proven_rules",
     "should_replay_rule",

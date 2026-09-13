@@ -1037,6 +1037,162 @@ class TestFindingVerdictHooks(unittest.TestCase):
             "/repo", "CWE-89", "src/db.py", "run_query", "abc123"))
 
 
+class TestRecallPriorFpVerdicts(unittest.TestCase):
+    """Rule-agnostic function-grade FP recall (the /audit gate's hook).
+
+    The caller knows only file:function; the rule is recovered from
+    the row and the MAC fingerprint recomputed from it, so a mangled
+    rule fails verification. The caller separately re-verifies the
+    returned ``source_hash`` against current source.
+    """
+
+    @staticmethod
+    def _stamped_verdict_row(
+        verdict="false_positive", src="deadbeef1234", ts=None,
+        rule="CWE-89", file="src/db.py", fn="run_query",
+    ):
+        import time as _time
+
+        from core.sage.hooks import _finding_fingerprint, _repo_key
+
+        ts = str(int(_time.time())) if ts is None else str(ts)
+        fp = _finding_fingerprint(rule, file, fn)
+        content = (
+            f"Finding verdict: fp={fp} rule={rule} "
+            f"file={file} fn={fn} "
+            f"||src={src}|| ||verdict={verdict}|| ||ts={ts}||"
+        )
+        fields = {
+            "kind": "finding_verdict",
+            "repo": _repo_key("/repo"),
+            "fp": fp,
+            "verdict": verdict,
+            "src": src,
+            "ts": ts,
+        }
+        return {"content": rowmac.stamp(content, fields), "confidence": 0.95}
+
+    @patch("core.sage.hooks._get_client", return_value=None)
+    def test_returns_empty_when_unavailable(self, _):
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_returns_verified_row_with_recovered_rule(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.query.return_value = [self._stamped_verdict_row()]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        rows = recall_prior_fp_verdicts("/repo", "src/db.py", "run_query")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["verdict"], "false_positive")
+        self.assertEqual(rows[0]["rule"], "CWE-89")
+        self.assertEqual(rows[0]["source_hash"], "deadbeef1234")
+
+    @patch("core.sage.hooks._get_client")
+    def test_binds_to_the_queried_function(self, mock_get_client):
+        """Semantic neighbours for OTHER functions never leak in."""
+        mock_client = MagicMock()
+        mock_client.query.return_value = [
+            self._stamped_verdict_row(fn="other_fn"),
+        ]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_non_suppressible_verdicts_excluded(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.query.return_value = [
+            self._stamped_verdict_row(verdict="exploitable"),
+        ]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_rejects_unstamped_row(self, mock_get_client):
+        mock_client = MagicMock()
+        row = self._stamped_verdict_row()
+        row["content"] = rowmac.strip(row["content"])[0]
+        mock_client.query.return_value = [row]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_rejects_tampered_rule(self, mock_get_client):
+        """Rewriting the rule in the prose breaks the recomputed MAC
+        fingerprint — the row is dropped, never trusted."""
+        mock_client = MagicMock()
+        row = self._stamped_verdict_row()
+        row["content"] = row["content"].replace(
+            "rule=CWE-89", "rule=CWE-79",
+        )
+        mock_client.query.return_value = [row]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_expired_row_rejected(self, mock_get_client):
+        import time as _time
+
+        from core.sage import hooks
+        old_ts = int(_time.time()) - hooks._SUPPRESS_TTL_S - 3600
+        mock_client = MagicMock()
+        mock_client.query.return_value = [
+            self._stamped_verdict_row(ts=old_ts),
+        ]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+    @patch("core.sage.hooks._get_client")
+    def test_disabled_by_env_flag(self, mock_get_client):
+        import os
+        mock_client = MagicMock()
+        mock_client.query.return_value = [self._stamped_verdict_row()]
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        with patch.dict(os.environ, {"RAPTOR_SAGE_FP_SUPPRESS": "0"}):
+            self.assertEqual(
+                recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"),
+                [],
+            )
+        mock_client.query.assert_not_called()
+
+    @patch("core.sage.hooks._get_client")
+    def test_query_error_degrades_to_empty(self, mock_get_client):
+        mock_client = MagicMock()
+        mock_client.query.side_effect = ConnectionError("down")
+        mock_get_client.return_value = mock_client
+
+        from core.sage.hooks import recall_prior_fp_verdicts
+        self.assertEqual(
+            recall_prior_fp_verdicts("/repo", "src/db.py", "run_query"), [],
+        )
+
+
 class TestRuleLibraryHooks(unittest.TestCase):
     """Tests for N4 rule-library SAGE hooks."""
 
@@ -1935,6 +2091,45 @@ class TestAuditHypothesisVerdict(unittest.TestCase):
             source_hash="new",
         )
         self.assertIsNone(result)
+
+
+class TestFindingSourceHashes(unittest.TestCase):
+    """Batched window hashes: byte-for-byte parity with the per-line
+    compute_finding_source_hash (window form), one file read total."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "src.c"
+        self.path.write_text(
+            "\n".join(f"line {i}" for i in range(1, 61)) + "\n",
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_parity_with_per_line_compute(self):
+        from core.sage.hooks import (
+            compute_finding_source_hash,
+            finding_source_hashes,
+        )
+        batched = finding_source_hashes(self.path, 5, 25)
+        self.assertTrue(batched)
+        for line in range(5, 26):
+            h = compute_finding_source_hash(self.path, line)
+            self.assertIn(h, batched)
+            self.assertEqual(batched[h], line)
+
+    def test_unreadable_file_returns_empty(self):
+        from core.sage.hooks import finding_source_hashes
+        self.assertEqual(
+            finding_source_hashes(self.path.parent / "gone.c", 1, 10), {},
+        )
+
+    def test_empty_or_inverted_range(self):
+        from core.sage.hooks import finding_source_hashes
+        self.assertEqual(finding_source_hashes(self.path, 0, 10), {})
+        self.assertEqual(finding_source_hashes(self.path, 9, 5), {})
 
 
 class TestComputeFindingSourceHash(unittest.TestCase):

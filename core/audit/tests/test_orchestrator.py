@@ -5379,6 +5379,210 @@ class TestSageRecallGate:
         assert sorted(calls) == ["check_pw", "validate"]
 
 
+class TestSageFpPrimer:
+    """Prior finding-verdict FP primers in review_one_function.
+
+    A prior false_positive / not_exploitable adjudication for a
+    finding in the function (source window unchanged) is injected as
+    HINT-TIER review context — the review always runs and the verdict
+    is the reviewer's own. Never a skip, never a committed verdict:
+    a finding-scoped adjudication says nothing about bug classes it
+    never examined. Hermetic: both SAGE hooks stubbed at their seams.
+    """
+
+    @staticmethod
+    def _hash_for(target: Path, line: int) -> str:
+        from core.sage.hooks import compute_finding_source_hash
+        return compute_finding_source_hash(target / "src" / "auth.c", line)
+
+    def _run(self, tmp_path: Path, rows_fn, *, config_kw=None):
+        from unittest.mock import patch as _patch
+
+        target, out = _setup_target(tmp_path)
+        seen_ctx: dict[str, dict] = {}
+
+        def review_fn(ctx, config):
+            seen_ctx[ctx["function"]] = ctx
+            return ReviewOutcome(
+                file=ctx["file"], function=ctx["function"],
+                status="clean", body="looked fine",
+            )
+
+        config = OrchestratorConfig(
+            target_path=target, out_dir=out, resume=False,
+            sweep_validate_findings=False, batch_sloc_threshold=0,
+            joern_overrides={"enabled": False},
+            **(config_kw or {}),
+        )
+        with (
+            _patch(
+                "core.sage.hooks.recall_audit_hypothesis_verdict",
+                return_value=None,
+            ),
+            _patch(
+                "core.sage.hooks.recall_prior_fp_verdicts",
+                side_effect=lambda **kw: rows_fn(target, **kw),
+            ) as mock_fp,
+        ):
+            result = run_orchestrator(config, review_fn)
+        return result, seen_ctx, mock_fp, out
+
+    def test_matching_prior_injects_hint_and_never_skips(
+        self, tmp_path: Path,
+    ):
+        def rows(target, **kw):
+            if kw["function"] != "check_pw":
+                return []
+            # Store-side shape: window hash around the FINDING line.
+            return [{
+                "verdict": "false_positive",
+                "rule": "semgrep.strcpy",
+                "source_hash": self._hash_for(target, 4),
+                "confidence": 0.95,
+            }]
+
+        result, seen_ctx, _, out = self._run(tmp_path, rows)
+
+        # BOTH functions were fully reviewed — the primer never skips.
+        assert sorted(seen_ctx) == ["check_pw", "validate"]
+        assert result.prefilter_skipped == 0
+        # The hint reached the primed function's context only.
+        priors = seen_ctx["check_pw"].get("sage_fp_priors")
+        assert priors == [
+            {"verdict": "false_positive", "rule": "semgrep.strcpy"},
+        ]
+        assert "sage_fp_priors" not in seen_ctx["validate"]
+        # The committed verdict is the REVIEWER's, with no recall stamp.
+        for o in result.outcomes:
+            assert not (o.evidence_tool or "").startswith("sage:fp")
+
+        # Hint-tier provenance trail: recorded, and dropped=False —
+        # nothing was suppressed.
+        recs = [
+            json.loads(line)
+            for line in (out / "suppressions.jsonl").read_text().splitlines()
+        ]
+        fp_recs = [
+            r for r in recs if r.get("verdict") == "sage_false_positive"
+        ]
+        assert fp_recs and fp_recs[0]["function"] == "check_pw"
+        assert fp_recs[0]["dropped"] is False
+        assert fp_recs[0]["injected"] is True
+
+    def test_stale_source_hash_injects_nothing(self, tmp_path: Path):
+        """A recalled verdict whose window hash no longer matches any
+        line of the function is dropped — no hint, plain review."""
+        def rows(target, **kw):
+            return [{
+                "verdict": "false_positive",
+                "rule": "semgrep.strcpy",
+                "source_hash": "feedfacecafe",
+            }]
+
+        _, seen_ctx, _, out = self._run(tmp_path, rows)
+        assert sorted(seen_ctx) == ["check_pw", "validate"]
+        assert all(
+            "sage_fp_priors" not in ctx for ctx in seen_ctx.values()
+        )
+        assert not (out / "suppressions.jsonl").exists()
+
+    def test_blind_first_pass_withholds_hint(self, tmp_path: Path):
+        def rows(target, **kw):
+            if kw["function"] != "check_pw":
+                return []
+            return [{
+                "verdict": "false_positive",
+                "rule": "semgrep.strcpy",
+                "source_hash": self._hash_for(target, 4),
+            }]
+
+        _, seen_ctx, _, out = self._run(
+            tmp_path, rows, config_kw={"blind_first_pass": True},
+        )
+        assert sorted(seen_ctx) == ["check_pw", "validate"]
+        assert "sage_fp_priors" not in seen_ctx["check_pw"]
+        # The provenance record states what happened: matched but
+        # withheld — it must not claim an injection blind mode never
+        # performed.
+        recs = [
+            json.loads(line)
+            for line in (out / "suppressions.jsonl").read_text().splitlines()
+        ]
+        fp_recs = [
+            r for r in recs if r.get("verdict") == "sage_false_positive"
+        ]
+        assert fp_recs and fp_recs[0]["injected"] is False
+        assert "matched" in fp_recs[0]["reason"]
+
+    def test_sage_recall_flag_disables_primer(self, tmp_path: Path):
+        def rows(target, **kw):
+            raise AssertionError("hook must not be consulted")
+
+        _, seen_ctx, mock_fp, _ = self._run(
+            tmp_path, rows, config_kw={"sage_recall": False},
+        )
+        assert sorted(seen_ctx) == ["check_pw", "validate"]
+        mock_fp.assert_not_called()
+
+    def test_prompt_renders_hints_not_verdicts(self):
+        from core.audit.context import format_context_for_prompt
+
+        ctx = {
+            "file": "src/auth.c",
+            "function": "check_pw",
+            "line_start": 1,
+            "source": "int check_pw(void) { return 0; }",
+            "sage_fp_priors": [
+                {"verdict": "false_positive", "rule": "semgrep.strcpy"},
+                {"verdict": "not_exploitable", "rule": "codeql.of\nlow"},
+            ],
+        }
+        prompt = format_context_for_prompt(ctx)
+        assert "hints, not verdicts" in prompt
+        assert "never inherit a verdict" in prompt
+        assert "semgrep.strcpy" in prompt
+        # not_exploitable is dormant-leaning — a REAL defect, never
+        # a clean steer.
+        assert "not_exploitable" in prompt
+        assert "dormant-leaning" in prompt
+        assert "never clean" in prompt
+        # Rule ids are single-line clamped before joining the prompt.
+        assert "codeql.of low" in prompt
+
+    def test_match_helper_requires_span(self):
+        from core.audit.orchestrator import _match_fp_verdict_to_source
+
+        rows = [{"verdict": "false_positive", "source_hash": "abc"}]
+        assert _match_fp_verdict_to_source(
+            rows, Path("/nonexistent"), {"file": "a.c", "name": "f"},
+        ) == []
+
+    def test_scan_bound_binds_both_directions(self, tmp_path, monkeypatch):
+        """_FP_RECALL_MAX_SCAN_LINES is load-bearing: a finding line
+        within the cap matches; one beyond it does not (and raising
+        the cap would flip the second assertion — two-direction pin)."""
+        import core.audit.orchestrator as orch_mod
+        from core.audit.orchestrator import _match_fp_verdict_to_source
+        from core.sage.hooks import compute_finding_source_hash
+
+        target = tmp_path / "t"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "big.c").write_text(
+            "\n".join(f"int l{i};" for i in range(1, 40)) + "\n",
+        )
+        monkeypatch.setattr(orch_mod, "_FP_RECALL_MAX_SCAN_LINES", 10)
+        gap = {"file": "src/big.c", "name": "f",
+               "line_start": 1, "line_end": 39}
+
+        within = compute_finding_source_hash(target / "src" / "big.c", 5)
+        beyond = compute_finding_source_hash(target / "src" / "big.c", 20)
+        row_within = [{"verdict": "false_positive", "source_hash": within}]
+        row_beyond = [{"verdict": "false_positive", "source_hash": beyond}]
+
+        assert _match_fp_verdict_to_source(row_within, target, gap)
+        assert _match_fp_verdict_to_source(row_beyond, target, gap) == []
+
+
 class TestDeadCodeReason:
     """Tests for _dead_code_reason helper."""
 

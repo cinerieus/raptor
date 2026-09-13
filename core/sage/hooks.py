@@ -751,6 +751,47 @@ def compute_finding_source_hash(
     return sha256_string(f"{span_hash}:{file_hash}")[:12]
 
 
+def finding_source_hashes(
+    file_path: Path,
+    line_start: int,
+    line_end: int,
+    window: int = 10,
+) -> dict[str, int]:
+    """Store-format window hashes for a range of candidate finding lines.
+
+    Same formula as :func:`compute_finding_source_hash` in its
+    window form (``line`` ± ``window`` span hash folded with the
+    full-file hash), for callers that must match a STORED finding
+    hash against a span whose exact finding line is unknown (the
+    /audit function-grade primer). The loop-invariant full-file hash
+    is computed ONCE and the span hashes batch over a single file
+    read — per-line calls to ``compute_finding_source_hash`` re-read
+    and re-hash the whole file every iteration (measured near a
+    second per no-match scan on real files).
+
+    Returns ``{hash: line}`` for every computable candidate; ``{}``
+    when the file is unreadable or the range is empty. Later lines
+    overwrite on the (theoretical) collision — callers only test
+    membership.
+    """
+    if line_start <= 0 or line_end < line_start:
+        return {}
+    from core.staleness import hash_spans
+    try:
+        file_text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    file_hash = sha256_string(file_text)[:12]
+    lines = list(range(line_start, line_end + 1))
+    spans = [(max(1, ln - window), ln + window) for ln in lines]
+    span_hashes = hash_spans(file_path, spans)
+    return {
+        sha256_string(f"{sh}:{file_hash}")[:12]: ln
+        for ln, sh in zip(lines, span_hashes)
+        if sh
+    }
+
+
 # Client-side lifetime bound on suppressible verdicts. Even a verdict
 # whose source hash still matches goes stale eventually (build flags,
 # dependencies, and reachability drift without touching the file);
@@ -856,6 +897,96 @@ def recall_prior_finding_verdict(
     except Exception as e:  # noqa: BLE001 — SAGE is best-effort; a hook failure must never break the pipeline
         logger.debug("SAGE FP recall failed: %s", e)
         return None
+
+
+def recall_prior_fp_verdicts(
+    repo_path: str,
+    file_path: str,
+    function: str,
+    top_k: int = 3,
+) -> list[dict[str, Any]]:
+    """MAC-verified suppressible finding verdicts for one function.
+
+    Rule-agnostic companion to :func:`recall_prior_finding_verdict`
+    for callers that review whole FUNCTIONS rather than one scanner
+    finding (the /audit loop): they know ``file:function`` but not
+    which rule produced the prior finding, and the stored source hash
+    is windowed around the FINDING line, which they also do not know.
+    Returns every suppressible (``false_positive`` /
+    ``not_exploitable``) verdict row stored for the function — MAC
+    verified against the rule the row itself names, TTL-fresh — each
+    carrying the ``source_hash`` the CALLER must still match against
+    the current source (scan the function's lines with
+    :func:`compute_finding_source_hash`; no match ⇒ stale ⇒ re-test).
+
+    The rule id is recovered from the row content; the MAC fingerprint
+    is recomputed from it, so a forged or delimiter-mangled rule value
+    fails verification and the row is dropped (fail direction:
+    re-test). Honours ``RAPTOR_SAGE_FP_SUPPRESS`` like the rule-keyed
+    recall. Returns ``[]`` on any failure or when SAGE is absent.
+    """
+    if not env_flag("RAPTOR_SAGE_FP_SUPPRESS", default=True):
+        logger.debug(
+            "SAGE finding_verdict: suppression disabled via "
+            "RAPTOR_SAGE_FP_SUPPRESS=0 — re-testing",
+        )
+        return []
+    client = _get_client()
+    if client is None:
+        return []
+    try:
+        _metric_inc("recall_attempted")
+        results = client.query(
+            text=f"Finding verdict: file={file_path} fn={function}",
+            domain_tag=_fp_domain(repo_path),
+            top_k=top_k,
+            min_confidence=0.7,
+        )
+        _s = _sanitise_delim
+        # Semantic retrieval can return neighbours — bind to THIS
+        # function before anything else.
+        binding = f" file={_s(file_path)} fn={_s(function)} ||src="
+        rows: list[dict[str, Any]] = []
+        for row in results:
+            content, token = rowmac.strip(str(row.get("content") or ""))
+            if binding not in content:
+                continue
+            src_match = re.search(r"\|\|src=([^|]+)\|\|", content)
+            rule_match = re.search(r" rule=(.*?) file=", content)
+            ts_match = re.search(r"\|\|ts=(\d+)\|\|", content)
+            if not src_match or rule_match is None or not ts_match:
+                # Pre-TTL / malformed rows demote to hint — re-test.
+                continue
+            src = src_match.group(1)
+            rule = rule_match.group(1)
+            ts = ts_match.group(1)
+            for v in _SUPPRESS_VERDICTS:
+                if f"||verdict={v}||" not in content:
+                    continue
+                fields = {
+                    "kind": "finding_verdict",
+                    "repo": _repo_key(repo_path),
+                    "fp": _finding_fingerprint(rule, file_path, function),
+                    "verdict": v,
+                    "src": src,
+                    "ts": ts,
+                }
+                if not _row_mac_ok("finding_verdict", fields, token):
+                    break
+                if not _row_ts_fresh("finding_verdict", ts):
+                    break
+                _metric_inc("recall_hits")
+                rows.append({
+                    "verdict": v,
+                    "rule": rule,
+                    "source_hash": src,
+                    "confidence": recall_row_confidence(row),
+                })
+                break
+        return rows
+    except Exception as e:  # noqa: BLE001 — SAGE is best-effort; a hook failure must never break the pipeline
+        logger.debug("SAGE FP recall (function-grade) failed: %s", e)
+        return []
 
 
 def store_finding_verdict(

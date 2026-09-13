@@ -1792,6 +1792,47 @@ def format_context_for_prompt(
             PromptSection("prior_finding_analyses", "\n".join(pfa), 4),
         )
 
+    if ctx.get("sage_fp_priors"):
+        # FP primers from cross-run memory: a prior pipeline stage
+        # adjudicated a scanner finding located in this function as
+        # false_positive / not_exploitable (MAC-verified, source
+        # window unchanged). HINT TIER by design: the review still
+        # runs and the verdict is the reviewer's own — a
+        # finding-scoped adjudication (one rule at one site) says
+        # nothing about bug classes it never examined, so it must
+        # never skip or pre-decide a FUNCTION-grade review. Rule ids
+        # originate in scanner configs, so they are single-line
+        # clamped before joining the prompt.
+        fpp = ["\n### Prior finding adjudications (hints, not verdicts)"]
+        fpp.append(
+            "Cross-run memory records prior adjudications of "
+            "individual scanner findings located in this function "
+            "(source unchanged since). Each covers ONE rule at ONE "
+            "site — verify independently, never inherit a verdict, "
+            "and still review the whole function."
+        )
+        for pr in ctx["sage_fp_priors"]:
+            rule = " ".join(
+                str(pr.get("rule") or "a prior finding").split(),
+            )[:120]
+            if str(pr.get("verdict") or "") == "not_exploitable":
+                fpp.append(
+                    f"- {rule}: previously adjudicated not_exploitable "
+                    "— a REAL defect judged unexploitable in that "
+                    "run's context (dormant-leaning, never clean on "
+                    "this hint alone). If you confirm the defect, "
+                    "re-judge exploitability against THIS review's "
+                    "evidence."
+                )
+            else:
+                fpp.append(
+                    f"- {rule}: previously adjudicated false_positive "
+                    "for that one finding."
+                )
+        sections.append(
+            PromptSection("sage_fp_priors", "\n".join(fpp), 4),
+        )
+
     injected_hyp_text = _format_injected_hypotheses(
         ctx.get("injected_hypotheses"),
     )

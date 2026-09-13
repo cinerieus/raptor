@@ -1868,6 +1868,59 @@ def _supersede_prior_outcome(
     return prior
 
 
+#: Line-scan bound for matching a stored finding-window hash inside a
+#: function span. Store-side hashes are windowed around the FINDING
+#: line, so matching tries one candidate line each; the full-file fold
+#: hash is hoisted and the span hashes batch over a single file read
+#: (core.sage.hooks.finding_source_hashes), so a full scan costs one
+#: file read + one short hash per line — low single-digit ms at this
+#: bound. Too low: FP primers for findings deep inside very long
+#: functions never match and the hint is lost (safe — the review just
+#: runs unprimed). Too high: a pathological generated-code "function"
+#: spans tens of thousands of lines and the per-review pre-pass grows
+#: past prompt-build cost for hints of marginal value that deep.
+_FP_RECALL_MAX_SCAN_LINES = 400
+
+
+def _match_fp_verdict_to_source(
+    rows: list[dict[str, Any]],
+    target_path: Path,
+    gap: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Recalled FP verdicts whose stored source window still matches
+    the current source; ``[]`` when none does.
+
+    The store side (/analyze) hashes the window around the FINDING
+    line plus the full file; the function-grade caller does not know
+    that line, so every candidate line of the function span is hashed
+    ONCE (batched, single file read) and each row's stored hash is
+    matched against the set. No match means the source drifted (or
+    the finding lay outside this span) — the fail direction is always
+    re-test, never stale reliance.
+    """
+    line_start = int(gap.get("line_start", 0) or 0)
+    if not rows or line_start <= 0:
+        return []
+    line_end = int(gap.get("line_end") or line_start)
+    line_end = min(line_end, line_start + _FP_RECALL_MAX_SCAN_LINES - 1)
+    try:
+        from core.sage.hooks import finding_source_hashes
+    except ImportError:
+        return []
+    try:
+        hashes = finding_source_hashes(
+            target_path / gap.get("file", ""), line_start, line_end,
+        )
+    except Exception:  # noqa: BLE001 — staleness probe must never break the review
+        return []
+    if not hashes:
+        return []
+    return [
+        row for row in rows
+        if row.get("source_hash") and row["source_hash"] in hashes
+    ]
+
+
 def review_one_function(
     gap: dict,
     shared,
@@ -2205,6 +2258,48 @@ def review_one_function(
                 on_progress(review_idx, total, outcome)
             return outcome
 
+    # ── SAGE: prior finding-verdict FP primers (hint tier) ───────────
+    # Cross-run memory of /analyze adjudications: a prior
+    # false_positive / not_exploitable verdict for a scanner finding
+    # located in this function, whose stored source window still
+    # matches current source, is injected into the review context as
+    # a PRIMER — the same shape as prior finding-grade claims. The
+    # review always runs and the verdict is the reviewer's own: a
+    # finding-scoped adjudication (one rule at one site) says nothing
+    # about bug classes it never examined, so it must never skip or
+    # pre-decide a function-grade review (the sibling hypothesis-recall
+    # gate above deliberately refuses to skip on prior FINDING-grade
+    # verdicts for the same reason). not_exploitable renders as a
+    # dormant-leaning hint — it records a REAL defect judged
+    # unexploitable, never a clean. Same gates as the hypothesis
+    # recall (config.sage_recall, force, force_review); the
+    # RAPTOR_SAGE_FP_SUPPRESS kill switch and MAC/TTL screens live in
+    # the hook. Cost note: this is a second SAGE query per reviewed
+    # function on top of the hypothesis recall (~2x recall traffic);
+    # both degrade to no-ops without a SAGE client.
+    _sage_fp_priors: list[dict[str, Any]] = []
+    if (
+        getattr(config, "sage_recall", True)
+        and not config.force
+        and not gap.get("force_review")
+    ):
+        try:
+            from core.sage.hooks import recall_prior_fp_verdicts
+
+            _fp_rows = recall_prior_fp_verdicts(
+                repo_path=str(config.target_path),
+                file_path=gap["file"],
+                function=gap["name"],
+            )
+        except Exception:  # noqa: BLE001
+            _fp_rows = []
+        for _hit in _match_fp_verdict_to_source(
+            _fp_rows, config.target_path, gap,
+        ):
+            _sage_fp_priors.append({
+                "verdict": str(_hit.get("verdict") or ""),
+                "rule": str(_hit.get("rule") or ""),
+            })
     # ── Build context ─────────────────────────────────────────────────
     ctx = _build_context(
         config,
@@ -2215,6 +2310,52 @@ def review_one_function(
         discovered_evidence=discovered_evidence,
         blind=config.blind_first_pass,
     )
+
+    _fp_priors_injected = bool(_sage_fp_priors) and not config.blind_first_pass
+    if _fp_priors_injected:
+        # Withheld in blind mode like the prior-claims section — the
+        # blind first pass sees no external adjudications by design.
+        ctx["sage_fp_priors"] = _sage_fp_priors
+
+    if _sage_fp_priors and config.out_dir:
+        # Hint-tier provenance trail, written AFTER the injection
+        # decision so the record states what actually happened:
+        # ``injected`` is False when the blind first pass withheld
+        # the primer. Nothing is ever dropped — the review runs.
+        try:
+            from core.analysis.reach_chokepoint import record_suppression
+
+            for _pr in _sage_fp_priors:
+                record_suppression(
+                    config.out_dir,
+                    finding={
+                        "finding_id": (
+                            f"audit-sage-fp:{gap['file']}:"
+                            f"{gap['name']}:{gap.get('line_start', 0)}"
+                        ),
+                        "rule_id": (
+                            _pr["rule"] or "audit:sage-fp-primer"
+                        ),
+                        "file_path": gap["file"],
+                        "line": gap.get("line_start", 0),
+                        "function": gap["name"],
+                    },
+                    verdict=f"sage_{_pr['verdict']}",
+                    reason=(
+                        "prior-verdict FP primer matched (source "
+                        "unchanged) — hint tier, review always runs"
+                    ),
+                    dropped=False,
+                    extra={
+                        "stage": "audit-review-primer",
+                        "injected": _fp_priors_injected,
+                    },
+                )
+        except Exception:  # noqa: BLE001 — provenance trail must never block the review
+            logger.debug(
+                "FP-primer suppression record failed for %s:%s",
+                gap["file"], gap["name"], exc_info=True,
+            )
 
     if triage:
         ctx["triage_bucket"] = triage.bucket.value
