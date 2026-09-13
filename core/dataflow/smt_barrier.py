@@ -774,13 +774,37 @@ def _validator_block_exits_on_failure(
     return False
 
 
+def _binds_conditional_value(tree: ast.AST, line: int) -> bool:
+    """True when an assignment on ``line`` binds a CONDITIONAL value —
+    ``x = clean(x) if cond else x`` (IfExp) or ``x = cond and clean(x)
+    or x`` (short-circuit BoolOp). The statement itself executes
+    unconditionally, so the statement-level branch walk cannot see it,
+    but the SANITIZED value is bound only on some paths — the
+    fall-through arm sends the raw value into the sink. Conservative:
+    any IfExp / BoolOp anywhere in the assigned value refuses (an
+    exotic-but-sound conditional value costs yield, never soundness)."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            continue
+        if node.lineno != line or node.value is None:
+            continue
+        if any(isinstance(sub, (ast.IfExp, ast.BoolOp))
+               for sub in ast.walk(node.value)):
+            return True
+    return False
+
+
 def _validator_in_branch(
     tree: ast.AST, validator_line: int, sink_line: int,
     *, exclude_guard_at: int | None = None,
 ) -> bool:
     """Return True if ``validator_line`` is inside a conditional branch
     of the function containing the sink — meaning the validator does NOT
-    dominate the sink unconditionally.
+    dominate the sink unconditionally.  An assignment whose VALUE is
+    conditional (ternary / short-circuit — see
+    :func:`_binds_conditional_value`) counts as branch-wrapped too: the
+    sanitized binding happens only on some paths even though the
+    statement itself is unconditional.
 
     ``exclude_guard_at`` names the line of the validator's OWN ``if``
     statement for guard-shaped validators (``kind="charset"``): a
@@ -832,6 +856,8 @@ def _validator_in_branch(
                 return True
         return False
 
+    if _binds_conditional_value(tree, validator_line):
+        return True
     return _in_branch(body, validator_line)
 
 

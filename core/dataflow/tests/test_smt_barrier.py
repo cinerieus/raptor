@@ -2115,3 +2115,87 @@ def test_try_tier0_inner_dotdot_resolving_inside_still_reads(tmp_path: Path):
         language="python",
     )
     assert r.status is sb.Tier0Status.SOUND
+
+
+# ---------------------------------------------------------------------------
+# Dominance: conditional-VALUE assignments (ternary / short-circuit).
+#
+# ``x = re.sub(...) if cond else x`` is an unconditional STATEMENT, so
+# the statement-level branch walk cannot see it — but the sanitized
+# value is bound only when ``cond`` holds; the fall-through arm sends
+# the raw value into the sink. Certifying dominance there suppresses a
+# live flow pre-LLM.
+# ---------------------------------------------------------------------------
+
+def test_ternary_substitution_does_not_dominate():
+    src = (
+        "def f(cond):\n"
+        "    x = req()\n"
+        "    x = re.sub(r'[/.]+', '', x) if cond else x\n"  # line 3
+        "    return open(x)\n"                              # line 4 = sink
+    )
+    assert sb.substitution_dominates_sink(src, 3, 4, "x") is False
+
+
+def test_boolop_substitution_does_not_dominate():
+    """Short-circuit binding (``cond and clean(x) or x``) picks the raw
+    value whenever ``cond`` is falsy — same hole as the ternary."""
+    src = (
+        "def f(cond):\n"
+        "    x = req()\n"
+        "    x = cond and re.sub(r'[/.]+', '', x) or x\n"   # line 3
+        "    return open(x)\n"                              # line 4 = sink
+    )
+    assert sb.substitution_dominates_sink(src, 3, 4, "x") is False
+
+
+def test_validator_in_branch_models_conditional_value_assignment():
+    """The shared branch gate must flag conditional-value bindings for
+    every consumer (known_safe_call in tier1 uses the same walk)."""
+    import ast as _ast
+    src = (
+        "def f(cond):\n"
+        "    x = req()\n"
+        "    x = shlex.quote(x) if cond else x\n"           # line 3
+        "    return run(x)\n"                               # line 4 = sink
+    )
+    tree = _ast.parse(src)
+    assert sb._validator_in_branch(tree, 3, 4) is True
+
+
+def test_plain_call_assignment_still_not_in_branch():
+    """Two-direction: an unconditional call-value assignment must keep
+    certifying — only IfExp / BoolOp values refuse."""
+    import ast as _ast
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    x = shlex.quote(x)\n"                          # line 3
+        "    return run(x)\n"                               # line 4 = sink
+    )
+    tree = _ast.parse(src)
+    assert sb._validator_in_branch(tree, 3, 4) is False
+
+
+def test_try_tier0_declined_on_ternary_substitution(tmp_path: Path):
+    """End-to-end: the ternary substitution certified SOUND while the
+    sink stayed live on the ``cond``-falsy arm — Tier 0 must decline."""
+    (tmp_path / "app.py").write_text(
+        "def f(cond):\n"                                            # line 1
+        "    x = req()\n"                                           # line 2
+        "    x = re.sub('[/\\\\\\\\.]+', '', x) if cond else x\n"   # line 3
+        "    return open(x)\n"                                      # line 4
+    )
+    diff = (
+        "@@ -1,3 +1,4 @@\n"
+        " def f(cond):\n"
+        "     x = req()\n"
+        "+    x = re.sub('[/\\\\\\\\.]+', '', x) if cond else x\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=4, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+    assert "does not dominate" in r.reasoning
