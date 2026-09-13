@@ -447,7 +447,7 @@ def expand_translation_unit(
 
     suffix = full_path.suffix
     is_c = suffix in _C_SUFFIXES
-    is_cxx = suffix in _CXX_SUFFIXES or suffix == ".C"
+    is_cxx = suffix in _CXX_SUFFIXES
     if not (is_c or is_cxx):
         return _degraded(
             file_path, f"not a C/C++ translation unit: {suffix or '<no suffix>'}",
