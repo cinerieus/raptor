@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from core.json import dumps_artifact
+from core.llm.scorecard.paths import default_scorecard_path
 from core.llm.scorecard.scorecard import (
     ALL_EVENT_TYPES,
     EventType,
@@ -42,7 +43,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 
-DEFAULT_PATH = Path("out/llm_scorecard.json")
+# Shared resolver (RAPTOR_SCORECARD_PATH override → RAPTOR_DIR-anchored
+# → relative fallback): the audit must read the SAME ledger analysis
+# runs write, regardless of the invoking cwd.
+DEFAULT_PATH = default_scorecard_path()
 
 # Sample-count thresholds reported in the cell-count histogram. N=10 is
 # the existing scorecard's ``sample_size_floor`` (where ``learning`` ends

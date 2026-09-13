@@ -290,16 +290,11 @@ def auto_back_prop_from_validate_run(
         return 0
 
     if scorecard is None:
-        # Resolve the scorecard path via RAPTOR_DIR so /validate run from
-        # any cwd writes to the same sidecar the rest of RAPTOR uses,
-        # not a stray ./out/llm_scorecard.json next to the target repo.
-        import os
-        raptor_dir = os.environ.get("RAPTOR_DIR")
-        if raptor_dir:
-            default_path = Path(raptor_dir) / "out" / "llm_scorecard.json"
-        else:
-            default_path = Path("out/llm_scorecard.json")
-        scorecard = ModelScorecard(default_path)
+        # Shared resolver: /validate run from any cwd writes to the
+        # same sidecar the rest of RAPTOR uses, not a stray
+        # ./out/llm_scorecard.json next to the target repo.
+        from .paths import default_scorecard_path
+        scorecard = ModelScorecard(default_scorecard_path())
     return record_tool_evidence_outcomes(
         scorecard, records=records,
         decision_class_prefix=decision_class_prefix,

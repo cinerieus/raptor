@@ -123,15 +123,9 @@ def record_validate_feedback_outcomes(
     if not records:
         return 0
     if scorecard is None:
-        import os
-        from pathlib import Path
-        raptor_dir = os.environ.get("RAPTOR_DIR")
-        if raptor_dir:
-            default_path = Path(raptor_dir) / "out" / "llm_scorecard.json"
-        else:
-            default_path = Path("out/llm_scorecard.json")
+        from .paths import default_scorecard_path
         try:
-            scorecard = ModelScorecard(default_path)
+            scorecard = ModelScorecard(default_scorecard_path())
         except Exception:
             logger.debug("validate_feedback: scorecard unavailable",
                          exc_info=True)

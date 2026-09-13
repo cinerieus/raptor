@@ -25,6 +25,7 @@ from typing import Any
 
 from core.json import dumps_display
 
+from .paths import default_scorecard_path
 from .scorecard import (
     ALL_EVENT_TYPES,
     EventType,
@@ -36,7 +37,10 @@ from .scorecard import (
 )
 
 
-DEFAULT_PATH = Path("out/llm_scorecard.json")
+# Shared resolver (RAPTOR_SCORECARD_PATH override → RAPTOR_DIR-anchored
+# → relative fallback): the CLI must read the SAME ledger analysis runs
+# write, regardless of the invoking cwd.
+DEFAULT_PATH = default_scorecard_path()
 
 
 # ---------------------------------------------------------------------------

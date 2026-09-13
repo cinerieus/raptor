@@ -1575,6 +1575,19 @@ def _default_cache_dir() -> Path:
     return Path("out/llm_cache")
 
 
+def _default_scorecard_path() -> Path:
+    """Default scorecard sidecar path — shared resolver.
+
+    Delegates to :func:`core.llm.scorecard.paths.default_scorecard_path`
+    (RAPTOR_SCORECARD_PATH override → RAPTOR_DIR-anchored → relative
+    fallback for hermetic tests). Imported lazily so constructing an
+    LLMConfig does not pull the scorecard package at module-import time.
+    """
+    from core.llm.scorecard.paths import default_scorecard_path
+
+    return default_scorecard_path()
+
+
 def _default_enable_caching() -> bool:
     """Default LLM response caching: on, env-overridable.
 
@@ -1637,13 +1650,13 @@ class LLMConfig:
     # means consumers run their full path without scorecard
     # consultation. RAPTOR_SCORECARD_PATH overrides the default so
     # tests and sandboxed runs can isolate the on-disk reliability
-    # data (read at construction time, per config instance).
-    scorecard_path: Path = field(
-        default_factory=lambda: Path(
-            os.environ.get("RAPTOR_SCORECARD_PATH")
-            or "out/llm_scorecard.json"
-        )
-    )
+    # data (read at construction time, per config instance). The
+    # default is RAPTOR_DIR-anchored (see
+    # core.llm.scorecard.paths.default_scorecard_path) for the same
+    # reason as ``_default_cache_dir`` above: a cwd-relative ledger
+    # fragments reliability history per-cwd and lands inside the
+    # scanned repo on bare-shell runs.
+    scorecard_path: Path = field(default_factory=_default_scorecard_path)
     scorecard_enabled: bool = True
     # When False, do not retain disagreement-sample reasoning text.
     # Defense-in-depth privacy switch for operators on shared

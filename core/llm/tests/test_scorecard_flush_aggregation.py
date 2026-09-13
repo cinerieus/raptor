@@ -250,6 +250,15 @@ class TestAtexitPytestSuppression:
         )
         assert fld.default_factory() == tmp_path / "sc.json"
         monkeypatch.delenv("RAPTOR_SCORECARD_PATH")
+        # Without the override the default anchors to the install
+        # (RAPTOR_DIR) so bare-shell runs from a scanned repo don't
+        # fragment the ledger per-cwd; the relative fallback only
+        # applies when RAPTOR_DIR is unset (hermetic environments).
+        monkeypatch.setenv("RAPTOR_DIR", str(tmp_path / "install"))
+        assert fld.default_factory() == (
+            tmp_path / "install" / "out" / "llm_scorecard.json"
+        )
+        monkeypatch.delenv("RAPTOR_DIR")
         assert fld.default_factory() == Path("out/llm_scorecard.json")
 
 
