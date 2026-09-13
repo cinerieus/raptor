@@ -79,3 +79,23 @@ def test_one_result_per_edit_in_order(tmp_path: Path):
     edits = [_edit("missing"), _edit("a")]
     results = rewrite_file_with(f, edits, _replace_apply_one)
     assert [r.edit for r in results] == edits
+
+
+def test_rewriter_modules_share_the_single_write_path() -> None:
+    """Every rewriter module must route file IO through the shared
+    ``rewrite_file_with`` driver — a module importing the atomic
+    writer itself is re-growing the hand-rolled read/apply/write
+    loop this driver replaced (and stepping around the registry's
+    version-literal chokepoint discipline)."""
+    from pathlib import Path
+
+    import packages.sca.rewriters as rewriters
+
+    pkg_dir = Path(rewriters.__file__).parent
+    offenders = sorted(
+        p.name
+        for p in pkg_dir.glob("*.py")
+        if p.name != "__init__.py"
+        and "atomic_fs" in p.read_text(encoding="utf-8")
+    )
+    assert offenders == []

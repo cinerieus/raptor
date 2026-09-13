@@ -16,8 +16,8 @@ Behaviour:
   stale bump plan doesn't silently overwrite operator work.
 * No edits applied → file untouched.
 
-Atomic write via :func:`core.file.atomic_write` (or the
-package-local ``_atomic`` if core.file isn't available).
+Read / per-edit apply / atomic write is handled by the shared
+``rewrite_file_with`` driver in ``rewriters/__init__.py``.
 
 Adapted from https://github.com/gadievron/raptor/pull/467 by
 Natalie Somersall — her ``update_dockerfile()`` shipped the
@@ -32,9 +32,7 @@ from __future__ import annotations
 import logging
 import re
 
-from core.atomic_fs import write_text_atomically as _atomic_write
-
-from . import RewriteEdit, RewriteResult
+from . import RewriteEdit, RewriteResult, rewrite_file_with
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,30 +68,7 @@ def rewrite_dockerfile_arg(
     ``ARG <NAME>=<value>`` with optional whitespace; the value
     component is rewritten if it matches ``edit.old_value``.
     """
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        return [RewriteResult(edit=e2, applied=False,
-                              reason=f"error: read failed: {e}")
-                for e2 in edits]
-
-    results: list[RewriteResult] = []
-    new_text = text
-    for edit in edits:
-        new_text, result = _apply_one(new_text, edit)
-        results.append(result)
-
-    if any(r.applied for r in results):
-        try:
-            _atomic_write(path, new_text)
-        except OSError as e:
-            # I/O failure on write — convert every applied edit
-            # to a failure (we couldn't actually persist).
-            return [RewriteResult(edit=r.edit, applied=False,
-                                  reason=f"error: write failed: {e}")
-                    if r.applied else r
-                    for r in results]
-    return results
+    return rewrite_file_with(path, edits, _apply_one)
 
 
 def _apply_one(
