@@ -28,6 +28,16 @@ name: Sandbox matrix image
 # exercises the real build path and the u26 axis; publishing an image
 # with no PR-time consumer would be pure registry cost.
 #
+# PRIVACY CONTRACT: the package must be PRIVATE, like raptor-ci-deps —
+# this repo is public and the image is internal CI plumbing, not a
+# distributable. GHCR defaults a first-published package to private,
+# and visibility persists across pushes, but there is no REST endpoint
+# for CHANGING container-package visibility (and the workflow token
+# could not authorize it anyway) — so the job VERIFIES visibility after
+# every push and fails loud if the package is not private. One-time
+# manual step if that gate ever fires: package settings -> Danger Zone
+# -> Change visibility -> Private.
+#
 # Staleness ("rebirth") trade-off, accepted: a PR that changes
 # requirements or the matrix Dockerfile still runs the subset against
 # the image built from main — the new image is only born when this
@@ -103,6 +113,36 @@ jobs:
           docker push "${image}:u24"
           docker push "${image}:u24-${cthash}"
           echo "Pushed ${image}:u24 and ${image}:u24-${cthash}"
+
+      # Verify-and-fail-loud (see PRIVACY CONTRACT in the header): the
+      # packages REST API offers GET visibility but no endpoint to set
+      # it, so enforcement is a hard gate on what a human could have
+      # flipped. Both owner-type endpoints are tried because the repo
+      # owner may be a user or an organisation; an unqueryable package
+      # is its own loud failure rather than a silent pass. Verification
+      # is post-push only: on first publish there is nothing to query
+      # beforehand, and the image contents are derivable from public
+      # inputs, so a push into a wrongly-public package leaks nothing
+      # the gate's failure doesn't then force a human to fix.
+      #
+      # stderr: discarded on the org attempt (an expected 404 on every
+      # user-owned repo would cry wolf in each green run), kept on the
+      # user fallback so a real double-failure leaves its diagnosis
+      # (403 vs 404 vs rate-limit) in the job log.
+      - name: Verify the package is private
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          vis="$(gh api "orgs/${OWNER}/packages/container/raptor-sandbox-matrix" --jq .visibility 2>/dev/null)" \
+            || vis="$(gh api "users/${OWNER}/packages/container/raptor-sandbox-matrix" --jq .visibility)" \
+            || { echo "::error::could not query GHCR visibility for raptor-sandbox-matrix with the workflow token — verify manually that the ghcr.io/${OWNER}/raptor-sandbox-matrix package is Private (package settings -> Danger Zone -> Change visibility)."; exit 1; }
+          echo "package visibility: ${vis}"
+          if [ "${vis}" != "private" ]; then
+            echo "::error::ghcr.io/${OWNER}/raptor-sandbox-matrix is '${vis}' but must be private (internal CI image, public repo). One-time manual fix: package settings -> Danger Zone -> Change visibility -> Private. Visibility persists across pushes, so this gate stays green afterwards."
+            exit 1
+          fi
 
       # Prune the untagged digests left behind when :u24 moves to this
       # build. Tagged versions (current :u24 + every :u24-<hash> rollback
