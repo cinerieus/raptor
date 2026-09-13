@@ -24,6 +24,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from core.source import read_contained, read_text_capped
+
 from core.recall.score import LABEL_CLASS
 
 UNCLASSIFIED = "unclassified"
@@ -107,10 +109,14 @@ def _read_clean_source(entry: dict[str, Any],
                        source_root: Path | None) -> str | None:
     path = Path(entry.get("file", ""))
     if source_root is not None and not path.is_absolute():
-        path = source_root / path
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        # Root-joined reads are containment-checked: a corpus entry
+        # whose relative path escapes the source root is mislabeled
+        # data, not a file to read (counts as unreadable).
+        text = read_contained(source_root, path)
+    else:
+        got = read_text_capped(path)
+        text = None if got is None else got[0]
+    if text is None:
         return None
     start, end = entry.get("line_start"), entry.get("line_end")
     if not isinstance(start, int) or start <= 0:
