@@ -347,6 +347,11 @@ def cmd_record(args: argparse.Namespace) -> int:
         # appear as base names. Membership must therefore accept the
         # full string too; testing only the stripped base rejects every
         # namespaced choice the argument parser itself offers.
+        #
+        # Not dead code despite the argparse choices= on
+        # --evidence-tool: the parser guards the CLI path only, while
+        # cmd_record is also invoked directly (tests, programmatic
+        # callers) — this membership check is the gate for that path.
         if (tool_norm not in VALID_EVIDENCE_TOOLS
                 and base_tool not in VALID_EVIDENCE_TOOLS):
             print(
