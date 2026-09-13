@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 _APPLICABLE_CWES = frozenset({"CWE-190", "CWE-195", "CWE-680"})
 
@@ -48,8 +49,8 @@ class TruncationFinding:
     evidence: str = ""
     confidence: str = "medium"
 
-    def to_dict(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "function": self.function,
             "wide_var": self.wide_var,
             "narrow_var": self.narrow_var,
@@ -88,7 +89,7 @@ _VERY_NARROW_TYPES = frozenset({
     "uint8", "byte", "BYTE",
 })
 
-_TYPE_WIDTHS: Dict[str, int] = {}
+_TYPE_WIDTHS: dict[str, int] = {}
 for _t in _VERY_NARROW_TYPES:
     _TYPE_WIDTHS[_t] = 8
 for _t in _NARROW_TYPES:
@@ -162,20 +163,20 @@ def check_integer_truncation(
     *,
     file: str = "",
     xref_source: str | None = None,
-) -> List[TruncationFinding]:
+) -> list[TruncationFinding]:
     """Analyse one decompiled function for integer truncation bugs.
 
     When *xref_source* is provided, extends the search for alloc/copy
     patterns into caller/callee decompilation (cross-function chains).
     """
-    findings: List[TruncationFinding] = []
+    findings: list[TruncationFinding] = []
     primary_len = len(source)
 
     search_source = source
     if xref_source:
         search_source = source + xref_source
 
-    narrows: Dict[str, Dict[str, str]] = {}
+    narrows: dict[str, dict[str, str]] = {}
 
     for m in _EXPLICIT_CAST_RE.finditer(search_source):
         narrow_var = m.group(1)
@@ -201,7 +202,7 @@ def check_integer_truncation(
     if not narrows:
         return findings
 
-    allocs: Dict[str, Dict[str, Any]] = {}
+    allocs: dict[str, dict[str, Any]] = {}
     for m in _ALLOC_RE.finditer(search_source):
         buf_var = m.group(1).strip()
         alloc_fn = m.group(2)

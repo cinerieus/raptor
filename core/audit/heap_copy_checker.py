@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 
 @dataclass
@@ -46,8 +47,8 @@ class HeapCopyFinding:
     confidence: str = "medium"
     is_cross_function: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
-        d: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
             "function": self.function,
             "copy_call": self.copy_call,
             "dest_var": self.dest_var,
@@ -118,7 +119,7 @@ _PARAM_RE = re.compile(
 )
 
 
-def _try_parse_int(s: str) -> Optional[int]:
+def _try_parse_int(s: str) -> int | None:
     """Parse an integer from a decompiled expression."""
     s = s.strip()
     try:
@@ -185,15 +186,15 @@ def check_decompiled_function(
     source: str,
     *,
     file: str = "",
-) -> List[HeapCopyFinding]:
+) -> list[HeapCopyFinding]:
     """Analyse one decompiled C function for heap/copy size mismatches.
 
     Returns a list of findings, empty if none detected.
     """
-    findings: List[HeapCopyFinding] = []
+    findings: list[HeapCopyFinding] = []
 
     # Collect allocation sizes: var -> (size_expr, size_int_or_None)
-    alloc_sizes: Dict[str, tuple] = {}
+    alloc_sizes: dict[str, tuple] = {}
     for m in _ALLOC_RE.finditer(source):
         var = m.group(1).strip()
         size_expr = m.group(3).strip()
@@ -209,7 +210,7 @@ def check_decompiled_function(
             alloc_sizes[var] = (size_expr, _try_parse_int(size_expr))
 
     # Collect stack array sizes: name -> (size_expr, size_int)
-    stack_sizes: Dict[str, tuple] = {}
+    stack_sizes: dict[str, tuple] = {}
     for m in _STACK_ARRAY_RE.finditer(source):
         name = m.group(1)
         size_int = _try_parse_int(m.group(2))
@@ -377,9 +378,9 @@ def _param_copy_findings(
     callee: str,
     source: str,
     param_name: str,
-    alloc_size: Optional[int],
+    alloc_size: int | None,
     file: str,
-) -> List[HeapCopyFinding]:
+) -> list[HeapCopyFinding]:
     """Copies in *source* whose destination is *param_name*, judged
     against the CALLER's allocation size.
 
@@ -390,7 +391,7 @@ def _param_copy_findings(
     size is known; an unknown allocation is inconclusive, never a
     finding.
     """
-    findings: List[HeapCopyFinding] = []
+    findings: list[HeapCopyFinding] = []
     if alloc_size is None:
         return findings
     for m in _STD_COPY_RE.finditer(source):
@@ -461,12 +462,17 @@ def _param_copy_findings(
 
 
 def check_cross_function(
-    functions: Sequence[Dict[str, Any]],
-    xrefs: Optional[Sequence[Dict[str, Any]]] = None,
+    functions: Sequence[dict[str, Any]],
+    xrefs: Sequence[dict[str, Any]] | None = None,
     *,
     file: str = "",
-) -> List[HeapCopyFinding]:
+) -> list[HeapCopyFinding]:
     """Cross-function analysis: track allocations through call boundaries.
+
+    Exported for the binary/Ghidra verification surface (its
+    ``functions``/``xrefs`` shapes are the Ghidra export's) and pinned
+    by tests; no in-repo pipeline consumes it yet — wire it up rather
+    than duplicating it.
 
     For each function that allocates a buffer and passes it to another
     function, check if the callee's copy operations on that parameter
@@ -483,9 +489,9 @@ def check_cross_function(
     -------
     List of cross-function findings.
     """
-    findings: List[HeapCopyFinding] = []
+    findings: list[HeapCopyFinding] = []
 
-    func_map: Dict[str, str] = {}
+    func_map: dict[str, str] = {}
     for f in functions:
         name = f.get("name", "")
         decomp = f.get("decompilation", "")
@@ -494,7 +500,7 @@ def check_cross_function(
 
     for fname, source in func_map.items():
         # Collect allocations in this function: var → size
-        allocs: Dict[str, Optional[int]] = {}
+        allocs: dict[str, int | None] = {}
         for m in _ALLOC_RE.finditer(source):
             var = m.group(1).strip()
             size_expr = m.group(3).strip()
