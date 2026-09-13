@@ -28,6 +28,8 @@ from typing_extensions import Self
 from core.logging import get_logger
 from core.security.redaction import redact_secrets
 
+from packages.web.origin import origin_of
+
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 10
 
@@ -154,19 +156,9 @@ class WebClient:
 
         logger.info("Web client initialized for %s (verify_ssl=%s)", base_url, verify_ssl)
 
-    def _origin(self, url: str) -> tuple:
+    def _origin(self, url: str) -> tuple[str, str, int]:
         """Return normalized (scheme, host, port) tuple for URL scope checks."""
-        parsed = urlparse(url)
-        default_port = 443 if parsed.scheme == 'https' else 80
-        try:
-            port = parsed.port
-        except ValueError:
-            # Out-of-range or non-numeric port (a hostile crawled anchor
-            # like http://h:99999/x). Such a URL can never match a real
-            # origin — classify it out of scope instead of letting the
-            # ValueError abort the caller's whole page/phase.
-            port = -1
-        return (parsed.scheme.lower(), (parsed.hostname or '').lower(), port or default_port)
+        return origin_of(url)
 
     def _is_in_scope(self, url: str) -> bool:
         """Check whether URL stays within the configured base origin."""

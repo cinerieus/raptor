@@ -24,6 +24,8 @@ from core.logging import get_logger
 from core.sandbox import run_untrusted_networked
 from core.security.redaction import is_secret_field_name, redact_secrets
 
+from packages.web.origin import origin_of
+
 logger = get_logger()
 
 # Byte ceiling for the ffuf results file. ffuf writes it from
@@ -180,14 +182,7 @@ class FfufRunner:
         self.reveal_secrets = reveal_secrets
 
     def _origin(self, url: str) -> tuple[str, str, int]:
-        parsed = urlparse(url)
-        default_port = 443 if parsed.scheme == "https" else 80
-        return (
-            parsed.scheme.lower(),
-            (parsed.hostname or "").lower(),
-            # Explicit test: port 0 is falsy but is NOT the default port.
-            parsed.port if parsed.port is not None else default_port,
-        )
+        return origin_of(url)
 
     def _redact(self, value: object) -> str:
         return redact_secrets(value, reveal_secrets=self.reveal_secrets)

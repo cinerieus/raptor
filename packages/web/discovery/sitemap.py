@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, List, Set
 from urllib.parse import urlparse
 
+from packages.web.origin import origin_of
+
 if TYPE_CHECKING:
     from packages.web.client import WebClient
 
@@ -82,7 +84,5 @@ def _process_sitemap(
                         return
 
 
-def _origin(url: str) -> tuple:
-    p = urlparse(url)
-    default_port = 443 if p.scheme == "https" else 80
-    return (p.scheme.lower(), (p.hostname or "").lower(), p.port or default_port)
+def _origin(url: str) -> tuple[str, str, int]:
+    return origin_of(url)

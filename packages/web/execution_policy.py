@@ -14,6 +14,7 @@ from typing import Iterable
 from urllib.parse import urlparse
 from uuid import uuid4
 
+from packages.web.origin import origin_of
 
 _RISK_ORDER = {"passive": 0, "active": 1, "intrusive": 2}
 
@@ -26,21 +27,18 @@ def _origin(url: str) -> tuple[str, str, int]:
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.hostname:
         raise WebPolicyError(f"Web scope target must be an absolute URL: {url}")
-    default_port = 443 if parsed.scheme.lower() == "https" else 80
     try:
-        port = parsed.port
+        parsed.port
     except ValueError as exc:
         # urlparse defers port validation to attribute access: an
         # out-of-range or non-numeric port (a hostile crawled anchor
         # like http://h:99999/x) raises a plain ValueError that would
         # sail past every 'except WebPolicyError' handler and kill the
-        # calling phase. Classify it as a policy denial instead.
+        # calling phase. Classify it as a policy denial instead (the
+        # policy's contract is a LOUD denial, not origin_of's silent
+        # never-matches sentinel).
         raise WebPolicyError(f"Invalid port in web target URL: {url}") from exc
-    return (
-        parsed.scheme.lower(),
-        parsed.hostname.lower(),
-        port or default_port,
-    )
+    return origin_of(url)
 
 
 def _origin_text(origin: tuple[str, str, int]) -> str:
