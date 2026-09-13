@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from core.json import dumps_artifact
+from core.json import save_json
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -1354,11 +1354,14 @@ def run_resource_bounds_prepass(
     telemetry["wall_time_s"] = round(time.monotonic() - t0, 3)
     if out_dir is not None and (findings or leads):
         try:
-            path = Path(out_dir) / "resource-bounds.json"
-            path.write_text(dumps_artifact(
+            # Atomic write (tempfile + rename via save_json): a torn
+            # write would leave a resource-bounds.json that fails to
+            # parse at review time.
+            save_json(
+                Path(out_dir) / "resource-bounds.json",
                 {"findings": findings, "leads": leads,
-                 "telemetry": telemetry}, indent=1,
-            ))
+                 "telemetry": telemetry},
+            )
         except Exception:
             logger.debug("resource-bounds.json write failed",
                          exc_info=True)
