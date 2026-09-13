@@ -97,7 +97,7 @@ def get_output_limit(tool: str) -> OutputSizeLimit | None:
 def truncate_output(
     items: list[Any],
     tool: str,
-) -> tuple:
+) -> tuple[list[Any], str | None]:
     """Truncate tool output to the configured limit.
 
     Returns (truncated_items, truncation_note_or_None).
