@@ -46,6 +46,10 @@ class TriageResult:
     reasons: tuple
     token_budget: int
     priority_score: float = 0.0
+    # Set (to the VendorVerdict kind) when the vendored/generated tier
+    # routed this function. Structured so the suppressions.jsonl audit
+    # trail never depends on the wording of a prose reason string.
+    vendor_tier: str | None = None
 
 
 _DEEP_DIVE_SLOC = 200
@@ -241,6 +245,7 @@ def classify_function(
                     reasons=tuple(reasons),
                     token_budget=TOKEN_BUDGETS[TriageBucket.GLANCE],
                     priority_score=priority_score,
+                    vendor_tier=vendor_verdict.kind,
                 )
             if vendor_verdict.corroborated:
                 reasons.append(
@@ -252,6 +257,7 @@ def classify_function(
                     reasons=tuple(reasons),
                     token_budget=TOKEN_BUDGETS[TriageBucket.SKIP],
                     priority_score=priority_score,
+                    vendor_tier=vendor_verdict.kind,
                 )
             reasons.append(
                 f"generated code ({vendor_verdict.signal}): "
@@ -262,6 +268,7 @@ def classify_function(
                 reasons=tuple(reasons),
                 token_budget=TOKEN_BUDGETS[TriageBucket.GLANCE],
                 priority_score=priority_score,
+                vendor_tier=vendor_verdict.kind,
             )
         if not boundary:
             reasons.append(
@@ -273,6 +280,7 @@ def classify_function(
                 reasons=tuple(reasons),
                 token_budget=TOKEN_BUDGETS[TriageBucket.GLANCE],
                 priority_score=priority_score,
+                vendor_tier=vendor_verdict.kind,
             )
         # Boundary-adjacent vendored code: normal routing below.
 
@@ -425,18 +433,15 @@ def classify_all(
     return results
 
 
-_VENDOR_REASON_PREFIXES = ("generated code (", "vendored code (")
-
-
 def vendor_decision(tr: TriageResult) -> str | None:
     """``"skip"`` / ``"glance"`` when the vendored/generated tier
     routed this function; ``None`` when it did not fire (no verdict,
     pinned, or boundary-adjacent vendored code on normal routing).
     Consumed by the orchestrator's suppressions.jsonl recorder — every
-    decision this reports gets one audit record."""
-    if not any(
-        r.startswith(_VENDOR_REASON_PREFIXES) for r in tr.reasons
-    ):
+    decision this reports gets one audit record. Reads the structured
+    ``vendor_tier`` field, never the prose reason strings: rewording a
+    reason must not silently drop audit-trail records."""
+    if tr.vendor_tier is None:
         return None
     if tr.bucket == TriageBucket.SKIP:
         return "skip"

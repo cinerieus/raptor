@@ -55,6 +55,43 @@ def _vendored():
     )
 
 
+class TestVendorDecisionStructured:
+    def test_reworded_reason_still_produces_audit_record(self):
+        """vendor_decision reads the structured vendor_tier field —
+        rewording the prose reason string must not silently stop
+        the suppressions.jsonl audit-trail records."""
+        import dataclasses
+
+        tr = classify_function(
+            file="gen/wire.c", function="f", sloc=3,
+            vendor_verdict=_generated(corroborated=True),
+        )
+        assert tr.bucket == TriageBucket.SKIP
+        reworded = dataclasses.replace(
+            tr, reasons=("provenance: generator artefact, skipped",),
+        )
+        assert vendor_decision(reworded) == "skip"
+
+    def test_non_vendor_result_stays_none(self):
+        tr = classify_function(
+            file="src/a.c", function="f", sloc=3,
+        )
+        assert tr.vendor_tier is None
+        assert vendor_decision(tr) is None
+
+    def test_vendor_tier_carries_the_verdict_kind(self):
+        gen = classify_function(
+            file="gen/wire.c", function="f", sloc=3,
+            vendor_verdict=_generated(corroborated=True),
+        )
+        assert gen.vendor_tier == KIND_GENERATED
+        ven = classify_function(
+            file="third_party/z.c", function="f", sloc=3,
+            vendor_verdict=_vendored(),
+        )
+        assert ven.vendor_tier == KIND_VENDORED
+
+
 class TestClassifyFunctionRouting:
     def test_corroborated_generated_skips(self):
         tr = classify_function(
