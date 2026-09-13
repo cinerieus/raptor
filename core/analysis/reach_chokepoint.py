@@ -208,12 +208,16 @@ def record_suppression(
       reachability chokepoint as a PRE-LLM hard-suppress.
     * sanitizer-cut (``verdict="sanitizer_dominated"`` /
       ``candidate_only``) — bridged in via
-      :func:`core.analysis.sanitizer_cut.record_sanitizer_cut_suppression`.
-      It writes the same schema but is NOT yet wired into the
-      pipeline (only tests call it — see that function's note), so
-      today there is no live ordering interaction.
+      :func:`core.analysis.sanitizer_cut.record_sanitizer_cut_suppression`
+      and LIVE: the scan post-pass
+      (:mod:`core.analysis.sanitizer_cut_postpass`, invoked from the
+      static-analysis scanner) enforces full-proof ``suppress``
+      verdicts by default (corpus-earned 2026-08-19; opt out with
+      ``--no-sanitizer-cut-enforce``) and records ``candidate_only``
+      evidence; the SMT-barrier lane
+      (:mod:`core.dataflow.smt_barrier`) writes record-only entries.
 
-    When sanitizer-cut is wired, the intended order is binary-oracle
+    The order between the producers is binary-oracle
     FIRST: a function absent from the binary is dropped before any
     dataflow/sanitizer reasoning runs, so the sanitizer-cut gate never
     sees it and can't double-record it. The producers do not observe
