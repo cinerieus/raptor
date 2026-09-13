@@ -45,12 +45,14 @@ from core.dataflow.barrier_synth import (
 )
 from core.dataflow.cvefix_loader import CveFixPair
 from core.git import safe_git_readonly_command
+from core.sarif.parser import SARIF_MAX_BYTES
 from core.paths import strip_file_uri
 from typing import TYPE_CHECKING
 
 # CodeQL SARIF over corpus code — the SARIF budget class shared with
-# core.sarif.parser.load_sarif.
-_MAX_SARIF_BYTES = 100 * 1024 * 1024
+# core.sarif.parser.load_sarif (one constant, aliased for the local
+# call sites).
+_MAX_SARIF_BYTES = SARIF_MAX_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

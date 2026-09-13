@@ -31,6 +31,7 @@ from pathlib import Path
 from core.dataflow.adapters.codeql import from_sarif_result
 from core.dataflow.finding import Finding, Step
 from core.json import load_json
+from core.sarif.parser import SARIF_MAX_BYTES
 from core.dataflow.label import (
     FP_MISSING_SANITIZER_MODEL,
     GroundTruth,
@@ -40,8 +41,9 @@ from core.dataflow.label import (
 from typing import TYPE_CHECKING
 
 # CodeQL SARIF over corpus code — the SARIF budget class shared with
-# core.sarif.parser.load_sarif.
-_MAX_SARIF_BYTES = 100 * 1024 * 1024
+# core.sarif.parser.load_sarif (one constant, aliased for the local
+# call sites).
+_MAX_SARIF_BYTES = SARIF_MAX_BYTES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

@@ -20,6 +20,17 @@ from core.security.log_sanitisation import escape_nonprintable
 
 logger = get_logger()
 
+# One SARIF read cap for every consumer that loads a whole SARIF
+# document into memory (this parser plus the core/dataflow corpus /
+# bridge / diff loaders alias it). Trade-off, both directions:
+# raising it admits bigger artifacts at proportional memory cost
+# (documents are parsed whole, so the cap is effectively a per-load
+# RSS budget); lowering it starts refusing legitimate large
+# combined.sarif files from full CodeQL+semgrep runs on big targets.
+# 100 MiB has held for real combined runs — move it only against a
+# corpus of observed artifact sizes.
+SARIF_MAX_BYTES = 100 * 1024 * 1024
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     """Untrusted-shape guard: return *value* if it is a dict, else {}.
@@ -457,7 +468,7 @@ def load_sarif(sarif_path: Path) -> dict[str, Any] | None:
         logger.error("SARIF: file does not exist: %s", sarif_path)
         return None
 
-    max_size = 100 * 1024 * 1024  # 100 MiB
+    max_size = SARIF_MAX_BYTES  # trade-off comment at the constant
 
     # Stat-then-bounded-read. Pre-fix the function used
     # `sarif_path.read_text()` followed by `if len(content) > max_size`

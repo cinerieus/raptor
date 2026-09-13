@@ -36,10 +36,12 @@ from core.dataflow.codeql_augmented_run import (
 from core.json import load_json
 from core.llm.coerce import extract_fenced_code
 from core.run.scratch import scratch_dir
+from core.sarif.parser import SARIF_MAX_BYTES
 
 # CodeQL SARIF over corpus code — the SARIF budget class shared with
-# core.sarif.parser.load_sarif.
-_MAX_SARIF_BYTES = 100 * 1024 * 1024
+# core.sarif.parser.load_sarif (one constant, aliased for the local
+# call sites).
+_MAX_SARIF_BYTES = SARIF_MAX_BYTES
 
 # sink-class -> (customizations module, module name exposing Source/Sink/Sanitizer).
 # Python: each module imports Concepts/RemoteFlowSources/BarrierGuards and
