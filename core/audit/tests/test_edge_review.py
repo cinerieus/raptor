@@ -70,6 +70,14 @@ def _checklist(target):
     }
 
 
+@pytest.fixture(autouse=True)
+def _isolated_mac_key(tmp_path, monkeypatch):
+    """Per-test journal-MAC key under tmp: suppression now requires a
+    verified row, so every append_entry here must be able to stamp
+    (and verify) regardless of the runner's real data dir."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+
+
 _REC = {
     "caller_file": "routes.c", "caller": "handle",
     "callee_file": "svc.c", "callee": "run_query",
@@ -161,6 +169,61 @@ class TestEdgeGaps:
         (target / "svc.c").write_text(
             _CALLEE_SRC.replace("exec", "spawn"), encoding="utf-8")
         assert len(self._gaps(target, run)) == 1
+
+
+class TestEdgeFoldProvenance:
+    """The edge fold mirrors the function fold's journal-integrity
+    gates: exact full-length hash equality (a short stored prefix is
+    not drift evidence, it is no evidence) and MAC row tiering (the
+    journal is target-writable during runs — only rows whose
+    provenance token verifies may suppress re-review)."""
+
+    def _gaps(self, target, run_dir):
+        return compute_edge_gaps(
+            _OBLIGATIONS, out_dir=run_dir, project_dir=None,
+            target_path=target, checklist=_checklist(target),
+        )
+
+    def test_short_prefix_forged_hash_does_not_suppress(self, tmp_path):
+        target = _target(tmp_path)
+        run = tmp_path / "run"
+        run.mkdir()
+        real = edge_source_hash(
+            target, "routes.c", (1, 3), "svc.c", (1, 3))
+        append_entry(run, _edge_entry(target, source_hash=real[:1]))
+        assert len(self._gaps(target, run)) == 1
+
+    def test_unstamped_row_does_not_suppress(self, tmp_path):
+        import json as _json
+
+        target = _target(tmp_path)
+        run = tmp_path / "run"
+        run.mkdir()
+        row = _edge_entry(target).to_dict()
+        assert "integrity" not in row
+        (run / "review-journal.jsonl").write_text(
+            _json.dumps(row) + "\n", encoding="utf-8")
+        assert len(self._gaps(target, run)) == 1
+
+    def test_tampered_row_does_not_suppress(self, tmp_path):
+        import json as _json
+
+        target = _target(tmp_path)
+        run = tmp_path / "run"
+        run.mkdir()
+        append_entry(run, _edge_entry(target))
+        journal = run / "review-journal.jsonl"
+        row = _json.loads(journal.read_text(encoding="utf-8"))
+        row["run_id"] = "forged-run"  # content edited after stamping
+        journal.write_text(_json.dumps(row) + "\n", encoding="utf-8")
+        assert len(self._gaps(target, run)) == 1
+
+    def test_verified_matching_row_still_suppresses(self, tmp_path):
+        target = _target(tmp_path)
+        run = tmp_path / "run"
+        run.mkdir()
+        append_entry(run, _edge_entry(target))
+        assert self._gaps(target, run) == []
 
 
 class TestEdgeEntryFoldIsolation:

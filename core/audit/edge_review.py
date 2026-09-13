@@ -121,11 +121,12 @@ def edge_source_hash(
 ) -> str:
     """Two-span hash: caller-span hash + callee-span hash concatenated.
 
-    Prefix-compared like every journal hash; drift in either endpoint
-    changes the concatenation from its start or its middle — either
-    way the stored value no longer prefix-matches a recomputation.
-    Empty when either span is uncomputable (entry then journals
-    without drift evidence, the fold's historical-suppression rule).
+    Compared exact and full-length in the fold (a truncated stored
+    value is not drift evidence, it is no evidence — the same rule as
+    the function fold's hash gate); drift in either endpoint changes
+    the concatenation, so any drift fails the comparison. Empty when
+    either span is uncomputable (entry then journals without drift
+    evidence, the fold's historical-suppression rule).
     """
     from core.staleness import hash_span
     try:
@@ -153,10 +154,21 @@ def reviewed_edge_keys(
     spans: dict[str, list],
 ) -> set[str]:
     """Edge keys with a still-valid review — journalled (this run or
-    the project index), verdict not ``error``, and two-span hash
-    still matching when both current spans are computable. A hash
-    mismatch (either endpoint drifted) drops the key so the edge
-    resurfaces as an obligation gap.
+    the project index), MAC-verified, verdict not ``error``, and
+    two-span hash still matching (exact, full-length) when both
+    current spans are computable. A hash mismatch (either endpoint
+    drifted, or a stored value that is not the full recomputed hash)
+    drops the key so the edge resurfaces as an obligation gap.
+
+    Row tiering mirrors the function fold (``gaps.py``): the journal
+    is target-writable during runs, so only rows whose provenance
+    token verifies (``journal_mac.ROW_VERIFIED``) may suppress
+    re-review. Unstamped and tampered rows resurface rather than
+    inheriting the function fold's unstamped-tier tolerance: that
+    tolerance avoids a re-review storm over a large pre-MAC legacy
+    population, while an edge review is a single bounded LLM call and
+    pre-MAC edge rows are rare — re-buying those once is the cheap
+    direction against a forged-row suppression channel.
     """
     entries: list = []
     if out_dir is not None:
@@ -172,11 +184,15 @@ def reviewed_edge_keys(
         except Exception:  # noqa: BLE001
             logger.debug("edge fold: project index read failed", exc_info=True)
 
+    from core.coverage import journal_mac
+
     reviewed: set[str] = set()
     for entry in entries:
         callee_id = getattr(entry, "edge_callee", None)
         if not callee_id or entry.verdict == "error":
             continue
+        if journal_mac.entry_provenance(entry) != journal_mac.ROW_VERIFIED:
+            continue                             # unauthenticated row
         stored = entry.source_hash or ""
         if stored and target_path is not None:
             cfile, _, cname = callee_id.rpartition(":")
@@ -188,7 +204,11 @@ def reviewed_edge_keys(
                     Path(target_path), entry.file, caller_span,
                     cfile, callee_span,
                 )
-                if current and current[:len(stored)] != stored[:len(current)]:
+                # Exact, full-length compare — the bidirectional
+                # prefix compare accepted a forged 1-char "hash"
+                # against ~1/16 of recomputations (see the function
+                # fold's identical fix in gaps.py).
+                if current and current != stored:
                     continue                     # endpoint drift — stale
         reviewed.add(entry.key)
     return reviewed
