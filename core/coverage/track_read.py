@@ -16,7 +16,13 @@ import sys
 from pathlib import Path
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    # Script mode: the repo root must come from RAPTOR_DIR (launcher-
+    # provided) — the path-safety rule forbids deriving it from
+    # __file__. Production consumers import this module as a package
+    # (or use the bash twin) and never hit this branch.
+    if "RAPTOR_DIR" not in os.environ:
+        sys.exit("RAPTOR_DIR is not set — cannot resolve the repo root")
+    sys.path.insert(0, os.environ["RAPTOR_DIR"])
 
 MANIFEST_NAME = ".reads-manifest"
 

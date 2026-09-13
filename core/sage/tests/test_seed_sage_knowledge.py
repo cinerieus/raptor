@@ -11,6 +11,7 @@ Pins:
 - REPO_ROOT resolves to the repo root.
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -142,6 +143,45 @@ class TestRepoRoot(unittest.TestCase):
         # REPO_ROOT is derived via parents[...] from the script's own
         # location; pin the level so it cannot silently drift.
         self.assertTrue((ssk.REPO_ROOT / "core" / "sage" / "scripts").is_dir())
+
+
+class TestScriptModePathSetup(unittest.TestCase):
+    """Script-mode sys.path setup comes from RAPTOR_DIR (the
+    path-safety rule), never from __file__; without RAPTOR_DIR the
+    scripts refuse loudly instead of importing a guessed tree."""
+
+    _SCRIPTS = (
+        "core/sage/scripts/seed_sage_knowledge.py",
+        "core/sage/scripts/register_agents.py",
+    )
+
+    def _run(self, script: str, with_raptor_dir: bool):
+        import subprocess
+        import sys as _sys
+        repo_root = ssk.REPO_ROOT
+        env = {k: v for k, v in os.environ.items() if k != "RAPTOR_DIR"}
+        if with_raptor_dir:
+            env["RAPTOR_DIR"] = str(repo_root)
+        return subprocess.run(
+            [_sys.executable, str(repo_root / script), "--help"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+
+    def test_refuses_without_raptor_dir(self):
+        for script in self._SCRIPTS:
+            with self.subTest(script=script):
+                r = self._run(script, with_raptor_dir=False)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("RAPTOR_DIR", r.stderr + r.stdout)
+
+    def test_runs_with_raptor_dir(self):
+        for script in self._SCRIPTS:
+            with self.subTest(script=script):
+                r = self._run(script, with_raptor_dir=True)
+                self.assertEqual(
+                    r.returncode, 0,
+                    f"--help failed: {r.stderr[:500]}",
+                )
 
 
 if __name__ == "__main__":

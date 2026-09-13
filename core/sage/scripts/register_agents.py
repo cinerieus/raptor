@@ -14,10 +14,20 @@ Requires:
 
 import argparse
 import asyncio
+import os
 import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+if not __package__:
+    # Script mode (python3 core/sage/scripts/register_agents.py): the
+    # repo root must come from RAPTOR_DIR — the path-safety rule
+    # forbids deriving it from __file__ (a namespace-shadowed checkout
+    # would import a foreign tree). Package imports need no path setup.
+    if "RAPTOR_DIR" not in os.environ:
+        sys.exit(
+            "RAPTOR_DIR is not set — run via libexec/raptor-sage-setup, "
+            "or export RAPTOR_DIR=<repo root> first"
+        )
+    sys.path.insert(0, os.environ["RAPTOR_DIR"])
 
 # Import errors are deferred to main() so the module stays import-safe
 # (test collection must never die on a missing optional dependency).
