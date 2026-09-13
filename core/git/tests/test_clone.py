@@ -77,6 +77,11 @@ def test_successful_clone_calls_sandbox(tmp_path: Path) -> None:
         assert mock_run.called
         cmd = _strip_pins(mock_run.call_args.args[0])
         assert cmd[:4] == ["git", "clone", "--depth", "1"]
+        # "--" separates options from the URL: the option/positional
+        # boundary must hold even if the URL allowlist ever widens to
+        # shapes git could parse as flags.
+        assert cmd[-3:] == ["--", "https://github.com/foo/bar",
+                            cmd[-1]]
         kwargs = mock_run.call_args.kwargs
         proxy_hosts = set(kwargs.get("proxy_hosts", []))
         assert {"github.com", "codeload.github.com"} <= proxy_hosts

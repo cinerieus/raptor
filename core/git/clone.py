@@ -486,7 +486,11 @@ def clone_repository(
     cmd = safe_git_command("clone")
     if depth is not None:
         cmd.extend(["--depth", str(depth), "--no-tags"])
-    cmd.extend([url, str(target)])
+    # "--" before the URL, same as the ls-remote path: unexploitable
+    # today (validate_repo_url fullmatch-allowlists the shape) but the
+    # option/positional boundary must not silently re-open on any
+    # future allowlist widening.
+    cmd.extend(["--", url, str(target)])
 
     # Redact any embedded credentials in the URL before logging.
     # ``validate_repo_url`` rejects userinfo upstream, but a future
