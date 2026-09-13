@@ -4172,20 +4172,10 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # operator-disabled path already gets this exact exception
         # from subprocess.run itself.
         if (not effectively_disabled and rootfs is None
-                and cmd and cmd[0]):
-            _cmd0 = cmd[0]
-            if os.sep not in _cmd0:
-                _resolvable = bool(
-                    shutil.which(_cmd0)
-                    or shutil.which(_cmd0,
-                                    path=kwargs["env"].get("PATH")))
-            elif os.path.isabs(_cmd0):
-                _resolvable = os.path.exists(_cmd0)
-            else:
-                _resolvable = True  # relative-with-sep: cwd-dependent
-            if not _resolvable:
-                raise FileNotFoundError(
-                    errno.ENOENT, os.strerror(errno.ENOENT), _cmd0)
+                and _cmd_resolves_nowhere(cmd,
+                                          kwargs["env"].get("PATH"))):
+            raise FileNotFoundError(
+                errno.ENOENT, os.strerror(errno.ENOENT), cmd[0])
 
         # Namespace isolation is wanted whenever network / mount / read
         # policy is in play. Landlock filesystem isolation works
@@ -7214,6 +7204,28 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     )
 
 
+def _cmd_resolves_nowhere(cmd: "list | None",
+                          env_path: "str | None") -> bool:
+    """True when ``cmd[0]`` resolves NOWHERE — not on the caller's
+    PATH, not on ``env_path`` (a child/caller-provided PATH value),
+    and (for absolute invocations) not on the filesystem. This is the
+    shape whose cross-lane contract is the subprocess-parity
+    FileNotFoundError (see the missing-tool check in the per-call run
+    body). Relative-with-separator commands resolve against the CHILD
+    cwd and are never classified here; an empty/absent command is left
+    to the lane's own validation."""
+    if not (cmd and cmd[0]):
+        return False
+    _cmd0 = cmd[0]
+    if os.sep not in _cmd0:
+        return not (shutil.which(_cmd0)
+                    or (env_path
+                        and shutil.which(_cmd0, path=env_path)))
+    if os.path.isabs(_cmd0):
+        return not os.path.exists(_cmd0)
+    return False  # relative-with-sep: cwd-dependent
+
+
 # Convenience: standalone run function for one-off sandboxed commands
 def run(cmd: list[str], block_network: bool = True, target: str | None = None,
         output: str | None = None, allowed_tcp_ports: list | None = None,
@@ -7262,33 +7274,92 @@ def run(cmd: list[str], block_network: bool = True, target: str | None = None,
     Accepts the same sandbox-configuration kwargs as sandbox() — forwards
     them into a one-shot context.
     """
-    with sandbox(block_network=block_network, target=target, output=output,
-                 allowed_tcp_ports=allowed_tcp_ports, profile=profile,
-                 disabled=disabled, limits=limits, map_root=map_root,
-                 use_egress_proxy=use_egress_proxy,
-                 proxy_hosts=proxy_hosts,
-                 proxy_allowed_ports=proxy_allowed_ports,
-                 require_proxy_netns=require_proxy_netns,
-                 restrict_reads=restrict_reads,
-                 readable_paths=readable_paths,
-                 caller_label=caller_label,
-                 fake_home=fake_home,
-                 tool_paths=tool_paths,
-                 audit=audit, audit_verbose=audit_verbose,
-                 audit_run_dir=audit_run_dir,
-                 audit_required=audit_required,
-                 observe=observe,
-                 writable_paths=writable_paths,
-                 exclude_tmp_baseline=exclude_tmp_baseline,
-                 sanitise_host_fingerprint=sanitise_host_fingerprint,
-                 cpu_count=cpu_count,
-                 require_sanitisation=require_sanitisation,
-                 etc_overlay=etc_overlay,
-                 degraded_net_deny=degraded_net_deny,
-                 loopback_unix_bridges=loopback_unix_bridges,
-                 omit_proc_reads=omit_proc_reads,
-                 omit_etc_reads=omit_etc_reads,
-                 rootfs=rootfs) as _run:
+    from contextlib import ExitStack
+
+    from .errors import SandboxSetupError
+    with ExitStack() as _stack:
+        try:
+            _run = _stack.enter_context(sandbox(
+                block_network=block_network, target=target, output=output,
+                allowed_tcp_ports=allowed_tcp_ports, profile=profile,
+                disabled=disabled, limits=limits, map_root=map_root,
+                use_egress_proxy=use_egress_proxy,
+                proxy_hosts=proxy_hosts,
+                proxy_allowed_ports=proxy_allowed_ports,
+                require_proxy_netns=require_proxy_netns,
+                restrict_reads=restrict_reads,
+                readable_paths=readable_paths,
+                caller_label=caller_label,
+                fake_home=fake_home,
+                tool_paths=tool_paths,
+                audit=audit, audit_verbose=audit_verbose,
+                audit_run_dir=audit_run_dir,
+                audit_required=audit_required,
+                observe=observe,
+                writable_paths=writable_paths,
+                exclude_tmp_baseline=exclude_tmp_baseline,
+                sanitise_host_fingerprint=sanitise_host_fingerprint,
+                cpu_count=cpu_count,
+                require_sanitisation=require_sanitisation,
+                etc_overlay=etc_overlay,
+                degraded_net_deny=degraded_net_deny,
+                loopback_unix_bridges=loopback_unix_bridges,
+                omit_proc_reads=omit_proc_reads,
+                omit_etc_reads=omit_etc_reads,
+                rootfs=rootfs))
+        except SandboxSetupError as _construction_refusal:
+            # Refusal PRIORITY at the one-shot boundary. Context
+            # construction refuses on capability grounds (e.g.
+            # block_network with neither a namespace backend nor
+            # Landlock ABI v4+) without ever seeing the command or
+            # the call class — but run() knows both, and two per-call
+            # surfaces outrank a capability refusal, in the per-call
+            # body's own order (floor resolution first, missing-tool
+            # second, lane dispatch last):
+            #
+            #  * the consent-chain floor refusal (never-BARE:
+            #    "--sandbox-floor none" / a bare project floor on
+            #    untrusted-class work) is not remediable by ANY
+            #    environment change, so the capability refusal's
+            #    remedies (enable userns, `--sandbox none`, the
+            #    degraded-tier waiver) are misleading for it;
+            #  * a command that resolves NOWHERE cannot execute on
+            #    any lane of any host, so the missing-tool contract
+            #    (subprocess-parity FileNotFoundError, the callers'
+            #    `except FileNotFoundError: <tool> not installed`
+            #    arm) must keep working on degraded hosts too —
+            #    nothing runs either way, no enforcement is lost.
+            #
+            # Scoped to a REFUSING construction: on hosts where the
+            # context engages, nothing here changes — the per-call
+            # body keeps owning both checks.
+            if not disabled:
+                # operator_disabled=False is exact in this arm: the
+                # operator-disabled construction path never refuses
+                # (no enforcement gates run there).
+                _explicit_tier, _explicit_src = _explicit_untrusted_floor()
+                _rfp = kwargs.get("require_fresh_procfs")
+                try:
+                    _tiers.resolve_call_floor(
+                        operator_disabled=False,
+                        require_fresh_procfs=(
+                            bool(_rfp) if _rfp is not None else None),
+                        untrusted_workload=bool(
+                            kwargs.get("_untrusted_workload", False)),
+                        waiver_active=_degraded_untrusted_waiver(),
+                        explicit_floor=_explicit_tier,
+                        explicit_source=_explicit_src,
+                    )
+                except _errors.SandboxFloorError as _floor_exc:
+                    raise _record_floor_refusal(
+                        audit_run_dir or output, _floor_exc,
+                    ) from _construction_refusal
+            if rootfs is None and _cmd_resolves_nowhere(
+                    cmd, (kwargs.get("env") or {}).get("PATH")):
+                raise FileNotFoundError(
+                    errno.ENOENT, os.strerror(errno.ENOENT),
+                    cmd[0]) from _construction_refusal
+            raise
         return _run(cmd, **kwargs)
 
 
