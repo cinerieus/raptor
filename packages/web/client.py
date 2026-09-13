@@ -196,6 +196,13 @@ class WebClient:
             return None
         try:
             ip_obj = ipaddress.ip_address(hostname)
+        except ValueError:
+            # Not an IP literal — a hostname; resolve and validate below.
+            # (Deciding this by substring-matching the exception message
+            # mis-blocked any hostname whose text collided with our own
+            # error wording.)
+            ip_obj = None
+        if ip_obj is not None:
             if not ip_obj.is_global:
                 msg = (
                     f"Blocked request to non-global IP {hostname} — "
@@ -203,9 +210,6 @@ class WebClient:
                 )
                 raise ValueError(msg)
             return None
-        except ValueError as exc:
-            if "non-global" in str(exc):
-                raise
         default_port = 443 if parsed.scheme == "https" else 80
         port = parsed.port or default_port
         try:

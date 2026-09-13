@@ -212,6 +212,25 @@ def test_private_host_recognizes_hostnames_by_resolution(monkeypatch):
     assert is_private("http://box.internal/") is True
 
 
+def test_hostname_colliding_with_block_wording_is_resolved_not_blocked(monkeypatch):
+    """The IP-literal / hostname split must be structural, not a
+    substring match on our own error text: a hostname containing
+    'non-global' used to be re-raised as a blocked IP instead of being
+    DNS-resolved and validated."""
+    from packages.web.client import WebClient
+
+    def fake_getaddrinfo(host, port, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    client = WebClient("http://non-global-widgets.example")
+    pinned = client._resolve_and_validate("http://non-global-widgets.example/")
+    assert pinned is not None
+    hostname, _port, addrs = pinned
+    assert hostname == "non-global-widgets.example"
+    assert addrs[0][4][0] == "93.184.216.34"
+
+
 def test_lna_is_decided_per_batch_not_across_mixed_targets(tmp_path, monkeypatch):
     import shutil as shutil_module
 
