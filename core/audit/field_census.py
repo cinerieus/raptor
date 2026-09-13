@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Iterable
 
-from core.json import dumps_artifact, load_json
+from core.json import load_json, save_json
 
 from .struct_accessor_index import _MIN_FIELD_LEN, _NOISE_FIELDS, _detect_lock
 
@@ -1053,8 +1053,10 @@ def write_census_artifact(census: FieldCensus,
                           out_dir: Path) -> Path | None:
     """Persist ``field-census.json`` (mirrors ``return-census.json``)."""
     try:
+        # Atomic write (tempfile + rename via save_json): a torn write
+        # would leave a field-census.json that fails to parse.
         path = Path(out_dir) / ARTIFACT_NAME
-        path.write_text(dumps_artifact(census.to_dict(), indent=1))
+        save_json(path, census.to_dict())
         return path
     except OSError:
         logger.debug("field-census.json write failed", exc_info=True)

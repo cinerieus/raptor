@@ -269,7 +269,10 @@ def emit_fuzz_dict(target_path: Path, out_dir: Path) -> Path | None:
             used_names.add(name)
             lines.append(f'{name}="{tok["value"]}"')
         afl_path = Path(out_dir) / DICT_AFL_FILENAME
-        afl_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Atomic: /fuzz auto-discovers this file from OTHER runs — a
+        # torn write must not hand a half dictionary to a fuzzer.
+        from core.atomic_fs import write_text_atomically
+        write_text_atomically(afl_path, "\n".join(lines) + "\n")
 
         logger.info(
             "fuzz handoff: %d dictionary token(s), %d seed hint(s) → %s",
