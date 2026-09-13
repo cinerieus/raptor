@@ -973,11 +973,17 @@ def _lexical_validator_in_branch(
     ``guard_shaped=True`` is for ``kind="charset"`` guard validators
     whose exit-on-fail lives ON the matched line (``if
     (!x.matches("[a-z]+")) return;``): the guard line legitimately
-    carries a conditional keyword and legitimately opens its own
+    carries ONE conditional keyword and legitimately opens its own
     conditional block, so the keyword-on-line / dangling-guard checks
     are skipped and blocks OPENED on the validator line itself are
-    exempt from the closed-before-sink test.  Enclosing conditional
-    blocks (opened on earlier lines) still flag.
+    exempt from the closed-before-sink test.  A SECOND conditional
+    keyword on the guard line is an enclosing conditional collapsed
+    onto it (``if (strict) { if (!ok) { return; } }``) and refuses —
+    a block that both opens and closes on the guard line is invisible
+    to the brace snapshots below.  Enclosing conditional blocks
+    (opened on earlier lines) still flag, including ones whose ``}``
+    lands on the guard line: the branch-wrap snapshot is taken at the
+    START of the validator line so a same-line close cannot hide them.
     """
     lines = source_text.splitlines()
     if not (0 < validator_line <= len(lines) and 0 < sink_line <= len(lines)):
@@ -996,18 +1002,31 @@ def _lexical_validator_in_branch(
             if _COND_BLOCK_KEYWORD.search(prev) and "{" not in prev:
                 return True
             break
+    elif len(_COND_BLOCK_KEYWORD.findall(
+            _LEXICAL_NOISE.sub(" ", lines[validator_line - 1]))) >= 2:
+        # The guard accounts for exactly one conditional keyword on
+        # its own line; any further one wraps the guard conditionally.
+        return True
     # Each block gets a unique id so "still open at the sink" means the
     # SAME block, not merely the same nesting depth.
     stack: list[tuple[int, bool, int]] = []  # (block id, conditional?, open line)
     at_validator: list[tuple[int, bool, int]] | None = None
+    opened_on_validator: list[tuple[int, bool, int]] = []
     next_id = 0
     prev_tail = ""                       # scrubbed text since the last brace
     for idx, raw in enumerate(lines[:sink_line], start=1):
+        if idx == validator_line:
+            # Snapshot at line START: a block whose `}` lands on the
+            # validator line itself must still count as wrapping it.
+            at_validator = list(stack)
         text = _LEXICAL_NOISE.sub(" ", raw)
         for ch in text:
             if ch == "{":
                 conditional = bool(_COND_BLOCK_KEYWORD.search(prev_tail))
-                stack.append((next_id, conditional, idx))
+                entry = (next_id, conditional, idx)
+                stack.append(entry)
+                if idx == validator_line:
+                    opened_on_validator.append(entry)
                 next_id += 1
                 prev_tail = ""
             elif ch == "}":
@@ -1017,17 +1036,16 @@ def _lexical_validator_in_branch(
                 prev_tail = ""
             else:
                 prev_tail += ch
-        if idx == validator_line:
-            at_validator = list(stack)
     if at_validator is None:
         return True
-    # Every conditional block open at the validator must STILL be open
-    # at the sink — one that closed in between means the sink runs on
+    # Every conditional block wrapping the validator — open at its
+    # line start, or opened on the line itself — must STILL be open
+    # at the sink; one that closed in between means the sink runs on
     # paths that skipped the validator.
     open_at_sink = {block_id for block_id, _, _ in stack}
     return any(
         conditional and block_id not in open_at_sink
-        for block_id, conditional, open_line in at_validator
+        for block_id, conditional, open_line in at_validator + opened_on_validator
         if not (guard_shaped and open_line == validator_line)
     )
 

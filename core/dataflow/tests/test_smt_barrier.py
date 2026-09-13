@@ -2351,3 +2351,88 @@ def test_validator_raise_with_reraising_matching_except_still_dominates(tmp_path
         sink_uri="app.py", sink_line=7, sink_class="pathtrav",
     )
     assert r.status is sb.Tier0Status.SOUND
+
+
+# ---------------------------------------------------------------------------
+# Lexical branch-wrap: enclosing conditional collapsed onto the guard's
+# own line.
+#
+# The brace tracker snapshots the stack per line, so a conditional
+# block that opens (and possibly closes) ON the guard line was
+# invisible — `if (strict) { if (!ok) { return; } }` read as an
+# unconditional guard while the sink stays live when `strict` is
+# false.
+# ---------------------------------------------------------------------------
+
+def test_lexical_branch_wrap_flags_one_line_enclosing_conditional():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        '    if (strict) { if (!name.matches("[a-z]+")) { return; } }\n'  # line 3
+        "    open(name);\n"                                               # line 4
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 3, 4, guard_shaped=True) is True
+
+
+def test_lexical_branch_wrap_flags_braceless_inner_guard_one_line():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        '    if (strict) { if (!name.matches("[a-z]+")) return; }\n'      # line 3
+        "    open(name);\n"                                               # line 4
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 3, 4, guard_shaped=True) is True
+
+
+def test_lexical_branch_wrap_flags_enclosing_closing_on_guard_line():
+    """The enclosing conditional's `}` landing on the guard line popped
+    it before the end-of-line snapshot — it must still flag."""
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        "    if (strict) {\n"                                             # line 3
+        '      if (!name.matches("[a-z]+")) { return; } }\n'              # line 4 = guard
+        "    open(name);\n"                                               # line 5
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 4, 5, guard_shaped=True) is True
+
+
+def test_lexical_branch_wrap_one_line_self_guard_still_certifies():
+    """Two-direction: the guard's OWN one-line block (open and close on
+    the guard line, no enclosing conditional) must keep certifying."""
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        '    if (!name.matches("[a-z]+")) { return; }\n'                  # line 3
+        "    open(name);\n"                                               # line 4
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 3, 4, guard_shaped=True) is False
+
+
+def test_try_tier0_declined_on_one_line_wrapped_java_guard(tmp_path: Path):
+    (tmp_path / "App.java").write_text(
+        "void load(String name) {\n"                                                                      # line 1
+        '    if (strict) { if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException(); }\n'  # line 2
+        "    Files.readAllBytes(Paths.get(BASE, name));\n"                                                # line 3 = sink
+        "}\n"
+    )
+    diff = (
+        "@@ -1,2 +1,3 @@\n"
+        " void load(String name) {\n"
+        '+    if (strict) { if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException(); }\n'
+        "     Files.readAllBytes(Paths.get(BASE, name));\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="App.java", sink_line=3, sink_class="pathtrav",
+        language="java",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
