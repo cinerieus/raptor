@@ -1627,8 +1627,16 @@ _UNLOCK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Suppresses the missing-unlock check only when the managed object
+# looks lock-ish. Trade-off in both directions: the previous
+# any-with form (r"with\s+\w+") let `with open(path)` hide a bare
+# .acquire() with no release (missed leaks); an over-narrow name list
+# would re-flag RAII-managed locks whose release IS the context
+# manager (false rows). Lock-ish name tokens keep both directions
+# covered.
 _CONTEXT_MANAGER_LOCK = re.compile(
-    r"with\s+\w+",
+    r"with\s+[^\n]*(?:lock|mutex|guard|sema|cond|critical|monitor)",
+    re.IGNORECASE,
 )
 
 _NON_REENTRANT_CALLS = frozenset({

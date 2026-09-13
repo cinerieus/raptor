@@ -1414,3 +1414,34 @@ class TestStructuralCheckersRejectRenderedSource:
             "line_start": 1, "line_end": raw_lines,
         }
         assert check_auth_mode_registration(gap, target_path=tmp_path)
+
+
+class TestContextManagerLockScoping:
+    def _gap(self, source):
+        return [{"file": "a.py", "name": "f", "source": source}]
+
+    def test_with_open_does_not_suppress_missing_unlock(self):
+        # An unrelated context manager in the function must not hide a
+        # bare acquire with no visible release.
+        source = (
+            "def f(self):\n"
+            "    self.mu.acquire()\n"
+            "    with open(self.path) as fh:\n"
+            "        data = fh.read()\n"
+            "    if not data:\n"
+            "        raise ValueError('empty')\n"
+        )
+        titles = [x.title for x in check_lock_ordering(self._gap(source))]
+        assert "Missing unlock in error path" in titles
+
+    def test_lockish_context_manager_still_suppresses(self):
+        source = (
+            "def f(self):\n"
+            "    self.io_mutex.acquire()\n"
+            "    with self._lock:\n"
+            "        pass\n"
+            "    if err:\n"
+            "        raise ValueError('x')\n"
+        )
+        titles = [x.title for x in check_lock_ordering(self._gap(source))]
+        assert "Missing unlock in error path" not in titles
