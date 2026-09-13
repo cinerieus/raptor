@@ -201,13 +201,40 @@ class TestSeccompLayerAlone:
         assert "memfd_create OK" in r.stdout
 
 
+@pytest.fixture()
+def degraded_floor_consent_if_mountless(monkeypatch):
+    """Let the untrusted-run tests dispatch on mount-denied hosts.
+
+    run_untrusted's default floor is the fresh-procfs contract, which
+    needs the mount-namespace backend; a host that denies mount
+    operations inside a user namespace (the no-mount matrix shape)
+    refuses the run before any child exists, so the posture deny under
+    test is never observed. The deny is keyed on the restrict_reads
+    POSTURE, not on the backend — on such hosts this fixture grants
+    the refusal's own documented consent so the run dispatches the
+    achievable degraded lane and the deny is witnessed THERE. On
+    mount-capable hosts the env stays untouched and dispatch is
+    byte-identical to before. Keyed on the same cached probe the
+    production degradation lattice keys on, and composes with
+    conftest's _consent_env_guard (strip, then set, LIFO restore).
+    """
+    from core.sandbox.probes import check_mount_available
+
+    if not check_mount_available():
+        monkeypatch.setenv("RAPTOR_ALLOW_DEGRADED_UNTRUSTED", "1")
+
+
 @requires_execveat_nr
 @requires_landlock
 @requires_userns
 class TestUntrustedPosture:
     """End-to-end through run_untrusted / run — the restrict_reads
-    posture carries the deny on whichever lane the host dispatches."""
+    posture carries the deny on whichever lane the host dispatches
+    (including the degraded lane a mount-denied host dispatches under
+    the documented floor consent — see
+    degraded_floor_consent_if_mountless)."""
 
+    @pytest.mark.usefixtures("degraded_floor_consent_if_mountless")
     def test_untrusted_denies_fd_exec(self, tmp_path):
         from core.sandbox import run_untrusted
 
@@ -247,6 +274,7 @@ class TestUntrustedPosture:
         shutil.which("cc") is None and shutil.which("gcc") is None,
         reason="no C compiler for the toolchain-shape direction",
     )
+    @pytest.mark.usefixtures("degraded_floor_consent_if_mountless")
     def test_compile_and_run_poc_under_output_still_works(self, tmp_path):
         # The caller-inventory toolchain shape (dark_verify /
         # exploit_verify / dynamic_sweep): compile a PoC under the
