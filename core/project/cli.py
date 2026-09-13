@@ -47,6 +47,22 @@ _WAIT_HELP = ("Block until a concurrent project operation releases the "
               "holder)")
 
 
+def _confirm(prompt: str) -> bool:
+    """y/N confirmation that treats an unanswerable prompt as "no".
+
+    ``input()`` raises EOFError when stdin is closed or piped dry (a
+    scripted ``raptor project clean`` without ``--yes``); main() only
+    handles ValueError/FileExistsError/OpLockContention, so the
+    destructive-confirm prompt turned into a traceback instead of the
+    safe "Cancelled." default.
+    """
+    try:
+        return input(prompt).lower() == "y"
+    except EOFError:
+        print()  # keep the next line off the prompt's row
+        return False
+
+
 def _c(text, code):
     """Colour text if stdout is a terminal."""
     if not os.isatty(1):
@@ -1236,7 +1252,7 @@ def main() -> None:
                 else:
                     size_str = f"{size}B"
                 print(f"This will delete {args.name} and its output ({size_str})")
-                if input("Proceed? [y/N] ").lower() != "y":
+                if not _confirm("Proceed? [y/N] "):
                     print("Cancelled.")
                     return
             output_dir = p.output_dir
@@ -2874,7 +2890,7 @@ def _do_clean(project, keep, dry_run, yes, dedup: bool=False) -> None:
         print("\n(dry run — no changes)")
         return
 
-    if not yes and input("\nProceed? [y/N] ").lower() != "y":
+    if not yes and not _confirm("\nProceed? [y/N] "):
         print("Cancelled.")
         return
 
@@ -2977,7 +2993,7 @@ def _do_merge(project, merge_type, yes) -> None:
     for cmd_type, dirs in mergeable.items():
         print(f"  {cmd_type}: {len(dirs)} runs → 1")
 
-    if not yes and input("\nProceed? [y/N] ").lower() != "y":
+    if not yes and not _confirm("\nProceed? [y/N] "):
         print("Cancelled.")
         return
 

@@ -295,6 +295,50 @@ class TestDoMergeLabel(unittest.TestCase):
             self.assertNotIn("(1 findings)", output)
 
 
+class TestConfirmPrompt(unittest.TestCase):
+    """Destructive confirms treat a closed/non-tty stdin as "no"
+    instead of crashing with an unhandled EOFError."""
+
+    def test_eof_means_no(self):
+        from core.project.cli import _confirm
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertFalse(_confirm("Proceed? [y/N] "))
+
+    def test_yes_and_no_answers(self):
+        from core.project.cli import _confirm
+        with patch("builtins.input", return_value="y"):
+            self.assertTrue(_confirm("Proceed? [y/N] "))
+        with patch("builtins.input", return_value="n"):
+            self.assertFalse(_confirm("Proceed? [y/N] "))
+
+    def test_merge_without_yes_cancels_on_closed_stdin(self):
+        from core.project.cli import _do_merge
+        from core.project.project import Project
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            out = tmp / "proj-out"
+            out.mkdir()
+            for name in ("scan-1", "scan-2"):
+                d = out / name
+                d.mkdir()
+                (d / ".raptor-run.json").write_text(json.dumps({
+                    "version": 2, "command": "scan",
+                    "status": "completed",
+                    "project": None, "project_source": "none",
+                }), encoding="utf-8")
+                (d / "findings.json").write_text("[]", encoding="utf-8")
+            project = Project(name="p", target=str(tmp / "code"),
+                              output_dir=str(out))
+            buf = io.StringIO()
+            with patch("builtins.input", side_effect=EOFError), \
+                    contextlib.redirect_stdout(buf):
+                _do_merge(project, "scan", yes=False)
+            self.assertIn("Cancelled", buf.getvalue())
+            # Nothing merged, nothing deleted.
+            self.assertTrue((out / "scan-1").exists())
+            self.assertTrue((out / "scan-2").exists())
+
+
 class TestCLI(unittest.TestCase):
 
     def test_help(self):
