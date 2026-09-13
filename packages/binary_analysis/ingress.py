@@ -20,6 +20,8 @@ from typing import Any
 
 from core.evidence import BinaryEvidenceRecord, EvidenceTier, make_evidence
 
+from .manifest import platform_label
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,15 +117,9 @@ def _id(*parts: Any) -> str:
     return f"BINGRESS-{hashlib.sha256(raw.encode('utf-8', 'surrogateescape')).hexdigest()[:12]}"
 
 
-def _platform(manifest: Any) -> str:
-    kind = str(getattr(manifest, "target_kind", "") or "")
-    if kind == "macho":
-        return "macos"
-    if kind.startswith("pe-"):
-        return "windows"
-    if kind in {"elf-linux", "elf-kmod"}:
-        return "linux"
-    return "generic"
+# Shared target_kind -> OS mapping (kept under the module-local name
+# the call sites use).
+_platform = platform_label
 
 
 def recover_external_ingress(

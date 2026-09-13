@@ -162,6 +162,21 @@ class BinaryManifest:
         )
 
 
+def platform_label(manifest: Any) -> str:
+    """Coarse OS label derived from ``target_kind`` — the shared
+    mapping topology and ingress previously each copied. Accepts any
+    manifest-shaped object (``target_kind`` attribute); unknown or
+    missing kinds land on ``"generic"``."""
+    kind = str(getattr(manifest, "target_kind", "") or "")
+    if kind == "macho":
+        return "macos"
+    if kind.startswith("pe-"):
+        return "windows"
+    if kind in {"elf-linux", "elf-kmod"}:
+        return "linux"
+    return "generic"
+
+
 def _normalise_symbol(name: str) -> str:
     return strip_import_prefix(name)
 

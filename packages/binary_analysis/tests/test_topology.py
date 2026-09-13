@@ -126,3 +126,28 @@ def test_absolute_path_rejected(tmp_path):
 
     result = _find_declared_artifact(bundle, "/etc/passwd")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# platform_label — the shared target_kind -> OS mapping
+# ---------------------------------------------------------------------------
+
+
+def test_platform_label_shared_by_topology_and_ingress():
+    """topology and ingress previously each copied the mapping; both
+    must delegate to manifest.platform_label so it cannot drift."""
+    from packages.binary_analysis import ingress, manifest, topology
+    assert topology._platform is manifest.platform_label
+    assert ingress._platform is manifest.platform_label
+
+
+def test_platform_label_mapping():
+    from packages.binary_analysis.manifest import platform_label
+    from types import SimpleNamespace as NS
+    assert platform_label(NS(target_kind="macho")) == "macos"
+    assert platform_label(NS(target_kind="pe-exe")) == "windows"
+    assert platform_label(NS(target_kind="elf-linux")) == "linux"
+    assert platform_label(NS(target_kind="elf-kmod")) == "linux"
+    assert platform_label(NS(target_kind="wasm")) == "generic"
+    assert platform_label(NS(target_kind=None)) == "generic"
+    assert platform_label(object()) == "generic"
