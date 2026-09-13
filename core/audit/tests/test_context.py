@@ -69,9 +69,9 @@ class TestReadSource:
 
 class TestReadTargetText:
     """Every target-source read goes through _read_target_text, a
-    stat-then-bounded-read helper: over-cap files are treated exactly
-    like unreadable ones, so a planted multi-GB file cannot OOM the
-    process via per-function re-reads."""
+    bounded-read helper (core.source.read_bytes_capped): over-cap
+    files are treated exactly like unreadable ones, so a planted
+    multi-GB file cannot OOM the process via per-function re-reads."""
 
     def test_normal_file(self, tmp_path):
         f = tmp_path / "a.c"

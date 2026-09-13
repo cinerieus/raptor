@@ -77,32 +77,23 @@ def _read_target_text(full_path: Path) -> str | None:
     Returns the decoded text, or None when the file is unreadable OR
     larger than ``_MAX_SOURCE_FILE_BYTES`` — callers take their
     existing unreadable-file fallback in both cases. The bounded read
-    of cap+1 bytes detects a file that grew past the cap between stat
-    and read without ever loading more than the cap into memory.
+    (``core.source.read_bytes_capped``: cap+1 probe, never
+    stat-then-read) detects an over-cap file without ever loading
+    more than the cap into memory.
     """
-    try:
-        st = full_path.stat()
-        if st.st_size > _MAX_SOURCE_FILE_BYTES:
-            logger.warning(
-                "target source file too large (%.0f MiB > %.0f MiB cap), "
-                "skipping: %s",
-                st.st_size / 1024 / 1024,
-                _MAX_SOURCE_FILE_BYTES / 1024 / 1024,
-                full_path,
-            )
-            return None
-        with full_path.open("rb") as f:
-            raw = f.read(_MAX_SOURCE_FILE_BYTES + 1)
-        if len(raw) > _MAX_SOURCE_FILE_BYTES:
-            logger.warning(
-                "target source file grew past %.0f MiB cap during read, "
-                "skipping: %s",
-                _MAX_SOURCE_FILE_BYTES / 1024 / 1024, full_path,
-            )
-            return None
-        return raw.decode("utf-8", errors="replace")
-    except OSError:
+    from core.source import read_bytes_capped
+
+    got = read_bytes_capped(full_path, _MAX_SOURCE_FILE_BYTES)
+    if got is None:
         return None
+    raw, truncated = got
+    if truncated:
+        logger.warning(
+            "target source file over %.0f MiB cap, skipping: %s",
+            _MAX_SOURCE_FILE_BYTES / 1024 / 1024, full_path,
+        )
+        return None
+    return raw.decode("utf-8", errors="replace")
 
 
 def _build_tool_catalog() -> str:

@@ -354,12 +354,17 @@ def _read_source(
     if not full_path.is_file():
         return None
 
-    try:
-        text = full_path.read_text(errors="replace")
-    except OSError:
-        return None
+    # Bounded read: the previous read_text + post-hoc length refusal
+    # buffered a planted multi-hundred-MB file whole before deciding.
+    # Same contract (files over the summary budget read as
+    # unavailable), bounded memory.
+    from core.source import read_text_capped
 
-    if len(text) > 500_000:
+    got = read_text_capped(full_path, 500_000)
+    if got is None:
+        return None
+    text, truncated = got
+    if truncated:
         return None
 
     if line_start and line_start > 0:

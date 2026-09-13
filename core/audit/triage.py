@@ -7,10 +7,13 @@ All classification is deterministic — no LLM calls.
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, TYPE_CHECKING
+
+from core.source import read_text_capped
 
 from ._util import safe_join
 from .vendored_detector import (
@@ -509,11 +512,14 @@ def _read_function_source(gap: dict[str, Any], target_path: Path) -> str:
     end = int(gap.get("line_end") or 0)
     if start <= 0 or end < start:
         return ""
-    try:
-        with open(resolved, errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
+    # Capped read (core.source): an over-cap planted file yields only
+    # the in-cap prefix — lines past it are missing and the veto
+    # simply doesn't fire (the documented fail-open-toward-SKIP
+    # direction), instead of the whole file buffering into memory.
+    got = read_text_capped(resolved)
+    if got is None:
         return ""
+    lines = io.StringIO(got[0]).readlines()
     return "".join(lines[start - 1:end])
 
 

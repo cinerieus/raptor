@@ -398,6 +398,34 @@ class TestStackBufferSkipVeto:
         (only,) = results.values()
         assert only.bucket == TriageBucket.INVESTIGATE
 
+
+class TestReadFunctionSource:
+    """Behavior pins across the capped-read migration: the veto read
+    slices the exact line range, and every refusal (traversal,
+    unreadable) degrades to "" — veto doesn't fire, SKIP stands."""
+
+    def test_slices_exact_line_range(self, tmp_path):
+        from core.audit.triage import _read_function_source
+
+        (tmp_path / "a.c").write_text("l1\nl2\nl3\nl4\nl5\n")
+        gap = {"file": "a.c", "line_start": 2, "line_end": 4}
+        assert _read_function_source(gap, tmp_path) == "l2\nl3\nl4\n"
+
+    def test_traversal_path_reads_empty(self, tmp_path):
+        from core.audit.triage import _read_function_source
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.c").write_text("l1\nl2\n")
+        gap = {"file": "../outside.c", "line_start": 1, "line_end": 2}
+        assert _read_function_source(gap, target) == ""
+
+    def test_missing_file_reads_empty(self, tmp_path):
+        from core.audit.triage import _read_function_source
+
+        gap = {"file": "absent.c", "line_start": 1, "line_end": 2}
+        assert _read_function_source(gap, tmp_path) == ""
+
     def test_classify_all_without_target_path_unchanged(self):
         gaps = [{
             "name": "trace_string", "file": "t.c",

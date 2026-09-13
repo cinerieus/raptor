@@ -475,3 +475,14 @@ class TestReadSourceDegenerateSpans:
         root = self._write(tmp_path)
         out = _read_source(root, "mod.py", "f", None, None)
         assert out is not None and out.startswith("line1")
+
+    def test_over_budget_file_reads_as_unavailable(self, tmp_path):
+        # Files past the 500 KB summary budget read as unavailable
+        # (pinned across the bounded-read migration — the read is now
+        # capped instead of buffering the whole file first).
+        from core.audit.llm_summaries import _read_source
+
+        f = tmp_path / "big.py"
+        f.write_text("x = 1\n" * 90_000)  # > 500_000 chars
+        assert _read_source(tmp_path, "big.py", "f", None, None) is None
+        assert _read_source(tmp_path, "big.py", "f", 1, 2) is None
