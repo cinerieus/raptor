@@ -156,6 +156,15 @@ def _recorded_verdict_index(
             fid = finding.get("finding_id")
             if not isinstance(fid, str):
                 continue
+            if fid in out:
+                # Same finding in multiple reports: FIRST record in
+                # path order wins — the same rule the estimator
+                # applies to duplicate (finding, model) panels
+                # (dawid_skene.estimate). Pre-fix this index kept the
+                # LAST file's verdict while the EM kept the first
+                # file's panels, so flips were computed against a
+                # different run than the one that fed the posterior.
+                continue
             is_exploitable = finding.get("is_exploitable")
             if not isinstance(is_exploitable, bool):
                 is_exploitable = None

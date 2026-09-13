@@ -147,10 +147,15 @@ def load_from_paths(
 ) -> list[PanelRecord]:
     """Concatenate records from multiple report files in path order.
 
-    Duplicate ``finding_id`` across files is allowed and preserved —
-    different runs can re-analyse the same finding with different
-    panels, and D–S should see all of them (each panel is an
-    independent observation event).
+    Duplicate ``finding_id`` across files is allowed and preserved in
+    the RETURNED LIST — the loader stays policy-free. Consumers apply
+    the panel contract: one vote per ``(finding_id, model)``, FIRST
+    record in path order wins, later duplicates counted (see
+    ``dawid_skene.estimate``'s ``duplicates_ignored`` and the
+    same-model dedupe in ``calibrated_aggregation``) — counting a
+    repeat appearance of the same model would double-weight one voter.
+    Different MODELS re-analysing the same finding across runs all
+    count; the same model re-analysing it does not add a second vote.
     """
     out: list[PanelRecord] = []
     for p in paths:
