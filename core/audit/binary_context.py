@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from core.inventory.binary_builder import BINARY_PATH_PREFIX
 
@@ -25,18 +25,18 @@ logger = logging.getLogger(__name__)
 
 #: Cached (path, mtime) → REDatabase so a gap loop over hundreds of
 #: functions parses the JSON once.
-_REDB_CACHE: Dict[str, Any] = {}
+_REDB_CACHE: dict[str, Any] = {}
 
 #: One sandboxed GhidraServer per analysed binary, booted lazily the
 #: first time a checklist function has no cached decompilation and
 #: reused for the rest of the run (JVM boot ~4s once vs per call).
-_SERVER_CACHE: Dict[str, Any] = {}
+_SERVER_CACHE: dict[str, Any] = {}
 
 
 def _lazy_decompile(
     binary_path: str, function_name: str, address,
-    out_dir: Optional[Path] = None,
-) -> Optional[str]:
+    out_dir: Path | None = None,
+) -> str | None:
     """On-demand decompilation through the persistent sandboxed
     server. Availability-gated (pyghidra + a real project source);
     any failure degrades to None and the stub text stands."""
@@ -103,8 +103,8 @@ def _lazy_decompile(
 
 
 def _project_for_binary(
-    binary_path: Path, out_dir: Optional[Path] = None,
-) -> Optional[Path]:
+    binary_path: Path, out_dir: Path | None = None,
+) -> Path | None:
     """A Ghidra project for the binary — RAPTOR-owned locations ONLY.
 
     The binary's own directory is attacker territory: a planted
@@ -131,7 +131,7 @@ def _project_for_binary(
     return None
 
 
-def find_redb(out_dir: Optional[Path], target_path: Optional[Path]) -> Optional[Path]:
+def find_redb(out_dir: Path | None, target_path: Path | None) -> Path | None:
     """Locate the run's re-database.json.
 
     Search order: the run output directory, its parent (shared
@@ -140,7 +140,7 @@ def find_redb(out_dir: Optional[Path], target_path: Optional[Path]) -> Optional[
     own directory.
     """
     import os
-    candidates: List[Path] = []
+    candidates: list[Path] = []
     if out_dir:
         candidates.append(Path(out_dir) / "re-database.json")
         candidates.append(Path(out_dir).parent / "re-database.json")
@@ -195,12 +195,12 @@ def assemble_binary_context(
     target_path: Path,
     file_path: str,
     function_name: str,
-    checklist: Optional[Dict[str, Any]] = None,
-    context_map: Optional[Dict[str, Any]] = None,
-    annotations_dir: Optional[Path] = None,
-    out_dir: Optional[Path] = None,
+    checklist: dict[str, Any] | None = None,
+    context_map: dict[str, Any] | None = None,
+    annotations_dir: Path | None = None,
+    out_dir: Path | None = None,
     db=None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Assemble a context slice for one binary function.
 
     Mirrors :func:`core.audit.context.assemble_context`'s return
@@ -244,7 +244,7 @@ def assemble_binary_context(
             if func is not None:
                 address = func.address
 
-    ctx: Dict[str, Any] = {
+    ctx: dict[str, Any] = {
         "file": file_path,
         "function": function_name,
         "line_start": 0,
@@ -381,7 +381,7 @@ def _read_binary_source(func, target_path=None, out_dir=None):
     )
 
 
-def _xref_call_adjacency(db) -> tuple[Dict[Any, list], Dict[Any, list]]:
+def _xref_call_adjacency(db) -> tuple[dict[Any, list], dict[Any, list]]:
     """Call-edge adjacency: (to_addr -> [xref], caller_addr -> [xref]).
 
     Both renderers below used to walk ``db.xrefs`` in full for EVERY
@@ -395,8 +395,8 @@ def _xref_call_adjacency(db) -> tuple[Dict[Any, list], Dict[Any, list]]:
     cached = getattr(db, "_audit_xref_adjacency", None)
     if cached is not None and cached[0] == len(db.xrefs):
         return cached[1], cached[2]
-    by_callee: Dict[Any, list] = {}
-    by_caller: Dict[Any, list] = {}
+    by_callee: dict[Any, list] = {}
+    by_caller: dict[Any, list] = {}
     for xref in db.xrefs:
         if xref.kind != "call":
             continue
@@ -408,7 +408,7 @@ def _xref_call_adjacency(db) -> tuple[Dict[Any, list], Dict[Any, list]]:
     return by_callee, by_caller
 
 
-def _binary_callers(db, func) -> List[Dict[str, Any]]:
+def _binary_callers(db, func) -> list[dict[str, Any]]:
     if db is None or func is None:
         return []
     callers = []
@@ -418,7 +418,7 @@ def _binary_callers(db, func) -> List[Dict[str, Any]]:
         caller = db.function_containing_address(xref.from_addr)
         if caller and caller.address not in seen:
             seen.add(caller.address)
-            entry: Dict[str, Any] = {
+            entry: dict[str, Any] = {
                 "name": caller.name,
                 "file": BINARY_PATH_PREFIX + Path(
                     db.binary_path or "unknown").stem,
@@ -431,7 +431,7 @@ def _binary_callers(db, func) -> List[Dict[str, Any]]:
     return callers[:15]
 
 
-def _binary_callees(db, func) -> List[Dict[str, Any]]:
+def _binary_callees(db, func) -> list[dict[str, Any]]:
     if db is None or func is None:
         return []
     callees = []
@@ -441,7 +441,7 @@ def _binary_callees(db, func) -> List[Dict[str, Any]]:
         callee = db.function_by_address(xref.to_addr)
         if callee and callee.address not in seen:
             seen.add(callee.address)
-            entry: Dict[str, Any] = {
+            entry: dict[str, Any] = {
                 "name": callee.name,
                 "file": BINARY_PATH_PREFIX + Path(
                     db.binary_path or "unknown").stem,
@@ -458,7 +458,7 @@ def _binary_callees(db, func) -> List[Dict[str, Any]]:
     return callees[:15]
 
 
-def _binary_sinks(context_map, function_name, address, func=None) -> List[str]:
+def _binary_sinks(context_map, function_name, address, func=None) -> list[str]:
     """Sinks reachable from THIS function, as prompt-ready strings.
 
     Matches the source path's contract (strings, per-function): map
@@ -517,7 +517,7 @@ def _load_annotation(annotations_dir, file_path, function_name, out_dir):
         return None
 
 
-def _related_types(func, db) -> List[Dict[str, Any]]:
+def _related_types(func, db) -> list[dict[str, Any]]:
     """Types referenced by the function, in the formatter's shape.
 
     ``format_context_for_prompt`` renders type_definitions entries as
@@ -555,7 +555,7 @@ def _related_types(func, db) -> List[Dict[str, Any]]:
     return out
 
 
-def _function_comments(db, func) -> List[Dict[str, str]]:
+def _function_comments(db, func) -> list[dict[str, str]]:
     if db is None or func is None:
         return []
     return [
