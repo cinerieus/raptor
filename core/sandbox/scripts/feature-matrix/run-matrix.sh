@@ -115,6 +115,35 @@ PYEOF
     if python3 "$HERE/bin/report.py" "$TMP/run-diverged" >/dev/null; then
         echo "self-test FAIL: shape divergence not gated" >&2; exit 1
     fi
+    echo "== report gates unbound expect_bound tests (denied-lane binding guard)"
+    for bindcase in bound unbound; do
+        L="$TMP/run-bind-$bindcase/u24/no-userns"
+        mkdir -p "$L"
+        python3 - "$L/probe.json" <<'PYEOF'
+import json, sys
+json.dump({"shape": {"landlock": "present", "userns": "denied",
+                     "mount_in_userns": "fail",
+                     "proc_mount_in_userns": "fail",
+                     "pivot_root_in_userns": "fail", "seccomp": "ok"},
+           "landlock": {"abi": 8}}, open(sys.argv[1], "w"))
+PYEOF
+        if [ "$bindcase" = bound ]; then
+            EXTRA='<testcase classname="x" name="test_denied_matrix_lanes_bind_this_module"/>'
+        else
+            # present but SKIPPED — must gate exactly like absent
+            EXTRA='<testcase classname="x" name="test_denied_matrix_lanes_bind_this_module"><skipped message="vacuous"/></testcase>'
+        fi
+        printf '<testsuites><testsuite name="pytest" tests="2" failures="0" errors="0" skipped="0"><testcase classname="x" name="a"/>%s</testsuite></testsuites>' "$EXTRA" \
+            > "$L/junit-1.xml"
+        printf '{"rc": 0, "duration_s": 1}' > "$L/meta.json"
+    done
+    python3 "$HERE/bin/report.py" "$TMP/run-bind-bound" > "$TMP/out-bind-bound" \
+        || { echo "self-test FAIL: bound guard test must not fail the run" >&2; exit 1; }
+    if python3 "$HERE/bin/report.py" "$TMP/run-bind-unbound" > "$TMP/out-bind-unbound"; then
+        echo "self-test FAIL: skipped expect_bound test not gated" >&2; exit 1
+    fi
+    grep -q "BIND required-passing" "$TMP/out-bind-unbound" \
+        || { echo "self-test FAIL: unbound guard not named in failures" >&2; exit 1; }
     echo "== report gates empty and stray-lane runs"
     mkdir -p "$TMP/run-empty"
     if python3 "$HERE/bin/report.py" "$TMP/run-empty" >/dev/null 2>&1; then

@@ -22,11 +22,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "profiles"))
 from lanes import LANE_ORDER, LANES  # noqa: E402
 
 
-def parse_junits(lane_dir: Path) -> dict:
+def parse_junits(lane_dir: Path, expect_bound=()) -> dict:
     from typing import Any
     agg: dict[str, Any] = {"tests": 0, "failures": 0, "errors": 0,
                            "skipped": 0, "failed_tests": [],
-                           "junit_found": False}
+                           "junit_found": False,
+                           # Binding guards (lanes.py `expect_bound`):
+                           # tests that must be PASSED in this lane —
+                           # "absent" until seen, then their observed
+                           # status. Gated like a divergence in main().
+                           "bound": {name: "absent"
+                                     for name in expect_bound}}
     for junit in sorted(lane_dir.glob("junit-*.xml")):
         agg["junit_found"] = True
         try:
@@ -45,6 +51,15 @@ def parse_junits(lane_dir: Path) -> dict:
             if case.find("failure") is not None or case.find("error") is not None:
                 agg["failed_tests"].append(
                     f"{case.get('classname', '?')}::{case.get('name', '?')}")
+            name = case.get("name", "")
+            if name in agg["bound"]:
+                if (case.find("failure") is not None
+                        or case.find("error") is not None):
+                    agg["bound"][name] = "failed"
+                elif case.find("skipped") is not None:
+                    agg["bound"][name] = "skipped"
+                else:
+                    agg["bound"][name] = "passed"
     return agg
 
 
@@ -143,7 +158,8 @@ def main() -> None:
                 meta = json.loads((lane_dir / "meta.json").read_text())
             except (OSError, json.JSONDecodeError):
                 pass
-            tests = parse_junits(lane_dir)
+            tests = parse_junits(
+                lane_dir, LANES[lane].get("expect_bound") or ())
             verdict, divergences, degradations = shape_check(lane, probe)
 
             harness_err = None
@@ -156,9 +172,19 @@ def main() -> None:
                 # that never ran — gate it like any other harness error.
                 harness_err = "junit contains zero tests"
 
+            # Binding guards: an expect_bound test that is skipped or
+            # absent means the lane silently did NOT exercise coverage
+            # that exists only here (inverse-gated live tests) — fatal
+            # like a shape divergence. Failed guards already gate via
+            # the ordinary failure count; list them here too so the
+            # BIND line names them.
+            bound_bad = [f"{name}: {status}"
+                         for name, status in tests["bound"].items()
+                         if status != "passed"]
+
             bad = bool(divergences or verdict == "NO-PROBE"
                        or tests["failures"] or tests["errors"]
-                       or harness_err)
+                       or harness_err or bound_bad)
             exit_bad |= bad
 
             rows.append({
@@ -167,6 +193,7 @@ def main() -> None:
                 "probed_shape": probe, "shape_verdict": verdict,
                 "divergences": divergences, "degradations": degradations,
                 "harness_error": harness_err,
+                "bound": tests["bound"], "bound_bad": bound_bad,
                 "duration_s": meta.get("duration_s"),
                 **{k: tests[k] for k in
                    ("tests", "failures", "errors", "skipped", "failed_tests")},
@@ -202,6 +229,10 @@ def main() -> None:
             fail_lines.append(f"[{r['image']}/{r['lane']}] DIVERGENCE {d}")
         for t in r["failed_tests"]:
             fail_lines.append(f"[{r['image']}/{r['lane']}] FAIL {t}")
+        for b in r["bound_bad"]:
+            fail_lines.append(
+                f"[{r['image']}/{r['lane']}] BIND required-passing "
+                f"test not bound: {b}")
         if r["harness_error"]:
             fail_lines.append(
                 f"[{r['image']}/{r['lane']}] HARNESS {r['harness_error']}")

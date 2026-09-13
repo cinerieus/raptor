@@ -84,6 +84,19 @@ _ENV_MOUNT_NOMINAL = {"mount_in_userns": "ok",
                       "proc_mount_in_userns": "ok",
                       "pivot_root_in_userns": "ok"}
 
+# Tests that must appear PASSED — not skipped, not absent — in a
+# lane's junit (report.py gates on it like a divergence). These are
+# the binding guards of inverse-gated live coverage: a test module
+# that runs ONLY where a kernel feature is genuinely denied cannot
+# defend itself against being skipped wholesale (a module-level gate
+# skips its own in-file guard too), so the lane that exists to bind
+# it asserts the guard ran and passed. Applied to every lane whose
+# seccomp profile forces the namespace backend away; the `default`
+# lane stays record-only by design ("probe, don't assume").
+_EXPECT_BOUND_DENIED_NS = [
+    "test_denied_matrix_lanes_bind_this_module",
+]
+
 LANES: dict[str, dict[str, object]] = {
     "full": {
         "docker_args": ["--privileged"],
@@ -148,6 +161,7 @@ LANES: dict[str, dict[str, object]] = {
         "expect": {"landlock": "present", "userns": "ok",
                    "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
+        "expect_bound": _EXPECT_BOUND_DENIED_NS,
         "intent": ("mount ops + staged pid-ns creation denied "
                    "(GitHub-runner shape, live-confirmed)"),
     },
@@ -158,6 +172,7 @@ LANES: dict[str, dict[str, object]] = {
         "expect": {"landlock": "present", "userns": "ok",
                    "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
+        "expect_bound": _EXPECT_BOUND_DENIED_NS,
         "intent": "mount ops + netns creation denied (userns-probe-False)",
     },
     "no-userns": {
@@ -166,6 +181,7 @@ LANES: dict[str, dict[str, object]] = {
         "expect": {"landlock": "present", "userns": "denied",
                    "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
+        "expect_bound": _EXPECT_BOUND_DENIED_NS,
         "intent": "userns denied (EPERM), Landlock present",
     },
     "no-both": {
@@ -174,6 +190,7 @@ LANES: dict[str, dict[str, object]] = {
         "expect": {"landlock": "enosys", "userns": "denied",
                    "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
+        "expect_bound": _EXPECT_BOUND_DENIED_NS,
         "intent": "no namespaces, no Landlock",
     },
 }

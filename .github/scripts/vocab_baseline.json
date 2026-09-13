@@ -1489,6 +1489,11 @@
     "kind": "literal",
     "note": "proxy event-record field names (schema keys), not a name vocabulary"
   },
+  "core/sandbox/scripts/feature-matrix/bin/report.py::main": {
+    "count": 11,
+    "kind": "literal",
+    "note": "per-lane result-row record keys for matrix.json (structural report schema - image/lane/probe/verdict/divergence/bound counters - not a learned name vocabulary; consumed by the matrix renderer and failures.txt assembly in the same file)"
+  },
   "core/sandbox/seatbelt.py::MACOS_SYSCTL_READ_NAME_ALLOWLIST": {
     "count": 11,
     "kind": "literal",
