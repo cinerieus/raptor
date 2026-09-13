@@ -541,7 +541,8 @@ def cmd_summary(args: argparse.Namespace) -> int:
     cost_per_model: dict[str, float] = {}
     calls_per_model: dict[str, int] = {}
     usage_cell_by_model: dict[str, DecisionClassStats] = {}
-    sc_models_by_dc: dict[str, str] = {}   # for cheapest-trusted picking
+    # Keyed by (decision_class, model) — for cheapest-trusted picking.
+    sc_models_by_dc: dict[tuple[str, str], str] = {}
 
     for s in stats:
         models.add(s.model)

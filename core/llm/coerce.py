@@ -5,9 +5,9 @@ Numeric half: a shared home for the ``_safe_int`` / ``_safe_float``
 helpers that pre-uplift each subsystem carried its own copy of.
 
 Rationale for a shared module rather than absorbing into
-:mod:`core.cost`:
+:mod:`core.llm.cost`:
 
-  * ``core.cost`` already owns the domain-specific clamping rule for
+  * ``core.llm.cost`` already owns the domain-specific clamping rule for
     LLM cost accumulators (NaN / +inf / negative → 0.0). Extending
     it to be a general-purpose numeric coerecer would blur its
     contract.

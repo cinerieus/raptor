@@ -19,9 +19,10 @@ Design constraints:
   ``is_exploitable`` boolean cast to 0.0 / 1.0 so triage ordering
   still has something usable; an abstaining record (no boolean
   verdict) yields an inconclusive 0.5 posterior with a full-width CI.
-* **Pure function.** No IO; no scorecard reads; no logging. The
-  orchestrator owns side effects. This module is reusable from
-  test code and the (future) offline replay harness.
+* **Pure function.** No IO; no scorecard reads; no logging beyond the
+  WARNING ``dawid_skene.estimate`` emits on duplicate same-model
+  records. The orchestrator owns side effects. This module is
+  reusable from test code and the offline replay harness.
 """
 from __future__ import annotations
 

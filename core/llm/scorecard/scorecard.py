@@ -41,8 +41,9 @@ Persistence shape (JSON, ``out/llm_scorecard.json`` by default)::
 Concurrency: all writes go through :func:`_with_lock`, which holds
 an ``flock`` on the sidecar for the duration of read-modify-write.
 Multi-process raptor runs can update independent cells without
-losing each other's increments. The lock file is the sidecar
-itself — no separate lock file to manage.
+losing each other's increments. The flock is held on a sibling
+``.lock`` file (see :class:`_LockCtx`) — it must survive the atomic
+tempfile+rename that replaces the sidecar itself.
 """
 
 from __future__ import annotations

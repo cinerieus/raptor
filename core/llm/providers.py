@@ -190,7 +190,7 @@ def _safe_float(value: Any, *, default: float) -> float:
     aborted the entire turn. Track the failure in debug logs so a
     real upstream regression is visible without crashing the run.
 
-    Delegates to :func:`core.coerce.to_float_safe` with a CC-
+    Delegates to :func:`core.llm.coerce.to_float_safe` with a CC-
     envelope-specific ``on_error`` so the debug log line stays
     scoped to this producer.
     """

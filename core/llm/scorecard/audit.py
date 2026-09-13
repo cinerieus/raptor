@@ -161,7 +161,12 @@ def audit(path: Path = DEFAULT_PATH) -> AuditReport:
     """Compute the audit report for the scorecard at ``path``.
 
     Pure function modulo file IO — given identical input, output is
-    identical. No locking, no mutation.
+    identical. No mutation; the stats half does take the shared read
+    flock (``ModelScorecard.get_stats``), while the raw event walk
+    reads the file directly — so the two halves of one report can
+    disagree on totals when the sidecar fails verification (the stats
+    view discards unverified content, the raw walk counts it; the raw
+    numbers are diagnostic, not trust-bearing).
     """
     raw = _load_raw(path)
     if raw is None or not isinstance(raw, dict):
