@@ -92,6 +92,12 @@ def assess_batch(
     return results
 
 
+# Per-field cap for registry-sourced strings in the prompt block.
+# readme_preview already carries its own cap with the rationale that
+# applies to every other field here too.
+_FIELD_CAP = 200
+
+
 def _format_metadata(dep: Dependency, meta: dict[str, Any]) -> str:
     """Render metadata into a structured text block for the LLM."""
     lines = [
@@ -103,9 +109,13 @@ def _format_metadata(dep: Dependency, meta: dict[str, Any]) -> str:
     if maintainers:
         lines.append(f"Maintainers ({len(maintainers)}):")
         for m in maintainers[:20]:
-            name = m.get("name", m.get("username", "?"))
-            email = m.get("email", "")
-            added = m.get("added", "")
+            # Per-field caps: registry-sourced strings are attacker
+            # publishable; 20 maintainers x unbounded names/emails is
+            # an easy budget-domination channel into a trust verdict
+            # (same rationale as the readme_preview cap).
+            name = str(m.get("name", m.get("username", "?")))[:_FIELD_CAP]
+            email = str(m.get("email", ""))[:_FIELD_CAP]
+            added = str(m.get("added", ""))[:_FIELD_CAP]
             line = f"  - {name}"
             if email:
                 line += f" <{email}>"
@@ -119,7 +129,7 @@ def _format_metadata(dep: Dependency, meta: dict[str, Any]) -> str:
 
     repo = meta.get("repository_url", "")
     if repo:
-        lines.append(f"Repository: {repo}")
+        lines.append(f"Repository: {str(repo)[:_FIELD_CAP]}")
 
     downloads = meta.get("download_count")
     if downloads is not None:
@@ -127,11 +137,11 @@ def _format_metadata(dep: Dependency, meta: dict[str, Any]) -> str:
 
     deprecated = meta.get("deprecated")
     if deprecated:
-        lines.append(f"Deprecated: {deprecated}")
+        lines.append(f"Deprecated: {str(deprecated)[:_FIELD_CAP]}")
 
     for key in ("stars", "open_issues", "last_commit_date"):
         val = meta.get(key)
         if val is not None:
-            lines.append(f"{key}: {val}")
+            lines.append(f"{key}: {str(val)[:_FIELD_CAP]}")
 
     return "\n".join(lines)
