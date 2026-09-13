@@ -196,6 +196,21 @@ def test_validate_maps_is_exploitable_false_to_not_exploitable():
     assert v.validate(_finding()) == ValidatorVerdict.NOT_EXPLOITABLE
 
 
+def test_validate_maps_error_state_result_to_uncertain():
+    """validate_dataflow_path returns LLM/transport failures WITHOUT
+    raising: ``error`` is set and ``is_exploitable=False`` is a default,
+    not a verdict (the DataflowValidation no-evidential-weight
+    contract). Such results must map to UNCERTAIN, never to a
+    confident NOT_EXPLOITABLE."""
+    v = CodeQLEvidenceValidator()
+    mock_dv = MagicMock()
+    errored = _validation(is_exploitable=False)
+    errored.error = "transport down"
+    mock_dv.validate_dataflow_path.return_value = errored
+    v._validator = mock_dv
+    assert v.validate(_finding()) == ValidatorVerdict.UNCERTAIN
+
+
 def test_validate_returns_uncertain_on_dataflow_validator_exception():
     """LLM transport errors / budget exhaustion / parse errors must
     not bubble up — the corpus runner records UNCERTAIN, which
