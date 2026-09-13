@@ -914,3 +914,30 @@ class TestTargetlessChecklist:
             audit_dir, target, project_dir=project_dir,
         )
         assert result.source_command == "validate (project sibling)"
+
+
+class TestTargetMatchResolution:
+    """The checklist branch of _check_target_match must resolve both
+    sides like the manifest branch — a symlinked spelling of the same
+    target is the same target."""
+
+    def test_symlinked_checklist_target_matches(self, tmp_path):
+        real = tmp_path / "real-src"
+        real.mkdir()
+        link = tmp_path / "link-src"
+        link.symlink_to(real)
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        sibling = project_dir / "validate-20260913-1"
+        sibling.mkdir()
+        (sibling / "checklist.json").write_text(json.dumps({
+            "target": str(link), "items": [],
+        }))
+        _write_validate_findings(sibling)
+        audit_dir = project_dir / "audit_x"
+        audit_dir.mkdir()
+
+        result = import_validate_evidence(
+            audit_dir, real, project_dir=project_dir,
+        )
+        assert result.source_command == "validate (project sibling)"

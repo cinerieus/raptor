@@ -595,7 +595,12 @@ def _check_target_match(
                 return False
         return False
 
-    return checklist.get("target", "") == str(target_path)
+    # Resolve both sides like the manifest branch above: symlinked or
+    # relative spellings of the same target must still match.
+    try:
+        return Path(checklist["target"]).resolve() == target_path.resolve()
+    except OSError:
+        return False
 
 
 def _run_in_flight(candidate: Path) -> bool:
