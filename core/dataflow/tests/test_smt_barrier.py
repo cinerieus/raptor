@@ -2040,3 +2040,78 @@ def test_try_tier0_declined_when_python_guard_branch_wrapped(tmp_path: Path):
     )
     assert r.status is sb.Tier0Status.NOT_APPLICABLE
     assert "does not dominate" in r.reasoning
+
+
+# ---------------------------------------------------------------------------
+# try_tier0: sink_uri containment.
+# ---------------------------------------------------------------------------
+
+_TRAVERSAL_DIFF = (
+    "@@ -1,2 +1,3 @@\n"
+    " def f(name):\n"
+    "+    if not re.match(r'^[A-Za-z0-9_]+$', name):\n"
+    "+        raise ValueError()\n"
+    "     return open(BASE + name)\n"
+)
+
+
+def test_try_tier0_refuses_sink_uri_escaping_repo_root(tmp_path: Path):
+    """``sink_uri`` comes from SARIF over an untrusted repo; a
+    traversal-shaped URI must not walk the Tier-0 read outside the
+    repo root (same defence as tier1_llm / injection_prescreen)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text(
+        "def f(name):\n"
+        "    if not re.match(r'^[A-Za-z0-9_]+$', name):\n"
+        "        raise ValueError()\n"
+        "    return open(BASE + name)\n",
+        encoding="utf-8",
+    )
+    r = sb.try_tier0(
+        fix_diff=_TRAVERSAL_DIFF, repo_root=repo,
+        sink_uri="../outside.py", sink_line=4, sink_class="pathtrav",
+        language="python",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+    assert "outside the repo root" in r.reasoning
+
+
+def test_try_tier0_refuses_symlink_escape(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("def f():\n    pass\n", encoding="utf-8")
+    link = repo / "app.py"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks not supported on this filesystem")
+    r = sb.try_tier0(
+        fix_diff=_TRAVERSAL_DIFF, repo_root=repo,
+        sink_uri="app.py", sink_line=4, sink_class="pathtrav",
+        language="python",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+    assert "outside the repo root" in r.reasoning
+
+
+def test_try_tier0_inner_dotdot_resolving_inside_still_reads(tmp_path: Path):
+    """Two-direction: a URI with an inner `..` that still resolves
+    INSIDE the repo is legitimate and must keep working."""
+    repo = tmp_path / "repo"
+    (repo / "sub").mkdir(parents=True)
+    (repo / "app.py").write_text(
+        "def f(name):\n"
+        "    if not re.match(r'^[A-Za-z0-9_]+$', name):\n"
+        "        raise ValueError()\n"
+        "    return open(BASE + name)\n",
+        encoding="utf-8",
+    )
+    r = sb.try_tier0(
+        fix_diff=_TRAVERSAL_DIFF, repo_root=repo,
+        sink_uri="sub/../app.py", sink_line=4, sink_class="pathtrav",
+        language="python",
+    )
+    assert r.status is sb.Tier0Status.SOUND

@@ -2081,7 +2081,23 @@ def try_tier0(
             Tier0Status.NOT_APPLICABLE,
             "no recognised charset/regex validator added in fix diff",
         )
-    src_path = repo_root / sink_uri.lstrip("/")
+    # Containment-checked read: ``sink_uri`` derives from SARIF /
+    # finding records produced over an untrusted repo, so a
+    # traversal-shaped URI (or an in-repo symlink) would walk the read
+    # outside ``repo_root`` and adjudicate a barrier against an
+    # arbitrary host file. Same defence as the module's siblings
+    # (tier1_llm.try_tier1b, injection_prescreen._read_source,
+    # cvefix_bridge._resolve_in_repo).
+    try:
+        src_path = (repo_root / sink_uri.lstrip("/")).resolve()
+        src_path.relative_to(repo_root.resolve())
+    except (ValueError, OSError):
+        return Tier0Result(
+            Tier0Status.NOT_APPLICABLE,
+            f"sink path {sink_uri!r} resolves outside the repo root — "
+            f"refusing to read it",
+            spec=spec,
+        )
     if not src_path.is_file():
         return Tier0Result(
             Tier0Status.NOT_APPLICABLE,
