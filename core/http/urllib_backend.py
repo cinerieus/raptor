@@ -388,10 +388,13 @@ class _HostCircuitBreaker:
     """Per-(host, port) rate-limit circuit breaker.
 
     After ``threshold`` 429/5xx events from the same host within
-    ``window`` seconds, the circuit opens — subsequent requests
+    ``window`` seconds, the circuit opens — SUBSEQUENT requests
     for that host fail-fast for ``cooldown`` seconds instead of
     retrying through the full backoff schedule (1+2+5+15+60+300 =
-    383s per request).
+    383s per request). Granularity is per-request by design: a
+    request already in flight completes its documented backoff
+    schedule (including Retry-After) even if its own failures open
+    the circuit — see the record_failure site in ``_fetch``.
 
     Why this exists: anonymous Docker Hub pulls hit a hard rate
     limit (100 / 6h per IP) that no amount of in-process backoff
@@ -1163,25 +1166,32 @@ class UrllibClient:
                     or (e.status is not None and 500 <= e.status < 600)
                 )
                 if is_transient:
+                    # Record the failure so the breaker protects OTHER
+                    # requests, but do NOT abort THIS request's retry
+                    # loop when the circuit opens mid-flight. Both
+                    # directions: aborting here capped every 429/5xx
+                    # request at threshold-1 retries, making the
+                    # documented _BACKOFF_SECONDS schedule (and any
+                    # Retry-After beyond the first) unreachable for
+                    # status-driven failures — "retries=5" silently
+                    # meant one retry. Letting the in-flight request
+                    # finish its schedule costs at most one request's
+                    # backoff budget against a hard-down host (bounded
+                    # by total_timeout); the breaker's documented job —
+                    # fail-fast for SUBSEQUENT requests during cooldown
+                    # — is preserved by the is_open gate at _fetch
+                    # entry, and a mid-schedule success still closes
+                    # the circuit via record_success.
                     transitioned = self._circuit_breaker.record_failure(
                         cb_host, cb_port,
                     )
                     if transitioned:
                         logger.warning(
                             "core.http: circuit breaker opened for "
-                            "%s:%d — fail-fast for cooldown",
+                            "%s:%d — subsequent requests fail fast "
+                            "for cooldown",
                             cb_host, cb_port,
                         )
-                    if self._circuit_breaker.is_open(cb_host, cb_port)[0]:
-                        msg = (
-                            f"Circuit open for {cb_host}:{cb_port}; "
-                            f"aborting retry: "
-                            f"{_safe_url_for_log(url)}"
-                        )
-                        raise HttpError(
-                            msg,
-                            circuit_break=True,
-                        ) from e
                 if not is_transient:
                     raise
                 last_exc = e
