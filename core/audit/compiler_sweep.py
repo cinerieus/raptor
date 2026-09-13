@@ -1040,3 +1040,9 @@ def run_compiler_analyzer_sweep(
     )
     result.raw_output = raw
     return result
+
+
+# Public probe aliases (appended so cross-module consumers — the
+# prefilter ledger's corroboration sampler — need no private names).
+gcc_analyzer_available = _gcc_analyzer
+clang_path_available = _clang_path

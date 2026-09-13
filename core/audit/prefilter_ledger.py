@@ -137,15 +137,15 @@ def corroborate_sample(
     """
     try:
         from core.audit.compiler_sweep import (
-            _clang_path,
-            _gcc_analyzer,
+            clang_path_available,
+            gcc_analyzer_available,
             run_compiler_analyzer_sweep,
         )
     except ImportError:
         return 0
 
     try:
-        if _gcc_analyzer() is None and _clang_path() is None:
+        if gcc_analyzer_available() is None and clang_path_available() is None:
             logger.debug(
                 "prefilter ledger: no compiler analyzer installed — "
                 "corroboration skipped",
