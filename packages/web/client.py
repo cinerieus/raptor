@@ -33,6 +33,21 @@ from packages.web.origin import origin_of
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 10
 
+
+class ScopeRedirectBlockedError(ValueError):
+    """A redirect Location pointed outside the configured target scope.
+
+    Subclasses ValueError so existing handlers keep working; carries
+    the blocked destination so callers can explain WHERE the target
+    tried to send the scan (preflight uses this to tell the operator
+    "the target lives at https://... — scan that origin" instead of a
+    generic unreachable error).
+    """
+
+    def __init__(self, message: str, next_url: str) -> None:
+        super().__init__(message)
+        self.next_url = next_url
+
 # What closing a Response/Session can legitimately raise: socket/SSL
 # teardown (OSError family) plus the requests/urllib3 error trees a
 # hostile server can force mid-stream. TypeError/AttributeError here
@@ -269,7 +284,7 @@ class WebClient:
         next_url = urljoin(current_url, location)
         if not self._is_in_scope(next_url):
             msg = f"Blocked redirect outside configured target scope: {next_url}"
-            raise ValueError(msg)
+            raise ScopeRedirectBlockedError(msg, next_url)
         if self.execution_policy is not None:
             self.execution_policy.authorize(
                 tool_id="raptor-http",

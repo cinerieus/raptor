@@ -43,7 +43,7 @@ from core.run.safe_io import safe_run_mkdir
 from core.sandbox import SANDBOX_ENGAGE_EXIT_CODE, SandboxSetupError
 from packages.web.auth import AuthenticationError, make_auth_manager
 from packages.web.checks import registry
-from packages.web.client import WebClient
+from packages.web.client import ScopeRedirectBlockedError, WebClient
 from packages.web.crawler import WebCrawler
 from packages.web.discovery import Discoverer, DiscoveryResult
 from packages.web.evidence import build_web_evidence_ledger
@@ -249,6 +249,9 @@ class WebScanner:
 
         self.session: AuthSession | None = None
         self._phases_completed: list[str] = []
+        # Actionable preflight failure text (e.g. the target lives on
+        # https); scan() surfaces it as the top-level error reason.
+        self._preflight_failure: str | None = None
         self._finding_counter = 0
         self._external_tool_results: list[dict] = []
         self._ffuf_wordlist_used: str | None = None
@@ -281,7 +284,10 @@ class WebScanner:
         all_findings: list[WebFinding] = []
 
         if not self._phase_preflight():
-            return self._empty_result("Preflight failed -- target unreachable")
+            return self._empty_result(
+                self._preflight_failure
+                or "Preflight failed -- target unreachable",
+            )
 
         self._phase_auth()
         discovery = self._phase_discovery()
@@ -377,6 +383,28 @@ class WebScanner:
             )
             self._phases_completed.append("preflight")
             return True
+        except ScopeRedirectBlockedError as e:
+            # Scope stays strict (scheme+host+port), but the single most
+            # common redirect shape on the web — http -> https on the
+            # same host — deserves an actionable error, not a generic
+            # "unreachable". The scan still stops; the operator is told
+            # which origin to scan instead.
+            base = urlparse(self.base_url)
+            nxt = urlparse(e.next_url)
+            if (
+                base.scheme == "http" and nxt.scheme == "https"
+                and (nxt.hostname or "").lower()
+                == (base.hostname or "").lower()
+            ):
+                self._preflight_failure = (
+                    "Preflight failed -- target redirects to "
+                    f"{self._redact(e.next_url)}; re-run the scan against "
+                    "that https origin"
+                )
+                logger.error("%s", self._preflight_failure)
+            else:
+                logger.error("Preflight failed: %s", self._redact(str(e)))
+            return False
         except Exception as e:
             logger.error("Preflight failed: %s", self._redact(str(e)))
             return False

@@ -783,6 +783,34 @@ class TestPhase5SessionIntegrity(unittest.TestCase):
             self.assertIn("skipping ALL authenticated checks", joined)
 
 
+class TestPreflightSchemeUpgradeGuidance(unittest.TestCase):
+    """An http target that 301s to its own https origin must produce an
+    actionable error naming that origin, not a generic unreachable."""
+
+    def _scan_with_blocked_redirect(self, next_url):
+        from packages.web.client import ScopeRedirectBlockedError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            scanner.client.get.side_effect = ScopeRedirectBlockedError(
+                f"Blocked redirect outside configured target scope: {next_url}",
+                next_url,
+            )
+            return scanner.scan()
+
+    def test_same_host_https_upgrade_names_the_https_origin(self):
+        result = self._scan_with_blocked_redirect("https://example.com/")
+        self.assertIn("https://example.com/", result["error"])
+        self.assertIn("re-run the scan", result["error"])
+        self.assertEqual(result["findings"], [])
+
+    def test_off_host_redirect_keeps_generic_unreachable(self):
+        result = self._scan_with_blocked_redirect("https://other.example/")
+        self.assertEqual(
+            result["error"], "Preflight failed -- target unreachable",
+        )
+
+
 class TestVerificationCarriesSiblingFields(unittest.TestCase):
     def test_verify_findings_passes_hit_base_data_to_oracle(self):
         """Phase 6v must replay the full detection-time field set —
