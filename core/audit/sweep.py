@@ -149,6 +149,21 @@ class SarifCache:
             if _sarif_result_in_range(r, line_start, line_end)
         ]
 
+    def ingest(self, uri: str, result: dict[str, Any]) -> str | None:
+        """Insert one SARIF result under the normalized form of *uri*.
+
+        The supported write path for producers outside this module
+        (the CodeQL pre-sweep) — ``_by_file`` stays private to the
+        cache. Returns the normalized path the result was filed
+        under, or None when *uri* normalizes to nothing (the result
+        is not ingested).
+        """
+        normalized = _normalize_sarif_path(uri)
+        if not normalized:
+            return None
+        self._by_file.setdefault(normalized, []).append(result)
+        return normalized
+
     @classmethod
     def from_directory(cls, out_dir: Path) -> SarifCache:
         """Load all .sarif files from out_dir/scan/."""

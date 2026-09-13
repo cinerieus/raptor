@@ -137,13 +137,34 @@ def codeql_pre_sweep(
         )
         return
 
-    import json as _json_mod
-    try:
-        data = _json_mod.loads(result.sarif_path.read_text())
-    except (OSError, _json_mod.JSONDecodeError) as exc:
-        logger.warning("codeql_pre_sweep: failed to read SARIF: %s", exc)
+    ingested = _ingest_pre_sweep_sarif(result.sarif_path, sarif_cache)
+    if ingested is None:
         return
 
+    logger.info(
+        "codeql_pre_sweep: %s findings=%d ingested=%d duration=%.1fs",
+        language, result.findings_count, ingested,
+        result.duration_seconds,
+    )
+
+
+def _ingest_pre_sweep_sarif(sarif_path, sarif_cache) -> int | None:
+    """Feed one suite SARIF into the run's cache.
+
+    Bounded load (``load_sarif``'s 100 MiB cap — same rationale as
+    codeql_validation's usage: CodeQL SARIF over a large target can
+    be huge) and the cache's public :meth:`SarifCache.ingest` path.
+    Returns the ingested count, or None when the file could not be
+    loaded (missing, over-budget, malformed) — nothing is ingested.
+    """
+    from core.sarif.parser import load_sarif
+
+    data = load_sarif(Path(sarif_path))
+    if not isinstance(data, dict):
+        logger.warning(
+            "codeql_pre_sweep: failed to read SARIF: %s", sarif_path,
+        )
+        return None
     ingested = 0
     for run in data.get("runs", []):
         for r in run.get("results", []):
@@ -151,17 +172,9 @@ def codeql_pre_sweep(
             loc = locs[0] if locs else {}
             phys = loc.get("physicalLocation", {})
             uri = phys.get("artifactLocation", {}).get("uri", "")
-            from .sweep import _normalize_sarif_path
-            normalized = _normalize_sarif_path(uri)
-            if normalized:
-                sarif_cache._by_file.setdefault(normalized, []).append(r)
+            if sarif_cache.ingest(uri, r):
                 ingested += 1
-
-    logger.info(
-        "codeql_pre_sweep: %s findings=%d ingested=%d duration=%.1fs",
-        language, result.findings_count, ingested,
-        result.duration_seconds,
-    )
+    return ingested
 
 
 _SINK_CACHE_FILENAME = "sink-discovery-cache.json"
