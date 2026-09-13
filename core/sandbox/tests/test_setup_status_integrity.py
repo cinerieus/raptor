@@ -147,6 +147,16 @@ def test_parent_default_denies_unknown_status_category(
             # unavailability. Fail loud.
             raise
         pytest.skip(f"mount-ns lane unavailable: {e}")
+    if not calls:
+        # pytest.raises accepted a SandboxSetupError, but the fake
+        # spawn was never dispatched — the refusal came from an
+        # earlier gate (e.g. the construction-time "block_network
+        # with no namespace backend and no Landlock ABI v4+" refusal
+        # on a fully degraded host), not from the status-protocol
+        # arms under test. Same nothing-to-test shape as the
+        # subprocess-lane completion handled above.
+        pytest.skip("spawn backend not dispatched on this host "
+                    "(refused before the status seam)")
     assert "unrecognised setup-status category 'Z'" in str(excinfo.value)
     assert excinfo.value.setup_category == "Z"
 
@@ -191,6 +201,16 @@ def test_parent_raises_typed_error_on_c_status(tmp_path, monkeypatch):
             # unavailability. Fail loud.
             raise
         pytest.skip(f"mount-ns lane unavailable: {e}")
+    if not calls:
+        # pytest.raises accepted a SandboxSetupError, but the fake
+        # spawn was never dispatched — the refusal came from an
+        # earlier gate (e.g. the construction-time "block_network
+        # with no namespace backend and no Landlock ABI v4+" refusal
+        # on a fully degraded host), not from the status-protocol
+        # arms under test. Same nothing-to-test shape as the
+        # subprocess-lane completion handled above.
+        pytest.skip("spawn backend not dispatched on this host "
+                    "(refused before the status seam)")
     assert excinfo.value.setup_category == "C"
     assert "aborted fail-closed" in str(excinfo.value)
     assert "cwd '/gone'" in str(excinfo.value)
@@ -241,6 +261,16 @@ def test_parent_raises_typed_error_on_missing_confirmation(
             # unavailability. Fail loud.
             raise
         pytest.skip(f"mount-ns lane unavailable: {e}")
+    if not calls:
+        # pytest.raises accepted a SandboxSetupError, but the fake
+        # spawn was never dispatched — the refusal came from an
+        # earlier gate (e.g. the construction-time "block_network
+        # with no namespace backend and no Landlock ABI v4+" refusal
+        # on a fully degraded host), not from the status-protocol
+        # arms under test. Same nothing-to-test shape as the
+        # subprocess-lane completion handled above.
+        pytest.skip("spawn backend not dispatched on this host "
+                    "(refused before the status seam)")
     assert excinfo.value.setup_category == "!"
     assert "died during setup" in str(excinfo.value)
     assert "rc=-9" in str(excinfo.value)
