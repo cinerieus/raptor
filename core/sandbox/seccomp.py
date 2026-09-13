@@ -134,6 +134,15 @@ _SCMP_CMP_MASKED_EQ = 7  # masked equal: (arg & datum_a) == datum_b
 # (connect-scoping supervisor, Landlock CONNECT_TCP) never see it.
 _MSG_FASTOPEN = 0x20000000
 
+# AT_EMPTY_PATH (include/uapi/linux/fcntl.h) — arch-uniform. The
+# execveat(fd, "", ..., AT_EMPTY_PATH) spelling (glibc fexecve) execs
+# the FD ITSELF, no path involved, so neither Landlock (a memfd's
+# kernel-internal SB_NOUSER mount is exempt from its rules) nor any
+# path-based control ever evaluates. Denied under deny_fd_exec; a
+# path-carrying execveat (flags without AT_EMPTY_PATH) stays allowed —
+# it resolves a real path that Landlock checks like any execve.
+_AT_EMPTY_PATH = 0x1000
+
 # Linux extracts the socket type from the (type | flags) arg with this
 # mask (linux/socket.h SOCK_TYPE_MASK). Without it, exact-equality rules
 # on `arg=1` for `SOCK_DGRAM` (2) miss the very common
@@ -515,7 +524,8 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                           observe_mode: bool = False,
                           allow_unix_sockets: bool = False,
                           unix_scope_export_sock=None,
-                          block_ns_creation: bool = False):
+                          block_ns_creation: bool = False,
+                          deny_fd_exec: bool = False):
     """Create a preexec_fn that installs the seccomp filter for `profile`.
 
     Runs POST-fork in the child. Same fork-safety rules as Landlock: capture
@@ -574,6 +584,35 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
     changed to forkserver, whose listener needs socket(AF_UNIX) —
     observed as the CodeQL python extractor dying with EPERM. The
     preexec-only path (no mount-ns) must keep the block.
+
+    ``deny_fd_exec=True`` closes the FILELESS-EXEC class for the
+    restricted-reads (untrusted / strict) posture — threaded from that
+    posture by every builder call site, never a profile field, so
+    trusted read-everywhere lanes keep a byte-identical filter:
+
+      * ``memfd_create`` is denied WHOLESALE (EPERM, no argument
+        gating — no memfd_create flag combination distinguishes exec
+        intent, and the MFD_* flags are attacker-chosen, so any
+        argument filter is bypassable by construction). This is the LOAD-BEARING memfd deny: a memfd's
+        inode lives on a kernel-internal SB_NOUSER mount that Landlock
+        exempts from ALL rules (live-verified), so
+        ``execve("/proc/self/fd/<memfd>")`` passes every Landlock
+        layer including a handled EXECUTE bit — seccomp cannot see the
+        path either, so refusing CREATION is the only sound
+        chokepoint. Nothing in the sandboxed tool population
+        (compilers, interpreters, scanners, PoCs) legitimately calls
+        memfd_create; RAPTOR's own memfd use (evidence.py
+        anonymous_fd) happens in the unsandboxed parent/tracer.
+      * ``execveat`` with AT_EMPTY_PATH in flags (arg 4, MASKED_EQ) is
+        denied — the fd-exec spelling (glibc fexecve) works below the
+        Landlock floor and on fds acquired without memfd_create.
+        Path-carrying execveat stays allowed.
+
+    Both are hard_deny under audit mode (escape-primitive class: an
+    allow-and-log would hand the audited child an unauditable
+    in-memory process image for the run's duration). On-filesystem
+    exec scoping (O_TMPFILE, unlinked files, non-allowlisted trees)
+    is Landlock's job — see landlock.py's EXECUTE handling.
 
     `observe_mode=True` extends the trace set with stat-family syscalls
     (stat/lstat/newfstatat/access/faccessat/faccessat2) on top of the
@@ -634,7 +673,10 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                 "children run WITHOUT the seccomp layer: the "
                 "socket-family blocklist (incl. AF_UNIX → "
                 "docker.sock), the io_uring/keyring/bpf "
-                "escape-primitive blocks and the UDP block are all "
+                "escape-primitive blocks, the UDP block and the "
+                "fileless-exec deny (memfd_create + execveat "
+                "AT_EMPTY_PATH for restricted-reads children — "
+                "Landlock cannot cover the memfd spelling) are all "
                 "inactive. Install libseccomp (libseccomp2 package) "
                 "to restore the filter.", profile,
             )
@@ -717,6 +759,13 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
     send_flag_syscalls = [("sendto", _resolve("sendto"), 3),
                           ("sendmsg", _resolve("sendmsg"), 2),
                           ("sendmmsg", _resolve("sendmmsg"), 3)]
+    # Fileless-exec deny (deny_fd_exec): memfd_create wholesale +
+    # execveat(AT_EMPTY_PATH). Resolved in the parent like everything
+    # else; the child fail-closes if either is unresolved while the
+    # deny was requested (same posture as block_udp's socket() check —
+    # a requested control must not silently vanish).
+    memfd_create_num = _resolve("memfd_create") if deny_fd_exec else -1
+    execveat_num = _resolve("execveat") if deny_fd_exec else -1
 
     # socketpair(AF_UNIX, SOCK_DGRAM) is denied exactly when the
     # matching socket(AF_UNIX, SOCK_DGRAM) is denied: either AF_UNIX
@@ -926,6 +975,45 @@ def _make_seccomp_preexec(profile: str, block_udp: bool = False,
                             _os_write(2, b"sandbox: seccomp clone3 rule failed"
                                          b" -- refusing to exec without filter\n")
                             os._exit(126)
+
+                # Fileless-exec deny (deny_fd_exec — see the docstring
+                # for the full rationale). memfd_create: wholesale,
+                # no argument comparators (argument gating is unsound
+                # here). execveat: MASKED_EQ on the flags argument —
+                # any flag combination containing AT_EMPTY_PATH is the
+                # fd-exec spelling; path-carrying calls don't match.
+                # hard_deny on both: escape-primitive class, never
+                # downgrades to allow-and-log under audit mode.
+                if deny_fd_exec:
+                    if memfd_create_num < 0 or execveat_num < 0:
+                        # Requested control unresolvable on this arch —
+                        # fail-closed like block_udp's socket() check.
+                        _os_write(2, b"sandbox: seccomp fd-exec deny "
+                                     b"requested but memfd_create/execveat "
+                                     b"unresolved -- refusing to exec "
+                                     b"without filter\n")
+                        os._exit(126)
+                    null_args = ctypes.POINTER(_ScmpArgCmp)()
+                    ret = lib.seccomp_rule_add_array(
+                        ctx, hard_deny, memfd_create_num, 0, null_args,
+                    )
+                    if ret < 0:
+                        _os_write(2, b"sandbox: seccomp memfd_create rule "
+                                     b"failed -- refusing to exec without "
+                                     b"filter\n")
+                        os._exit(126)
+                    _ev = _ScmpArgCmp(arg=4, op=_SCMP_CMP_MASKED_EQ,
+                                      datum_a=_AT_EMPTY_PATH,
+                                      datum_b=_AT_EMPTY_PATH)
+                    _ev_arr = (_ScmpArgCmp * 1)(_ev)
+                    ret = lib.seccomp_rule_add_array(
+                        ctx, hard_deny, execveat_num, 1, _ev_arr,
+                    )
+                    if ret < 0:
+                        _os_write(2, b"sandbox: seccomp execveat "
+                                     b"AT_EMPTY_PATH rule failed -- "
+                                     b"refusing to exec without filter\n")
+                        os._exit(126)
 
                 # socket() with blocked family — one rule per family.
                 # MASKED_EQ on the low 32 bits, not EQ: the kernel

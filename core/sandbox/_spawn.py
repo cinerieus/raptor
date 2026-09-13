@@ -1876,6 +1876,15 @@ def run_sandboxed(
             # they exec legitimately unshares since the unshare-CLI
             # bootstrap lane was deleted).
             block_ns_creation=True,
+            # Fileless-exec deny, keyed on the restrict_reads posture
+            # exactly like the plain-subprocess preexec (context.py)
+            # and Landlock's EXECUTE handling: memfd_create + execveat
+            # AT_EMPTY_PATH are refused for restricted-reads children.
+            # A memfd's SB_NOUSER inode is exempt from every Landlock
+            # rule, so this seccomp deny is the ONLY layer standing
+            # between an untrusted payload and an anonymous in-memory
+            # process image on this lane too.
+            deny_fd_exec=bool(restrict_reads),
         ) if seccomp_profile else None
 
         # Tracer-ready pipe: the tracer subprocess writes a byte once

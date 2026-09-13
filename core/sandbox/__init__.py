@@ -342,6 +342,25 @@ Threat model — what the sandbox DOES protect against:
   RAPTOR invocation can't open `/dev/tty` to passively read
   operator keystrokes. (TIOCSTI injection is separately blocked by
   seccomp.)
+- Fileless exec (memfd / fd-exec) — restricted-reads children
+  (`run_untrusted()` / `strict` / any `restrict_reads=True` call)
+  are denied `memfd_create` wholesale and `execveat` with
+  AT_EMPTY_PATH at the seccomp layer, and Landlock handles the
+  EXECUTE right with grants only on the read allowlist's directory
+  rules + the writable grants. A payload can no longer become an
+  arbitrary in-memory process image via
+  `execve("/proc/self/fd/<memfd>")` — Landlock alone can never
+  close that spelling (memfd inodes live on a kernel-internal
+  SB_NOUSER mount exempt from its rules), which is why the seccomp
+  deny is the load-bearing layer. Residuals, stated: exec of
+  ON-DISK payloads written under the writable grants remains
+  allowed (auditable tree, swept at teardown; O_TMPFILE/unlinked
+  inodes follow their directory's grant); in-process code loading
+  (dlopen / mmap PROT_EXEC of readable files) is not an execve and
+  is out of scope; hosts without libseccomp keep the memfd gap
+  (the existing seccomp-lost warning covers the degradation);
+  `restrict_reads=False` opts out of this deny along with the read
+  restriction it rides on.
 - Child-planted symlink TOCTOU on parent-side writes into `output`:
   `{output}/proxy-events.jsonl` is opened with O_NOFOLLOW + fstat
   S_ISREG check; `{output}/.home/{,.config,.cache,.local,...}` are

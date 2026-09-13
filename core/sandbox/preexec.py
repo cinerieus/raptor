@@ -218,7 +218,8 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
                      deny_all_tcp_connect: bool = False,
                      host_nproc_cap: int | None = None,
                      reaper_cell: dict | None = None,
-                     seccomp_block_ns_creation: bool = False):
+                     seccomp_block_ns_creation: bool = False,
+                     seccomp_deny_fd_exec: bool = False):
     """Create a preexec_fn that sets resource limits, Landlock, and seccomp.
 
     Resource limits (rlimit) apply for memory / CPU / file-size.
@@ -287,6 +288,15 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
     surface (copy_namespaces / nested-userns paths) reachable with no
     capability — so the plain lane closes it too instead of leaving
     it the one lane where unshare(2) still lands in the kernel.
+
+    `seccomp_deny_fd_exec=True` adds the fileless-exec deny rules
+    (memfd_create wholesale + execveat AT_EMPTY_PATH — see
+    seccomp.py's deny_fd_exec docstring). Threaded by context.py from
+    the restrict_reads posture, matching Landlock's EXECUTE
+    engagement: the two layers split the class — Landlock scopes
+    on-filesystem exec to the read allowlist + writable grants, and
+    seccomp refuses the anonymous-inode spellings that Landlock's
+    SB_NOUSER exemption can never see.
     """
     landlock_fn = None
     # `readable_paths is not None` (not truthiness): an empty list means
@@ -321,7 +331,8 @@ def _make_preexec_fn(limits: dict, writable_paths: list | None = None,
 
     seccomp_fn = (
         _make_seccomp_preexec(seccomp_profile, block_udp=seccomp_block_udp,
-                              block_ns_creation=seccomp_block_ns_creation)
+                              block_ns_creation=seccomp_block_ns_creation,
+                              deny_fd_exec=seccomp_deny_fd_exec)
         if seccomp_profile else None
     )
 

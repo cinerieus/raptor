@@ -2667,6 +2667,13 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         deny_all_tcp_connect=_degraded_tcp_deny,
         host_nproc_cap=_host_nproc_cap,
         reaper_cell=_reaper_cell,
+        # Fileless-exec deny rides the restrict_reads posture (the
+        # untrusted / strict contract), mirroring Landlock's EXECUTE
+        # engagement in the same preexec: memfd_create + execveat
+        # AT_EMPTY_PATH are refused for exactly the children whose
+        # exec surface is scoped to the read allowlist. Trusted
+        # read-everywhere contexts build a byte-identical filter.
+        seccomp_deny_fd_exec=bool(restrict_reads),
     )
     # Plain-subprocess preexec with the namespace-creation deny rules
     # (unshare/clone CLONE_NEW*, setns; clone3→ENOSYS). The fork
@@ -6119,6 +6126,11 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         host_nproc_cap=_host_nproc_cap,
                         reaper_cell=_reaper_cell,
                         seccomp_block_ns_creation=True,
+                        # The demotion rebuild must not shed the
+                        # fileless-exec deny the construction-time
+                        # preexec carried for this restrict_reads
+                        # posture (same restrict_reads key).
+                        seccomp_deny_fd_exec=bool(restrict_reads),
                     )
                     if existing_preexec:
                         def _dem_combined(_ep=existing_preexec,
@@ -6239,6 +6251,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                                 # namespace-creation deny applies here
                                 # exactly as on the plain lane.
                                 block_ns_creation=True,
+                                # Same restrict_reads-keyed fileless-
+                                # exec deny as the plain preexec — the
+                                # audit branch builds its own seccomp
+                                # filter, and omitting the rules here
+                                # would hand an AUDITED untrusted
+                                # child the memfd-exec primitive the
+                                # enforcement run refuses.
+                                deny_fd_exec=bool(restrict_reads),
                             ) if seccomp_profile else None
                             _audit_run_dir_la = (
                                 audit_run_dir or output
