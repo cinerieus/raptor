@@ -933,6 +933,13 @@ def _build_hypothesis(finding: dict, analysis: dict, repo_path: Path):
         target_function=function,
         cwe=cwe,
         context="\n".join(parts),
+        # Dataflow-claim validation asserts the reported flow IS
+        # real/reachable — a conclusive empty tool result (SMT unsat)
+        # therefore mechanically REFUTES it. Declared here, at
+        # formation time, so the verdict ladder never needs the
+        # evaluating LLM's phrasing-aware reading to pick the
+        # direction of a zero-match proof.
+        polarity="reachability",
     )
 
 

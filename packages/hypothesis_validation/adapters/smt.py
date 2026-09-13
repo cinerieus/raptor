@@ -21,10 +21,14 @@ The adapter feeds those into Z3 and reports satisfiability:
     unsat     — constraints are mutually exclusive, no input can satisfy
                 them. For "is this path reachable" hypotheses → REFUTED;
                 for "these constraints are mutually exclusive / the path
-                is infeasible" hypotheses → CONFIRMED (the evidence
-                carries empty_matches_conclusive so the verdict ladder
-                honours that reading). Sound even when some conditions
-                were dropped as unparseable.
+                is infeasible" hypotheses → CONFIRMED. The evidence
+                carries empty_matches_conclusive; the verdict DIRECTION
+                is derived mechanically from the hypothesis's declared
+                ``polarity`` (undeclared polarity fails closed to
+                inconclusive rather than letting the evaluating LLM's
+                phrasing-aware claim pick the label — see
+                ``verdict.verdict_from``). Sound even when some
+                conditions were dropped as unparseable.
     unknown   — Z3 unavailable, all constraints unparseable, or solver
                 timed out. The runner converts to inconclusive.
 
@@ -223,10 +227,11 @@ class SMTAdapter(ToolAdapter):
             success=True,
             matches=matches,
             summary=summary,
-            # unsat is a definitive proof despite the empty match list —
-            # without this flag the verdict ladder would invert a
-            # correct "confirmed" on an infeasibility-phrased hypothesis
-            # into "refuted".
+            # unsat is a definitive proof despite the empty match list.
+            # The flag tells the verdict ladder this emptiness is a
+            # tool result; the ladder then derives the verdict
+            # direction from the hypothesis's declared polarity
+            # (never from the LLM's post-hoc reading).
             empty_matches_conclusive=not result.feasible,
         )
 
