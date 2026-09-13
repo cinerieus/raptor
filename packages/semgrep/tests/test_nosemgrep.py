@@ -285,3 +285,76 @@ class TestBuildCmdDisableNosemgrep:
         from packages.semgrep.runner import build_cmd
         cmd = build_cmd(Path("/src"), "p/security-audit")
         assert "--disable-nosem" in cmd
+
+
+class TestAnnotateSarifMalformedShapes:
+    """One malformed result must never abort the whole SARIF merge.
+
+    Explicit ``null`` / wrong-typed nodes at any level read as absent;
+    well-formed sibling results still get annotated.
+    """
+
+    @staticmethod
+    def _suppressed_source(tmp_path):
+        src = tmp_path / "a.py"
+        src.write_text(
+            "x = eval(inp)  # nosemgrep: test.rule safe use\n",
+        )
+        return src
+
+    def _assert_sibling_survives(self, tmp_path, bad_result):
+        self._suppressed_source(tmp_path)
+        good = _make_result("a.py", 1)
+        sarif = _make_sarif_data([bad_result, good])
+        assert annotate_sarif(sarif, str(tmp_path)) == 1
+        assert good["properties"]["nosemgrep"]["suppressed"] is True
+
+    def test_null_physical_location(self, tmp_path):
+        self._assert_sibling_survives(
+            tmp_path, {"locations": [{"physicalLocation": None}]},
+        )
+
+    def test_null_artifact_location_and_region(self, tmp_path):
+        self._assert_sibling_survives(tmp_path, {
+            "locations": [{"physicalLocation": {
+                "artifactLocation": None, "region": None,
+            }}],
+        })
+
+    def test_wrong_typed_uri_and_line(self, tmp_path):
+        self._assert_sibling_survives(tmp_path, {
+            "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": 7},
+                "region": {"startLine": "12"},
+            }}],
+        })
+
+    def test_null_locations_and_results(self, tmp_path):
+        self._suppressed_source(tmp_path)
+        good = _make_result("a.py", 1)
+        sarif = {"runs": [
+            {"results": None},
+            {"results": [{"locations": None}, good]},
+        ]}
+        assert annotate_sarif(sarif, str(tmp_path)) == 1
+
+    def test_null_tool_and_driver(self, tmp_path):
+        self._suppressed_source(tmp_path)
+        good = _make_result("a.py", 1)
+        sarif = {"runs": [{"tool": None, "results": [good]}]}
+        assert annotate_sarif(sarif, str(tmp_path)) == 1
+        sarif2 = {"runs": [{"tool": {"driver": None},
+                            "results": [_make_result("a.py", 1)]}]}
+        assert annotate_sarif(sarif2, str(tmp_path)) == 1
+
+    def test_null_runs_returns_zero(self, tmp_path):
+        assert annotate_sarif({"runs": None}, str(tmp_path)) == 0
+
+    def test_non_dict_properties_skipped_not_clobbered(self, tmp_path):
+        self._suppressed_source(tmp_path)
+        bad = _make_result("a.py", 1)
+        bad["properties"] = "already-a-string"
+        good = _make_result("a.py", 1)
+        sarif = _make_sarif_data([bad, good])
+        assert annotate_sarif(sarif, str(tmp_path)) == 1
+        assert bad["properties"] == "already-a-string"

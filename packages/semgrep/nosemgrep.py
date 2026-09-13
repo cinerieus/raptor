@@ -140,28 +140,47 @@ def annotate_sarif(sarif_data: dict, repo_root: str) -> int:
     cache = _FileCache()
     annotated = 0
 
-    for run in sarif_data.get("runs", []):
+    def _dget(container: object, key: str) -> dict:
+        """Nested SARIF lookup tolerating explicit nulls / wrong types.
+
+        The SARIF is tool-written but merge inputs vary; one result
+        carrying ``"physicalLocation": null`` used to raise
+        AttributeError out of the whole merge (the caller then fell
+        back to per-file annotation). Malformed nodes read as empty.
+        """
+        v = container.get(key) if isinstance(container, dict) else None
+        return v if isinstance(v, dict) else {}
+
+    runs = sarif_data.get("runs", [])
+    if not isinstance(runs, list):
+        runs = []
+    for run in runs:
         if not isinstance(run, dict):
             continue
         # nosemgrep is Semgrep-specific — skip CodeQL/Coccinelle runs.
-        tool_name = (
-            run.get("tool", {}).get("driver", {}).get("name", "")
+        tool_name = str(
+            _dget(_dget(run, "tool"), "driver").get("name", "") or ""
         ).lower()
         if tool_name and "semgrep" not in tool_name:
             continue
-        for result in run.get("results", []):
+        results = run.get("results", [])
+        if not isinstance(results, list):
+            continue
+        for result in results:
             if not isinstance(result, dict):
                 continue
             locations = result.get("locations", [])
-            if not locations:
+            if not isinstance(locations, list) or not locations:
                 continue
             loc = locations[0]
             if not isinstance(loc, dict):
                 continue
-            phys = loc.get("physicalLocation", {})
-            uri = phys.get("artifactLocation", {}).get("uri", "")
-            line = phys.get("region", {}).get("startLine", 0)
-            if not uri or not line:
+            phys = _dget(loc, "physicalLocation")
+            uri = _dget(phys, "artifactLocation").get("uri", "")
+            line = _dget(phys, "region").get("startLine", 0)
+            if not isinstance(uri, str) or not uri:
+                continue
+            if not isinstance(line, int) or isinstance(line, bool) or not line:
                 continue
 
             # Resolve the file path against the repo root,
@@ -182,7 +201,11 @@ def annotate_sarif(sarif_data: dict, repo_root: str) -> int:
 
             info = extract_nosemgrep(Path(abs_path), line, _lines=lines)
             if info:
+                # A non-dict properties value can't take the
+                # annotation; skip rather than clobber or crash.
                 props = result.setdefault("properties", {})
+                if not isinstance(props, dict):
+                    continue
                 props["nosemgrep"] = info
                 annotated += 1
 
