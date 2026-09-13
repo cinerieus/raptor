@@ -207,6 +207,26 @@ class TestMergeOutcomes:
         result = merge_outcomes(orig, refined)
         assert result.evidence_tool == "joern:flow"
 
+    def test_clean_rescue_does_not_inherit_original_tool(self):
+        """A clean original's tool stamp backed no finding: copying it
+        onto an LLM-only rescue would grade the rescue tool-confirmed
+        on a tool run that never confirmed anything. The rescue keeps
+        its finding status but stays LLM-graded."""
+        orig = FakeOutcome(status="clean", evidence_tool="joern:flow")
+        refined = FakeOutcome(status="finding", evidence_tool="")
+        result = merge_outcomes(orig, refined)
+        assert result.status == "finding"
+        assert result.evidence_tool == ""
+
+    def test_suspicious_promotion_inherits_original_tool(self):
+        """When the original round's tool evidence backed the same
+        (suspicious) hypothesis, the promotion to finding carries it."""
+        orig = FakeOutcome(status="suspicious", evidence_tool="joern:flow")
+        refined = FakeOutcome(status="finding", evidence_tool="")
+        result = merge_outcomes(orig, refined)
+        assert result.status == "finding"
+        assert result.evidence_tool == "joern:flow"
+
     def test_both_clean(self):
         orig = FakeOutcome(status="clean")
         refined = FakeOutcome(status="clean")

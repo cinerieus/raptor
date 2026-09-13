@@ -180,7 +180,18 @@ def merge_outcomes(original: Any, refined: Any) -> Any:
     if orig_status == "finding" and ref_status == "clean":
         return _summed(original)
 
-    if ref_status == "finding" and not refined_tool and original_tool:
+    # Carry the original round's evidence stamp forward only when that
+    # round's own verdict backed the finding (finding/suspicious). In
+    # the clean-check rescue path the original outcome is CLEAN — its
+    # tool stamp confirmed nothing, and copying it would let an
+    # LLM-only rescue grade as tool-confirmed downstream. The rescue
+    # survives either way; only the evidence grade degrades.
+    if (
+        ref_status == "finding"
+        and orig_status in ("finding", "suspicious")
+        and not refined_tool
+        and original_tool
+    ):
         refined.evidence_tool = original_tool
 
     return _summed(refined)
