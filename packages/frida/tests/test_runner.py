@@ -302,6 +302,76 @@ def test_run_spawn_resumes_after_load(tmp_path: Path):
     assert result.resolved_pid == 9999
 
 
+class EnvCapturingFakeDevice(FakeDevice):
+    """FakeDevice whose spawn accepts the env kwarg (modern bindings)."""
+
+    def __init__(self, id_: str = "local"):
+        super().__init__(id_)
+        self.spawn_envs: list[dict | None] = []
+
+    def spawn(self, argv: list[str], env: dict | None = None) -> int:
+        self.spawn_envs.append(env)
+        return super().spawn(argv)
+
+
+def test_spawn_env_is_allowlist_derived_not_operator_environ(
+    tmp_path: Path, monkeypatch,
+):
+    """The spawned process is untrusted TARGET code. In --unsafe-attach /
+    direct-CLI mode the driver runs in the operator's full environment,
+    so the child env must be built from the safe-env allowlist — a raw
+    os.environ copy hands the target every credential the operator
+    carries (getenv is all it takes)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-do-not-leak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("GH_TOKEN", "gh-secret")
+    # On the allowlist for RAPTOR's own tooling (RAPTOR_ prefix) but in
+    # the target-facing strip set — must not reach target code.
+    monkeypatch.setenv("RAPTOR_SESSION_TOKEN", "session-secret")
+
+    device = EnvCapturingFakeDevice("local")
+    binary = tmp_path / "victim"
+    binary.write_text("#!/bin/sh\necho hi\n")
+    cfg = runner.RunConfig(
+        target=runner.parse_target(str(binary)),
+        out_dir=tmp_path,
+        script_source="// noop",
+        script_origin="file:noop.js",
+        duration_sec=0.02,
+    )
+    _session, pid = runner._attach_or_spawn(None, device, cfg)
+    assert pid == 9999
+    assert len(device.spawn_envs) == 1
+    env = device.spawn_envs[0]
+    assert env is not None
+    for secret in ("ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY",
+                   "GH_TOKEN", "RAPTOR_SESSION_TOKEN"):
+        assert secret not in env, f"{secret} leaked into spawn env"
+    # A desktop target still needs the basics.
+    assert "PATH" in env
+
+
+def test_spawn_env_strips_session_credential_without_config(monkeypatch):
+    """Fallback lane (core.config unavailable) must still be a minimal
+    env, never a fall-open to the full operator environment."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_core_config(name, *args, **kwargs):
+        if name == "core.config" or name.startswith("core.config."):
+            raise ImportError("simulated missing core.config")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-do-not-leak")
+    monkeypatch.setenv("RAPTOR_SESSION_TOKEN", "session-secret")
+    monkeypatch.setattr(builtins, "__import__", _no_core_config)
+    env = runner._spawn_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "RAPTOR_SESSION_TOKEN" not in env
+    assert "PATH" in env
+
+
 def test_run_zero_events_still_creates_events_jsonl(tmp_path: Path):
     # frida-report.md unconditionally points at events.jsonl, so the file
     # must exist even when the script emits nothing during the window.
