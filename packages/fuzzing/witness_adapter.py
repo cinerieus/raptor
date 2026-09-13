@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.hash import sha256_file
+from core.source import read_bytes_capped
 from core.witness import Witness, WitnessOutcome, WitnessSource
 from core.witness.types import compute_bytes_hash
 
@@ -36,8 +37,6 @@ if TYPE_CHECKING:
 # store; lowering it below AFL's configured max_len (operators can bump
 # it with -G) risks dropping genuine oversized crash inputs. Callers
 # treat the raise as a per-crash skip (logged), never a campaign abort.
-# TODO: migrate to the shared capped-read helper once one lands in
-# core.
 _MAX_CRASH_INPUT_BYTES = 4 * 1024 * 1024
 
 
@@ -72,12 +71,16 @@ def witness_from_crash(
     ``raptor-verified-outcomes`` — a solver-predicted input family
     produced an observed crash.
     """
-    # Bounded read (cap + 1 probe byte) rather than stat-then-read:
-    # the file is target-writable, so a size check followed by an
-    # unbounded read would still race a growing plant.
-    with Path(crash.input_file).open("rb") as f:
-        data = f.read(_MAX_CRASH_INPUT_BYTES + 1)
-    if len(data) > _MAX_CRASH_INPUT_BYTES:
+    # Bounded read (shared core.source helper: cap + 1 probe byte
+    # rather than stat-then-read — the file is target-writable, so a
+    # size check followed by an unbounded read would still race a
+    # growing plant).
+    got = read_bytes_capped(crash.input_file, _MAX_CRASH_INPUT_BYTES)
+    if got is None:
+        msg = f"crash input {crash.input_file} could not be read"
+        raise OSError(msg)
+    data, truncated = got
+    if truncated:
         msg = (
             f"crash input {crash.input_file} exceeds the "
             f"{_MAX_CRASH_INPUT_BYTES}-byte witness cap — refusing to "
