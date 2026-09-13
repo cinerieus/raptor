@@ -80,6 +80,11 @@ def save_rule(
     from core.atomic_fs import write_text_atomically
     write_text_atomically(rule_path, content)
 
+    # Manifest read-modify-write is unlocked: callers are the /audit
+    # checker-synthesis path and the operator CLI, one process at a
+    # time per run directory. Concurrent writers would last-writer-win
+    # a whole manifest (losing the other's entry) — acceptable within
+    # that contract; revisit with a lock if a parallel writer appears.
     manifest = _load_manifest(out_dir)
     manifest[rule_id] = {
         "tool": tool,
