@@ -180,6 +180,24 @@ class TestSufficientRequiresSemanticAdequacy:
         result = assess_guard_adequacy("system", [g])
         assert result.verdict != Adequacy.SUFFICIENT
 
+    def test_memcpy_yoda_len_gt_zero_not_sufficient(self):
+        # ``0 < len`` is ``len > 0`` spelled yoda-style — a
+        # non-emptiness check, not an upper bound.
+        g = _guard("0 < len", "bounds")
+        result = assess_guard_adequacy("memcpy", [g])
+        assert result.verdict != Adequacy.SUFFICIENT
+
+    def test_memcpy_yoda_le_size_not_sufficient(self):
+        g = _guard("0 <= size", "bounds")
+        result = assess_guard_adequacy("memcpy", [g])
+        assert result.verdict != Adequacy.SUFFICIENT
+
+    def test_memcpy_hex_literal_lower_bound_not_sufficient(self):
+        # ``0x10 < len`` is still a literal-first lower bound.
+        g = _guard("0x10 < len", "bounds")
+        result = assess_guard_adequacy("memcpy", [g])
+        assert result.verdict != Adequacy.SUFFICIENT
+
     def test_memcpy_upper_bound_still_sufficient(self):
         # Boost value preserved: a real upper-bound comparison keeps
         # the SUFFICIENT verdict.
@@ -199,6 +217,19 @@ class TestSufficientRequiresSemanticAdequacy:
 
     def test_memcpy_min_clamp_counts_as_upper_bound(self):
         g = _guard("len = min(len, sizeof(buf))", "bounds")
+        result = assess_guard_adequacy("memcpy", [g])
+        assert result.verdict == Adequacy.SUFFICIENT
+
+    def test_memcpy_call_result_upper_bound_sufficient(self):
+        # A call-expression LHS (``strlen(s) < max``) is a real upper
+        # bound and must keep matching the forward form.
+        g = _guard("strlen(src) < buf_size", "bounds")
+        result = assess_guard_adequacy("memcpy", [g])
+        assert result.verdict == Adequacy.SUFFICIENT
+
+    def test_memcpy_digit_suffixed_identifier_sufficient(self):
+        # ``len2`` ends in a digit but is an identifier, not a literal.
+        g = _guard("len2 <= sizeof(buf)", "bounds")
         result = assess_guard_adequacy("memcpy", [g])
         assert result.verdict == Adequacy.SUFFICIENT
 

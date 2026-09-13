@@ -267,8 +267,14 @@ _register((
 # an identifier — ``sizeof(buf)``, a named limit — or a literal), or
 # the reversed ``X > len`` / ``X >= len``.  ``min()``/``min_t()``/
 # ``clamp()`` count as upper-bounding uses.
+# Forward form: the LHS must be the guarded value — an identifier or a
+# closing ``)``/``]`` (call/index expression) — never a numeric literal.
+# ``\b`` before the identifier rejects literal spellings whose tail looks
+# like one (``0x10``, ``10UL``): there is no word boundary between the
+# digits and the letters.  ``0 < len`` is ``len > 0`` spelled yoda-style
+# — a lower bound — and must not match.
 _UPPER_BOUND_FWD_RE = re.compile(
-    r"[\w)\]]\s*<=?\s*[a-zA-Z_0-9]"
+    r"(?:\b[a-zA-Z_]\w*|[)\]])\s*<=?\s*[a-zA-Z_0-9]"
 )
 _UPPER_BOUND_REV_RE = re.compile(
     r"[\w)\]]\s*>=?\s*[a-zA-Z_]"
