@@ -219,6 +219,38 @@ class TestLayerFunctionalSelfTests:
         from core.sandbox.probes import _mount_ns_functional_selftest
         assert isinstance(_mount_ns_functional_selftest(), bool)
 
+    def test_mount_ns_selftest_fails_on_mount_denial_exit_codes(
+            self, monkeypatch):
+        # The child exits 2/3 when namespace CREATION worked but the
+        # in-namespace mount operations were refused — the shape where
+        # an outer seccomp EPERMs the mount family while unshare stays
+        # allowed. A creation-only self-test reported such hosts as
+        # mount-capable and every spawn then died on its bind tree
+        # mid-flight; the probe must map those exits to unavailable.
+        import os as _os
+
+        from core.sandbox.probes import _mount_ns_functional_selftest
+
+        for child_exit, expected in ((0, True), (1, False), (2, False),
+                                     (3, False), (4, False)):
+            monkeypatch.setattr(_os, "fork", lambda: 12345)
+            monkeypatch.setattr(
+                _os, "waitpid",
+                lambda pid, opts, _s=child_exit << 8: (12345, _s))
+            assert _mount_ns_functional_selftest() is expected, child_exit
+
+    def test_mount_probe_consistent_with_selftest(self):
+        # Mirrors the seccomp consistency test: the cached availability
+        # verdict may report True only on hosts where the functional
+        # self-test (namespace creation AND a real in-namespace mount)
+        # passes right now.
+        from core.sandbox.probes import (
+            _mount_ns_functional_selftest,
+            check_mount_available,
+        )
+        if check_mount_available():
+            assert _mount_ns_functional_selftest() is True
+
 
 class TestExecStatusPipe:
     """The exec-status pipe: an unspoofable, per-step signal of whether the

@@ -440,8 +440,9 @@ def _probe_net_available() -> bool:
 
 
 def _mount_ns_functional_selftest() -> bool:
-    """Fork a child and actually ``unshare(CLONE_NEWUSER|CLONE_NEWNS)`` to
-    verify the kernel permits creating a user+mount namespace at runtime.
+    """Fork a child, ``unshare(CLONE_NEWUSER|CLONE_NEWNS)`` AND perform a
+    real mount inside the new namespace, to verify the kernel permits the
+    operations the spawn path actually runs.
 
     The other ``check_mount_available()`` signals — uidmap binaries present,
     AppArmor sysctl != 1 — are necessary but NOT sufficient: an outer-container
@@ -451,10 +452,34 @@ def _mount_ns_functional_selftest() -> bool:
     ``os.unshare`` (exit 126 + empty stdout) — a silent "0 findings". Testing
     it here means a NEWNS-incapable host instead falls back to Landlock-only
     and still produces real results. Same approach as the Landlock and seccomp
-    functional self-tests. Child is ``os.unshare`` + ``os._exit`` only.
+    functional self-tests.
+
+    Namespace CREATION alone is still not sufficient: there are hosts where
+    ``unshare(CLONE_NEWUSER|CLONE_NEWNS)`` succeeds but every mount(2) inside
+    the owned namespace is denied — an outer-container seccomp that EPERMs
+    the mount family is the concrete case (the feature-matrix ``no-mount``
+    lane models it). On such a host a creation-only probe reports mount-ns
+    available and every spawn then fails its bind tree mid-flight, so the
+    child also remounts ``/`` recursively private and mounts a tmpfs at
+    ``/tmp`` — the same first operations ``core.sandbox.mount_ns`` performs.
+    Both live only in the child's namespace and evaporate with it. This
+    gives the outer-seccomp class the same up-front Landlock-only posture
+    the AppArmor-sysctl class already gets from the fast path above; the
+    spawn ladder's mountless 'M' retry remains the mid-flight net for
+    failures no probe saw coming.
+
+    Child is ``os.unshare`` + two pre-resolved ``libc.mount`` calls +
+    ``os._exit`` only (libc handle resolved before the fork).
     """
     _CLONE_NEWUSER = getattr(os, "CLONE_NEWUSER", 0x10000000)
     _CLONE_NEWNS = getattr(os, "CLONE_NEWNS", 0x00020000)
+    _MS_REC = 0x4000
+    _MS_PRIVATE = 1 << 18
+    import ctypes
+    try:
+        _libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return False
     import warnings as _warnings
     with _warnings.catch_warnings():
         _warnings.filterwarnings(
@@ -465,9 +490,17 @@ def _mount_ns_functional_selftest() -> bool:
     if pid == 0:
         try:
             os.unshare(_CLONE_NEWUSER | _CLONE_NEWNS)
-            os._exit(0)
         except BaseException:
             os._exit(1)
+        try:
+            if _libc.mount(b"none", b"/", None, _MS_REC | _MS_PRIVATE,
+                           None) != 0:
+                os._exit(2)
+            if _libc.mount(b"none", b"/tmp", b"tmpfs", 0, None) != 0:
+                os._exit(3)
+        except BaseException:
+            os._exit(4)
+        os._exit(0)
     try:
         _, status = os.waitpid(pid, 0)
     except ChildProcessError:
@@ -561,15 +594,17 @@ def check_mount_available() -> bool:
 
         # Functional test (see _mount_ns_functional_selftest): binary presence
         # + AppArmor-sysctl=0 are necessary but not sufficient — the kernel can
-        # still refuse unshare(CLONE_NEWNS) (outer seccomp / SELinux / nested
-        # userns). If it does, report unavailable so we degrade to Landlock-
-        # only rather than dying mid-spawn with empty output.
+        # still refuse unshare(CLONE_NEWNS), or allow it and refuse the
+        # mounts inside the owned namespace (outer seccomp / SELinux /
+        # nested userns). If it does, report unavailable so we degrade to
+        # Landlock-only rather than dying mid-spawn with empty output.
         if not _mount_ns_functional_selftest():
             if state.warn_once("_mount_unavailable_warned"):
                 logger.info(
                     "Sandbox: mount-namespace isolation UNAVAILABLE — "
-                    "unshare(CLONE_NEWNS) refused at runtime (outer seccomp / "
-                    "LSM / nested-userns restriction). Fallback: Landlock-only."
+                    "unshare(CLONE_NEWNS) or mount(2) inside the owned "
+                    "namespace refused at runtime (outer seccomp / LSM / "
+                    "nested-userns restriction). Fallback: Landlock-only."
                 )
             state._mount_available_cache = False
             return False
@@ -654,9 +689,14 @@ def mount_unavailable_reason() -> tuple[str, str]:
             "host where mount-ns is available.",
         )
     # 4. Catch-all: outer seccomp filter / nested userns / unknown LSM.
+    #    Names BOTH refusal points the functional self-test probes:
+    #    namespace creation and the mounts inside the owned namespace —
+    #    an outer seccomp that EPERMs only the mount family fails the
+    #    second while the first succeeds.
     return (
         "mount-ns blocked by host "
-        "(unshare(CLONE_NEWNS) refused at runtime — likely outer "
+        "(unshare(CLONE_NEWNS), or mount(2) inside the owned "
+        "namespace, refused at runtime — likely outer "
         "seccomp filter, nested user-namespace restriction, or "
         "unknown LSM policy)",
         "rerun outside the restricting container / VM, or rerun on a "
