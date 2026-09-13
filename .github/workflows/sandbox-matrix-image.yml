@@ -58,6 +58,22 @@ on:
       - 'core/sandbox/scripts/feature-matrix/run-matrix.sh'
       - '.github/workflows/sandbox-matrix-image.yml'
   workflow_dispatch:
+    inputs:
+      cleanup:
+        description: >-
+          Package cleanup instead of a build+publish. 'list-versions'
+          enumerates every version of the GHCR package and deletes
+          nothing (the safe default of the cleanup job);
+          'delete-all-versions' deletes every version, emptying the
+          package — e.g. to retire a wrongly-public package before a
+          fresh publish. 'none' is a normal build+publish dispatch.
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - list-versions
+          - delete-all-versions
   schedule:
     # Weekly rebuild (Wed 04:00 UTC) so the ubuntu:24.04 base picks up
     # security patches even when the inputs don't change. One hour
@@ -77,6 +93,10 @@ env:
 
 jobs:
   build-push:
+    # Skipped only when a dispatch explicitly asks for cleanup; the
+    # inputs context is empty on push/schedule, so those (and plain
+    # dispatches) build as before.
+    if: github.event.inputs.cleanup == '' || github.event.inputs.cleanup == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -146,8 +166,9 @@ jobs:
 
       # Prune the untagged digests left behind when :u24 moves to this
       # build. Tagged versions (current :u24 + every :u24-<hash> rollback
-      # anchor) are untouched. GHCR has no auto-retention, so without this
-      # the weekly rebuild alone accrues ~52 dangling versions/year.
+      # anchor) are untouched here; bounded anchor retention is the next
+      # step. GHCR has no auto-retention, so without this the weekly
+      # rebuild alone accrues ~52 dangling versions/year.
       - name: Prune superseded (untagged) image versions
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55  # was v5.0.0
         with:
@@ -155,3 +176,57 @@ jobs:
           package-type: container
           delete-only-untagged-versions: true
           min-versions-to-keep: 5
+
+  # Operator-dispatched package cleanup (never fires on push/schedule,
+  # and 'delete-all-versions' must be selected explicitly — the default
+  # dispatch input is a normal publish and the cleanup default is a
+  # list-only dry run). The CI created this package, so the CI can
+  # retire it: a workflow-created GHCR package grants the repo's
+  # workflow token admin access, and while the whole-package DELETE
+  # endpoint refuses GITHUB_TOKEN, per-VERSION deletion is the
+  # documented-supported path (the untagged prune above rides the same
+  # grant) — deleting every version empties the package, e.g. before a
+  # fresh publish replaces a package that surfaced public.
+  cleanup:
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.cleanup == 'list-versions' ||
+       github.event.inputs.cleanup == 'delete-all-versions')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write             # per-version DELETE rides this grant
+    steps:
+      - name: List package versions (and delete when explicitly confirmed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          MODE: ${{ github.event.inputs.cleanup }}
+        run: |
+          set -euo pipefail
+          pkg=raptor-sandbox-matrix
+          # Owner may be a user or an organisation; probe org first,
+          # same as the visibility gate.
+          base="orgs/${OWNER}/packages/container/${pkg}"
+          gh api "${base}" >/dev/null 2>&1 \
+            || base="users/${OWNER}/packages/container/${pkg}"
+          gh api --paginate "${base}/versions?per_page=100" \
+            --jq '.[] | [(.id|tostring), .created_at, (.metadata.container.tags | join(","))] | @tsv' \
+            > /tmp/versions.tsv \
+            || { echo "::error::could not enumerate versions of ${pkg} with the workflow token — the package may not exist yet, or the token lacks the read grant; inspect it manually under the owner's Packages page."; exit 1; }
+          n="$(wc -l < /tmp/versions.tsv)"
+          echo "== ${pkg}: ${n} version(s)"
+          while IFS=$'\t' read -r id created tags; do
+            echo "   id=${id}  created=${created}  tags=${tags:-<untagged>}"
+          done < /tmp/versions.tsv
+          if [ "${MODE}" != "delete-all-versions" ]; then
+            echo "== list-only mode: nothing deleted. Re-dispatch with cleanup=delete-all-versions to empty the package."
+            exit 0
+          fi
+          while IFS=$'\t' read -r id created tags; do
+            echo "== deleting version ${id} (tags: ${tags:-<untagged>})"
+            gh api -X DELETE "${base}/versions/${id}" \
+              || { echo "::error::failed to delete version ${id} — the workflow token may lack the delete grant on this package, or GHCR refused (it can refuse the last remaining version or heavily-downloaded public packages); finish the cleanup manually in the package settings."; exit 1; }
+          done < /tmp/versions.tsv
+          echo "== deleted ${n} version(s); the package is now empty. Dispatch this workflow normally (cleanup=none) to publish afresh."
