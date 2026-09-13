@@ -595,15 +595,21 @@ def detect_universal_preconditions(
 ) -> list[dict[str, str]]:
     """Detect when ALL callers guard the same parameter.
 
-    Returns a list of ``{param, conditions, n_callers}`` for parameters
-    where every caller with a taint summary enforces at least one
-    precondition.  This is a definitive structural constraint — the LLM
-    should not hypothesise unguarded input on these parameters.
+    Returns a list of ``{param, conditions, n_callers, arg_verified}``
+    for parameters where every caller with a taint summary enforces at
+    least one precondition.  Guards are grouped by the CALLER's own
+    bare parameter name, so two callers coincidentally guarding
+    same-named locals would collide; ``arg_verified`` is "true" only
+    when every such caller's recorded call site actually passes the
+    guarded name as an argument.  Only arg-verified entries are a
+    definitive structural constraint — the rest render observation-
+    grade (see ``format_universal_preconditions``).
     """
     if not callers or not taint_summaries:
         return []
 
     param_guards: dict[str, list[set[str]]] = {}
+    param_arg_verified: dict[str, bool] = {}
     n_with_summary = 0
 
     for c in callers:
@@ -612,6 +618,7 @@ def detect_universal_preconditions(
         if summary is None:
             continue
         n_with_summary += 1
+        call_site = str(c.get("call_site") or "")
         caller_params: set[str] = set()
         for pre in getattr(summary, "preconditions", []) or []:
             param = getattr(pre, "param", "")
@@ -619,6 +626,14 @@ def detect_universal_preconditions(
                 caller_params.add(param)
                 conds = {str(c)[:80] for c in (getattr(pre, "conditions", []) or [])}
                 param_guards.setdefault(param, []).append(conds)
+                # The guarded name must appear as its own identifier in
+                # the call site (`obj.size` is not the local `size`).
+                passed = bool(call_site) and re.search(
+                    rf"(?<![\w.]){re.escape(param)}(?!\w)", call_site,
+                ) is not None
+                param_arg_verified[param] = (
+                    param_arg_verified.get(param, True) and passed
+                )
 
     if n_with_summary < 2:
         return []
@@ -633,6 +648,8 @@ def detect_universal_preconditions(
                 "param": param,
                 "conditions": ", ".join(sorted(all_conds)[:5]),
                 "n_callers": str(n_with_summary),
+                "arg_verified":
+                    "true" if param_arg_verified.get(param, False) else "false",
             })
 
     return results
@@ -641,13 +658,31 @@ def detect_universal_preconditions(
 def format_universal_preconditions(
     preconditions: list[dict[str, str]],
 ) -> str:
-    """Format universal precondition annotations for LLM context."""
+    """Format universal precondition annotations for LLM context.
+
+    Entries whose caller-param → call-site-argument mapping is verified
+    (``arg_verified == "true"``) render as a definitive constraint;
+    unverified entries (name-coincidence risk, or produced before the
+    field existed) render as an observation with no suppression
+    instruction.
+    """
     if not preconditions:
         return ""
     lines = ["UNIVERSAL CALLER CONSTRAINT (mechanical):"]
-    lines.extend(f"- ALL {p['n_callers']} callers validate param `{p['param']}` "
-            f"with: {p['conditions']}. This parameter CANNOT reach this "
-            f"function unvalidated." for p in preconditions)
+    for p in preconditions:
+        if p.get("arg_verified") == "true":
+            lines.append(
+                f"- ALL {p['n_callers']} callers validate param `{p['param']}` "
+                f"with: {p['conditions']}. This parameter CANNOT reach this "
+                f"function unvalidated.",
+            )
+        else:
+            lines.append(
+                f"- {p['n_callers']} callers each guard a variable named "
+                f"`{p['param']}` ({p['conditions']}), but the guarded name "
+                f"was not confirmed to be passed at the call sites — "
+                f"treat as an observation, not a structural guarantee.",
+            )
     return "\n".join(lines)
 
 

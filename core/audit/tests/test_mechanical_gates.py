@@ -532,11 +532,22 @@ class TestDetectUniversalPreconditions:
 
 
 class TestFormatUniversalPreconditions:
-    def test_format_output(self):
-        preconds = [{"param": "path", "conditions": "not empty, no ..", "n_callers": "4"}]
+    def test_format_output_arg_verified(self):
+        preconds = [{
+            "param": "path", "conditions": "not empty, no ..",
+            "n_callers": "4", "arg_verified": "true",
+        }]
         text = format_universal_preconditions(preconds)
         assert "ALL 4 callers" in text
         assert "CANNOT reach" in text
+        assert "path" in text
+
+    def test_format_output_unverified_is_observation_grade(self):
+        # No arg_verified field (legacy shape) — must not render the
+        # definitive suppression instruction.
+        preconds = [{"param": "path", "conditions": "not empty", "n_callers": "4"}]
+        text = format_universal_preconditions(preconds)
+        assert "CANNOT" not in text
         assert "path" in text
 
     def test_empty(self):
@@ -755,6 +766,74 @@ class TestModuleConstantInvalidation:
         tree = _ast.parse("CMD = 'ls'\nOTHER = 3\n")
         constants = _collect_module_constants(tree)
         assert constants == {"CMD": "ls", "OTHER": 3}
+
+
+# ── E-3: arg-verified universal preconditions ──
+
+
+class TestUniversalPreconditionArgVerification:
+    def _summaries(self):
+        return {
+            "a.py:fn1": _FakeSummary(
+                "fn1", [_FakePrecondition("size", ["size > 0"])],
+            ),
+            "a.py:fn2": _FakeSummary(
+                "fn2", [_FakePrecondition("size", ["size < MAX"])],
+            ),
+        }
+
+    def test_same_named_locals_do_not_mint_definitive_claim(self):
+        # Both callers guard a local named `size`, but neither call
+        # site passes it — a name coincidence must not render the
+        # "CANNOT reach this function unvalidated" instruction.
+        callers = [
+            {"file": "a.py", "name": "fn1", "call_site": "process(buf, n)"},
+            {"file": "a.py", "name": "fn2", "call_site": "process(data, m)"},
+        ]
+        result = detect_universal_preconditions(callers, self._summaries())
+        assert len(result) == 1
+        assert result[0]["arg_verified"] == "false"
+        text = format_universal_preconditions(result)
+        assert "CANNOT" not in text
+        assert "observation" in text.lower()
+
+    def test_genuinely_passed_param_still_definitive(self):
+        callers = [
+            {"file": "a.py", "name": "fn1", "call_site": "process(size, buf)"},
+            {"file": "a.py", "name": "fn2", "call_site": "process(size, data)"},
+        ]
+        result = detect_universal_preconditions(callers, self._summaries())
+        assert len(result) == 1
+        assert result[0]["arg_verified"] == "true"
+        text = format_universal_preconditions(result)
+        assert "CANNOT reach" in text
+
+    def test_missing_call_site_downgrades_to_observation(self):
+        callers = [
+            {"file": "a.py", "name": "fn1"},
+            {"file": "a.py", "name": "fn2"},
+        ]
+        result = detect_universal_preconditions(callers, self._summaries())
+        assert len(result) == 1
+        assert result[0]["arg_verified"] == "false"
+        assert "CANNOT" not in format_universal_preconditions(result)
+
+    def test_attribute_of_other_object_not_matched(self):
+        # `obj.size` is not the caller's guarded local `size`.
+        callers = [
+            {"file": "a.py", "name": "fn1", "call_site": "process(obj.size)"},
+            {"file": "a.py", "name": "fn2", "call_site": "process(obj.size)"},
+        ]
+        result = detect_universal_preconditions(callers, self._summaries())
+        assert result[0]["arg_verified"] == "false"
+
+    def test_one_unverified_caller_downgrades_all(self):
+        callers = [
+            {"file": "a.py", "name": "fn1", "call_site": "process(size, buf)"},
+            {"file": "a.py", "name": "fn2", "call_site": "process(data, m)"},
+        ]
+        result = detect_universal_preconditions(callers, self._summaries())
+        assert result[0]["arg_verified"] == "false"
 
 
 # ── A: threat-model item tokenisation ──
