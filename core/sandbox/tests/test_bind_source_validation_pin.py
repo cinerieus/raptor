@@ -318,14 +318,31 @@ class TestPerProcessProcfsExemption(unittest.TestCase):
         from core.sandbox.mount_ns import _is_per_process_procfs
         for path in ("/proc/self", "/proc/self/cgroup",
                      "/proc/self/fd/0", "/proc/thread-self",
-                     "/proc/thread-self/stat"):
+                     "/proc/thread-self/stat",
+                     # POSIX preserves an exactly-two-slash prefix
+                     # through abspath/normpath, while realpath still
+                     # resolves it into a pid dir — the spelling must
+                     # not escape the class.
+                     "//proc/self/cgroup", "///proc/self/cgroup",
+                     "//proc/thread-self"):
             self.assertTrue(_is_per_process_procfs(path), path)
         # pid-named procfs paths are stable across processes (they
         # name ONE pid) and real-filesystem paths never qualify —
         # both keep the pin + tamper refusal.
         for path in ("/proc", "/proc/selfish", "/proc/1234/cgroup",
-                     "/proc/cpuinfo", "/tmp/proc/self", "/"):
+                     "/proc/cpuinfo", "/tmp/proc/self", "/",
+                     "//proc", "//tmp/proc/self"):
             self.assertFalse(_is_per_process_procfs(path), path)
+
+    def test_pin_skips_double_slash_spelling(self) -> None:
+        """abspath preserves '//proc/self/...' — the pin skip must
+        classify the spelling, not just the canonical form."""
+        from core.sandbox._spawn import _pin_bind_sources
+        tgt = str(self.base / "tgt")
+        fds = _pin_bind_sources(tgt, None, None,
+                                ["//proc/self/cgroup", tgt])
+        self.addCleanup(_close_all, fds)
+        self.assertEqual(set(fds), {tgt})
 
     def test_pin_skips_per_process_procfs_readables(self) -> None:
         """The parent takes no pin for the volatile class — the child
@@ -709,6 +726,44 @@ class TestAttackRegressionE2E(unittest.TestCase):
                             "planted readable path must not be bound")
         self.assertNotIn("SECRET-CONTENT", r.stdout or "",
                          "planted symlink content leaked into sandbox")
+
+    @requires_userns
+    def test_swapped_readable_path_refused_at_spawn_layer(self) -> None:
+        """A readable_paths dir that EXISTED at validation and is
+        swapped to a symlink inside the validate→mount window must
+        refuse the whole spawn with the pin-violation category (the
+        per-process procfs exemption must not soften the refusal for
+        the real-filesystem readable class)."""
+        from unittest.mock import patch
+
+        from core.sandbox import _spawn
+        from core.sandbox._spawn import run_sandboxed
+        ro = self.base / "ro"
+        ro.mkdir()
+        (self.victim / "token").write_text("SECRET-CONTENT\n")
+        real_pin = _spawn._pin_bind_sources
+        victim, moved = self.victim, self.base / "ro-moved"
+
+        def pin_then_swap(*args, **kwargs):
+            fds = real_pin(*args, **kwargs)
+            os.rename(ro, moved)
+            os.symlink(victim, ro)
+            return fds
+
+        kwargs = self._spawn_kwargs()
+        kwargs["readable_paths"] = [str(ro)]
+        with patch.object(_spawn, "_pin_bind_sources",
+                          side_effect=pin_then_swap):
+            r = run_sandboxed(["cat", str(ro / "token")], **kwargs)
+        self.assertNotEqual(r.returncode, 0,
+                            "swapped readable bind source must refuse")
+        status = getattr(r, "_setup_status", None)
+        if status is None:
+            self.fail("expected a setup-failure status on the pipe")
+        self.assertEqual(status[0], "P",
+                         f"expected pin-violation category, got {status}")
+        self.assertNotIn("SECRET-CONTENT", r.stdout or "",
+                         "swapped readable source leaked into sandbox")
 
     @requires_landlock
     @requires_userns

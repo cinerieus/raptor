@@ -111,6 +111,14 @@ def is_per_process_procfs(path: str) -> bool:
     Real-filesystem paths are never in this class; every pin and
     tamper refusal stays intact for them.
     """
+    if path.startswith("//"):
+        # POSIX reserves an exactly-two-slash prefix, so abspath and
+        # normpath both PRESERVE it ("//proc/self/x" stays
+        # "//proc/self/x") while realpath still resolves it into a
+        # pid dir — a spelling that would otherwise escape this
+        # classification and reach the cross-process consumers.
+        # Collapse leading slashes for classification only.
+        path = "/" + path.lstrip("/")
     return any(path == p or path.startswith(p + "/")
                for p in _PER_PROCESS_PROCFS)
 

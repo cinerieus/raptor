@@ -239,3 +239,40 @@ def test_relative_and_absolute_spellings_equivalent(monkeypatch, tmp_path):
     rel_targets = sorted(m[1] for m in rel_mounts if m[1])
     abs_targets = sorted(m[1] for m in abs_mounts if m[1])
     assert rel_targets == abs_targets
+
+
+@pytest.mark.linux_native
+def test_per_process_procfs_entry_not_bound_without_pins(monkeypatch,
+                                                         tmp_path):
+    # Legacy callers (src_fds=None) reach the extra_ro loop with
+    # mount-time resolution: without the class skip, a /proc/self/*
+    # entry would bind THIS setup process's own pid file over the
+    # magic link, freezing one process's per-reader view for every
+    # sandbox process (and, for cgroup, re-exposing the host-layout
+    # path the fresh cgroup namespace hides). The pinned production
+    # path never gets here for the class (the parent takes no pin),
+    # so this legacy route is the one that keeps the skip live.
+    root, mounts = _run_setup(
+        monkeypatch, tmp_path, ["/proc/self/cgroup"],
+    )
+    _, baseline = _run_setup(monkeypatch, tmp_path, None)
+    assert len(mounts) == len(baseline), (
+        "per-process procfs entry produced extra mounts"
+    )
+    assert not any(
+        m[1] and "/proc/self/cgroup" in str(m[1]) for m in mounts
+    ), "per-process procfs entry was bind-mounted"
+
+
+@pytest.mark.linux_native
+def test_double_slash_procfs_spelling_not_bound(monkeypatch, tmp_path):
+    # "//proc/self/cgroup" survives abspath (POSIX two-slash prefix)
+    # — the classification must catch the spelling here too.
+    root, mounts = _run_setup(
+        monkeypatch, tmp_path, ["//proc/self/cgroup"],
+    )
+    _, baseline = _run_setup(monkeypatch, tmp_path, None)
+    assert len(mounts) == len(baseline)
+    assert not any(
+        m[1] and "proc/self/cgroup" in str(m[1]) for m in mounts
+    )
