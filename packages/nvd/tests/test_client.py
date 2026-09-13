@@ -211,3 +211,42 @@ class TestCveIdValidation:
         client = NvdClient(cache_enabled=False)
         assert client.get_payload("  CVE-2024-1234\n") is not None
         assert stub.calls[0]["url"].endswith("?cveId=CVE-2024-1234")
+
+
+class TestRaiseOnTransient:
+    """Opt-in transient signalling for verdict-minting callers."""
+
+    def test_transient_failure_raises(self, stub, tmp_path) -> None:
+        from packages.nvd.client import NvdLookupError
+
+        for _ in range(6):
+            stub.add(status=503)
+        client = NvdClient(disk_cache_dir=tmp_path / "nvd")
+        with pytest.raises(NvdLookupError):
+            client.get_payload("CVE-2024-1234", raise_on_transient=True)
+
+    def test_memoized_transient_still_raises(self, stub, tmp_path) -> None:
+        from packages.nvd.client import NvdLookupError
+
+        for _ in range(6):
+            stub.add(status=503)
+        client = NvdClient(disk_cache_dir=tmp_path / "nvd")
+        assert client.get_payload("CVE-2024-1234") is None
+        calls_after_first = len(stub.calls)
+        # The in-process transient memo must keep its transient
+        # identity — a later raise_on_transient caller in the same
+        # batch must not read the memoized None as a definitive miss.
+        with pytest.raises(NvdLookupError):
+            client.get_payload("CVE-2024-1234", raise_on_transient=True)
+        assert len(stub.calls) == calls_after_first
+
+    def test_definitive_404_returns_none_not_raise(self, stub, tmp_path) -> None:
+        stub.add(status=404)
+        client = NvdClient(disk_cache_dir=tmp_path / "nvd")
+        assert client.get_payload("CVE-2024-1234", raise_on_transient=True) is None
+
+    def test_default_shape_unchanged_on_transient(self, stub, tmp_path) -> None:
+        for _ in range(6):
+            stub.add(status=503)
+        client = NvdClient(disk_cache_dir=tmp_path / "nvd")
+        assert client.get_payload("CVE-2024-1234") is None
