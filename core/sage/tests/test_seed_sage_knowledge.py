@@ -12,6 +12,7 @@ Pins:
 """
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -213,6 +214,57 @@ class TestScriptModePathSetup(unittest.TestCase):
                     r.returncode, 0,
                     f"--help failed: {r.stderr[:500]}",
                 )
+
+
+class TestMissingSdkGating(unittest.TestCase):
+    """The deferred sage-agent-sdk import error gates work, not usage:
+    `--help` succeeds without the SDK (environments without the
+    optional dep still get usage), while a real invocation refuses
+    with the install hint on stderr."""
+
+    _SCRIPTS = (
+        "core/sage/scripts/seed_sage_knowledge.py",
+        "core/sage/scripts/register_agents.py",
+    )
+
+    def _run_without_sdk(self, script: str, arg: str) -> subprocess.CompletedProcess[str]:
+        import sys as _sys
+        repo_root = ssk.REPO_ROOT
+        # Shadow sage_sdk with a package that raises ImportError so the
+        # test behaves identically whether or not the SDK is installed
+        # on the host. The shadow sits on PYTHONPATH, ahead of
+        # site-packages but behind RAPTOR_DIR (which has no sage_sdk).
+        with tempfile.TemporaryDirectory() as shadow:
+            pkg = Path(shadow) / "sage_sdk"
+            pkg.mkdir()
+            (pkg / "__init__.py").write_text(
+                'raise ImportError("sage-agent-sdk absent (test shadow)")\n'
+            )
+            env = dict(os.environ)
+            env["RAPTOR_DIR"] = str(repo_root)
+            prior = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = shadow + (os.pathsep + prior if prior else "")
+            return subprocess.run(
+                [_sys.executable, str(repo_root / script), arg],
+                capture_output=True, text=True, env=env, timeout=60,
+            )
+
+    def test_help_works_without_sdk(self):
+        for script in self._SCRIPTS:
+            with self.subTest(script=script):
+                r = self._run_without_sdk(script, "--help")
+                self.assertEqual(
+                    r.returncode, 0,
+                    f"--help failed: {r.stderr[:500]}",
+                )
+                self.assertIn("usage:", r.stdout)
+
+    def test_work_refuses_without_sdk_on_stderr(self):
+        for script in self._SCRIPTS:
+            with self.subTest(script=script):
+                r = self._run_without_sdk(script, "--dry-run")
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("sage-agent-sdk", r.stderr)
 
 
 if __name__ == "__main__":
