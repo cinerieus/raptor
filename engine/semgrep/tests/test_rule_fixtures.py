@@ -67,6 +67,10 @@ _CASES = {
         ["cmdi_exec_array_pos.java"],
         ["cmdi_exec_array_neg.java"],
     ),
+    "injection/regex-dos.yaml": (
+        ["redos_java_literal_pos.java", "redos_java_taint_pos.java"],
+        ["redos_java_literal_neg.java", "redos_java_taint_neg.java"],
+    ),
     "injection/sql-concat.yaml": (
         ["sqlconcat_pos.java", "sqlconcat_pos.py", "sqlconcat_pos.js",
          "sqlconcat_pos.php"],
