@@ -1862,3 +1862,24 @@ def test_xsource_absurd_nesting_fails_closed() -> None:
     loop.run("Analyze CVE-2024-1234")
     blocked = [e for e in events if isinstance(e, ToolCallBlocked)]
     assert len(blocked) == 1
+
+
+def test_truncate_single_orphaned_tool_result_raises_typed_error() -> None:
+    """A pathological history can truncate down to a SINGLE leading
+    tool-result message — a shape every provider rejects. The loop
+    must raise its typed ContextOverflow instead of shipping a
+    guaranteed request rejection."""
+    fp = _FakeProvider([_text_response("ok")], ctx_window=260)
+    loop = ToolUseLoop(fp, [], context_policy=ContextPolicy.TRUNCATE_OLDEST)
+    history = [
+        Message(role="user", content=[TextBlock(text="a" * 800)]),
+        # Plain assistant text (no ToolCall) so the pair-drop does not
+        # remove the trailing tool_result alongside it.
+        Message(role="assistant", content=[TextBlock(text="b" * 800)]),
+        Message(role="user", content=[
+            ToolResult(tool_use_id="c1", content="r" * 100),
+        ]),
+    ]
+    with pytest.raises(ContextOverflow, match="cannot open a conversation"):
+        loop.run_with_history(history, "")
+    assert len(fp.calls) == 0

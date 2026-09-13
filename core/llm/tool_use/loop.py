@@ -1434,6 +1434,26 @@ class ToolUseLoop:
                 messages=messages,
                 tool_calls_made=tool_calls_made,
             )
+        # The head-cleanup loop stops at one message, so a pathological
+        # history can end as a SINGLE leading assistant turn or
+        # orphaned tool-result — a shape every provider rejects.
+        # Raise the typed truncation error instead of shipping a
+        # guaranteed 400.
+        if messages and (
+            messages[0].role == "assistant"
+            or any(isinstance(b, ToolResult) for b in messages[0].content)
+        ):
+            msg = (
+                "truncation reduced the conversation to a single "
+                f"{messages[0].role} message that cannot open a "
+                "conversation (assistant turn or orphaned tool_result) "
+                "— resume with a fresh user prompt or a bigger context"
+            )
+            raise ContextOverflow(
+                msg,
+                messages=messages,
+                tool_calls_made=tool_calls_made,
+            )
         return messages
 
 
