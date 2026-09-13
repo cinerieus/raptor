@@ -391,10 +391,15 @@ def extract_direct_call_edges(
     # the necessary reads; no write paths needed (we capture stdout).
     from core.sandbox import run as _sandbox_run
     try:
+        # errors="replace": r2 stdout over a malformed/hostile ELF can
+        # carry non-UTF-8 bytes; strict decoding raises
+        # UnicodeDecodeError (a ValueError, NOT in the caught tuple
+        # below) and would crash the must-not-crash inventory path.
         fns_proc = _sandbox_run(
             ["r2", "-q", "-c", "aaa; aflj", str(binary_path)],
             target=str(binary_path.parent), block_network=True,
             capture_output=True, text=True, check=False, timeout=timeout,
+            errors="replace",
         )
     except (subprocess.TimeoutExpired, subprocess.SubprocessError,
             OSError) as e:

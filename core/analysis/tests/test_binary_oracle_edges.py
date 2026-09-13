@@ -102,6 +102,41 @@ def test_extract_handles_offset_keyed_aflj_without_crashing(
     assert any(e.caller == "main" and e.callee == "leaf" for e in idx.edges)
 
 
+def test_extract_survives_non_utf8_r2_output(monkeypatch, tmp_path) -> None:
+    """Regression: r2 stdout over a hostile/malformed ELF can contain
+    non-UTF-8 bytes. Without ``errors="replace"`` on the aflj
+    invocation the text-mode decode raises UnicodeDecodeError — a
+    ValueError outside the caught (TimeoutExpired, SubprocessError,
+    OSError) tuple — crashing the must-not-crash inventory path. The
+    fake run decodes its stdout with the invocation's own
+    encoding/errors kwargs, exactly as subprocess text mode would."""
+    import core.analysis.binary_oracle_edges as _edges
+    import core.sandbox as _sb
+
+    monkeypatch.setattr(_edges.shutil, "which", lambda _name: "/usr/bin/r2")
+
+    binary = tmp_path / "x"
+    binary.write_bytes(b"\x7fELF placeholder")
+
+    hostile = b'[{"addr":4425,"name":"main\xff\xfe","size":20}]'
+
+    class _Proc:
+        def __init__(self, stdout):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = 0
+
+    def _fake_run(cmd, **kwargs):
+        enc = kwargs.get("encoding") or "utf-8"
+        errors = kwargs.get("errors") or "strict"
+        return _Proc(hostile.decode(enc, errors))
+
+    monkeypatch.setattr(_sb, "run", _fake_run, raising=False)
+
+    idx = extract_direct_call_edges(binary, use_cache=False)
+    assert isinstance(idx, BinaryEdgeIndex)
+
+
 def test_parse_axffj_batch_extracts_call_edges() -> None:
     """The axffj-batch parser must extract CALL refs grouped by
     BATCH-prefixed function addresses, mapping callee addresses back
