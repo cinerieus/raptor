@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from core.logging import get_logger
+from core.sarif import emit
 from core.sarif.parser import _coerce_line
 
 logger = get_logger()
@@ -547,17 +548,12 @@ def findings_to_sarif(findings: list[dict[str, Any]]) -> dict[str, Any]:
         if f.get("snippet"):
             region["snippet"] = {"text": f["snippet"]}
 
-        result: dict[str, Any] = {
-            "ruleId": rule_id,
-            "level": f.get("level") or "warning",
-            "message": {"text": f.get("message") or ""},
-            "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {"uri": f.get("file") or ""},
-                    "region": region,
-                }
-            }],
-        }
+        result: dict[str, Any] = emit.result(
+            rule_id,
+            f.get("message") or "",
+            [emit.location(f.get("file") or "", region)],
+            level=f.get("level") or "warning",
+        )
 
         if f.get("has_dataflow") and f.get("dataflow_path"):
             code_flows = _dataflow_to_codeflows(f["dataflow_path"])
@@ -582,23 +578,16 @@ def findings_to_sarif(findings: list[dict[str, Any]]) -> dict[str, Any]:
                 rule_entry["properties"] = {"cwe": [cwe]}
             rules_by_tool[tool][rule_id] = rule_entry
 
-    sarif: dict[str, Any] = {
-        "version": "2.1.0",
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "runs": [],
-    }
-    for tool_name, results in runs_by_tool.items():
-        sarif["runs"].append({
-            "tool": {
-                "driver": {
-                    "name": tool_name,
-                    "rules": list(rules_by_tool[tool_name].values()),
-                }
-            },
-            "results": results,
-        })
-
-    return sarif
+    return emit.document(
+        [
+            emit.run(
+                tool_name, list(rules_by_tool[tool_name].values()), results,
+            )
+            for tool_name, results in runs_by_tool.items()
+        ],
+        schema_uri=emit.SCHEMA_URI_SCHEMASTORE,
+        version_first=True,
+    )
 
 
 def import_provenance_block(

@@ -29,6 +29,7 @@ from collections import Counter
 from pathlib import Path
 
 from core.json import save_json
+from core.sarif import emit
 
 from core.analysis.config_resolve_java import (
     ConfigResolver,
@@ -202,53 +203,32 @@ def scan_java_source(source_text: str, file_path: str,
 def to_sarif(findings: list[dict], repo_root: str) -> dict:
     """SARIF 2.1.0 document; distinct tool.driver.name keeps this a
     separate run in combined.sarif (graduated-stage precedent)."""
-    rule_defs: list[dict] = []
-    seen: set = set()
+    rule_index = emit.RuleIndex()
     results: list[dict] = []
     for f in findings:
-        if f["rule_id"] not in seen:
-            rule_defs.append({
-                "id": f["rule_id"],
-                "name": f["rule_id"],
-                "shortDescription": {"text": f["rule_id"]},
-                "defaultConfiguration": {"level": "warning"},
-                "properties": {
-                    "tags": ["security", f"external/cwe/{f['cwe']}"],
-                    "provenance": "config-resolved",
-                },
-            })
-            seen.add(f["rule_id"])
+        rule_index.add(emit.minimal_rule(
+            f["rule_id"],
+            properties={
+                "tags": ["security", f"external/cwe/{f['cwe']}"],
+                "provenance": "config-resolved",
+            },
+        ))
         try:
             rel = str(Path(f["file"]).resolve().relative_to(
                 Path(repo_root).resolve()))
         except ValueError:
             rel = f["file"]
-        results.append({
-            "ruleId": f["rule_id"],
-            "level": "warning",
-            "message": {"text": f["message"]},
-            "properties": {"provenance": "config-resolved"},
-            "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {"uri": rel},
-                    "region": {"startLine": f["line"]},
-                },
-            }],
-        })
-    return {
-        "$schema": (
-            "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/"
-            "master/Schemata/sarif-schema-2.1.0.json"
-        ),
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "raptor-config-resolved",
-                "rules": rule_defs,
-            }},
-            "results": results,
-        }],
-    }
+        results.append(emit.result(
+            f["rule_id"],
+            f["message"],
+            [emit.location(rel, {"startLine": f["line"]})],
+            properties={"provenance": "config-resolved"},
+            properties_before_locations=True,
+        ))
+    return emit.document(
+        [emit.run("raptor-config-resolved", rule_index.rules(), results)],
+        schema_uri=emit.SCHEMA_URI_SCHEMATA,
+    )
 
 
 def run_config_resolved_stage(
