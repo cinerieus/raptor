@@ -439,10 +439,22 @@ def write_baseline(path: Path, findings: list[dict]) -> None:
                     encoding="utf-8")
 
 
+def _default_root() -> Path:
+    """Script-anchored repo root (.github/scripts/<this> -> parents[2]).
+
+    Anchoring to the script keeps a wrong-cwd invocation (a workflow
+    step with ``working-directory``, a local runner) from silently
+    scanning an empty tree and passing vacuously — same pattern as
+    check_vocab_lists.py / check_env_docs.py.
+    """
+    return Path(__file__).resolve().parents[2]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", type=Path, default=Path.cwd(),
-                    help="repo root to scan (default: cwd)")
+    ap.add_argument("--root", type=Path, default=_default_root(),
+                    help="repo root to scan (default: the repo containing "
+                         "this script)")
     ap.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE)
     ap.add_argument("--write-baseline", action="store_true",
                     help="write the current findings as the new baseline "
