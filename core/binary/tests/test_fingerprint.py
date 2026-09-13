@@ -358,6 +358,73 @@ class TestCapabilityFingerprint:
         assert fp is not None
         assert fp.capability_buckets == {}
 
+    def test_macho_underscore_imports_reach_buckets(
+        self, patched_analyser, tmp_path,
+    ):
+        """Tier-1 must normalise import names before bucketing —
+        r2 emits Mach-O imports with a leading ``_`` (``_strcpy``)
+        while the taxonomy holds bare names. Pre-fix the buckets
+        came back systematically empty for Mach-O binaries that
+        clearly import dangerous functions."""
+        bin_path = _real_bytes_tempfile(
+            tmp_path, "macho.bin", b"\xcf\xfa\xed\xfe" + b"\x00" * 60,
+        )
+        patched_analyser["ctx"] = BinaryContextMap(
+            binary_path=bin_path,
+            arch="arm64", bits=64, binary_format="mach0",
+            imports=["_strcpy", "_execve", "_objc_msgSend"],
+        )
+        fp = capability_fingerprint(bin_path)
+        assert fp is not None
+        assert set(fp.capability_buckets.get("exec", [])) == {"execve"}
+        assert set(fp.capability_buckets.get("string_overflow", [])) == {
+            "strcpy",
+        }
+
+    def test_pe_import_prefixes_reach_buckets(
+        self, patched_analyser, tmp_path,
+    ):
+        """Same normalisation for the PE-flavoured prefixes r2 can
+        emit (``__imp_`` / ``sym.imp.``)."""
+        bin_path = _real_bytes_tempfile(
+            tmp_path, "pe.bin", b"MZ" + b"\x00" * 60,
+        )
+        patched_analyser["ctx"] = BinaryContextMap(
+            binary_path=bin_path,
+            arch="x86", bits=64, binary_format="pe",
+            imports=["__imp_recv", "sym.imp.system"],
+        )
+        fp = capability_fingerprint(bin_path)
+        assert fp is not None
+        assert set(fp.capability_buckets.get("network", [])) == {"recv"}
+        assert set(fp.capability_buckets.get("exec", [])) == {"system"}
+
+    def test_tier1_buckets_match_manifest_normalisation(
+        self, patched_analyser, tmp_path,
+    ):
+        """The fingerprint and manifest paths bucket the SAME
+        ctx.imports — they must agree on the normalised contents,
+        or capability drift and the manifest disagree about one
+        binary."""
+        from packages.binary_analysis._symbols import strip_import_prefix
+
+        raw_imports = ["_strcpy", "__imp_recv", "sym.imp.system", "recv"]
+        bin_path = _real_bytes_tempfile(
+            tmp_path, "macho2.bin", b"\xcf\xfa\xed\xfe" + b"\x00" * 30,
+        )
+        patched_analyser["ctx"] = BinaryContextMap(
+            binary_path=bin_path,
+            arch="arm64", bits=64, binary_format="mach0",
+            imports=list(raw_imports),
+        )
+        fp = capability_fingerprint(bin_path)
+        manifest_buckets = bucket_imports(
+            {strip_import_prefix(item) for item in raw_imports},
+        )
+        assert {
+            k: set(v) for k, v in fp.capability_buckets.items()
+        } == {k: set(v) for k, v in manifest_buckets.items()}
+
     def test_unparseable_input_returns_none(
         self, patched_analyser, tmp_path,
     ):
