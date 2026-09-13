@@ -29,6 +29,7 @@ if not (os.environ.get("CLAUDECODE")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import core.startup.process_init  # noqa: E402,F401
+from core.json import load_json, save_json  # noqa: E402
 
 
 def main() -> None:
@@ -111,8 +112,6 @@ def _build_binary_checklist(target: Path, output_dir: Path) -> dict:
     the sandboxed bridge, raw binaries through the r2/objdump
     fallback chain (reduced fidelity, no decompilation).
     """
-    import json
-
     from core.audit.binary_context import find_redb, load_redb
     from core.inventory.binary_builder import build_binary_checklist
 
@@ -153,8 +152,9 @@ def _build_binary_checklist(target: Path, output_dir: Path) -> dict:
                   file=sys.stderr)
             from packages.ghidra.objdump_import import import_binary_objdump
             db = import_binary_objdump(target)
-        with open(output_dir / "re-database.json", "w") as f:
-            json.dump(db.to_dict(), f, indent=1)
+        # Atomic write: a crash mid-write must not leave a torn
+        # database that the next run half-reads.
+        save_json(output_dir / "re-database.json", db.to_dict())
 
     # A prior /understand --map of the binary enriches priority
     # scoring with entry-point and sink addresses.
@@ -163,12 +163,14 @@ def _build_binary_checklist(target: Path, output_dir: Path) -> dict:
                  output_dir / "context-map.json",
                  output_dir.parent / "binary-context-map.json"):
         if cand.is_file():
-            try:
-                context_map = json.loads(cand.read_text())
+            # Bounded read: context maps are RAPTOR-written run
+            # output; the shared 64MB artifact ceiling keeps a
+            # corrupt/oversized file from becoming an OOM lever.
+            loaded = load_json(cand, max_bytes=64 * 1024 * 1024)
+            if loaded is not None:
+                context_map = loaded
                 print(f"using context map: {cand}")
                 break
-            except (OSError, ValueError):
-                continue
 
     checklist = build_binary_checklist(
         db,
@@ -176,8 +178,10 @@ def _build_binary_checklist(target: Path, output_dir: Path) -> dict:
         include_auto_named=True,
         context_map=context_map,
     )
-    with open(output_dir / "checklist.json", "w") as f:
-        json.dump(checklist, f, indent=2)
+    # Atomic write: every downstream stage (validate stage 0, the
+    # enrich family) reads checklist.json; a torn write surfaces as
+    # "exists but fails to parse" everywhere at once.
+    save_json(output_dir / "checklist.json", checklist)
     return checklist
 
 
