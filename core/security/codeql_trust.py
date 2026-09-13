@@ -43,6 +43,7 @@ system; trust must come from explicit operator intent).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -408,27 +409,42 @@ def _scan_repo(resolved_path: str) -> tuple[tuple[FileScan, ...], bool]:
     if target == _RAPTOR_DIR:
         return ((), False)
 
-    # Walk for pack files. Skip dotted dirs (e.g. ``.git``,
-    # ``.claude/worktrees``) except ``.github`` which holds
-    # codeql-config.yml legitimately. The cap is applied PER PATTERN so
-    # a flood of one filename cannot starve enumeration of the other.
+    # Walk for pack files. ``pathlib``'s ``**`` follows directory
+    # symlinks on every Python before 3.13, so a hostile repo shipping
+    # ``dir -> /`` (or a symlink loop) would walk the HOST filesystem
+    # at this pre-CodeQL trust gate — unbounded wall time, and
+    # out-of-repo qlpack.yml files surfacing as "repo" findings. Walk
+    # with ``os.walk(followlinks=False)`` instead: symlinked
+    # directories are listed but never entered. Dotted dirs (``.git``,
+    # ``.claude/worktrees``) are pruned at walk time except
+    # ``.github``, which holds codeql-config.yml legitimately — the
+    # same set the old post-match filter skipped (and pruned matches
+    # never counted toward the cap). Entries NAMED like a pack file
+    # that are symlinks or directories stay in the match set: the
+    # per-file scan below marks them blocking (symlink / unreadable),
+    # exactly as before. The cap is applied PER PATTERN so a flood of
+    # one filename cannot starve enumeration of the other.
     pack_files: list[Path] = []
     capped = False
+    pattern_names = ("codeql-pack.yml", "qlpack.yml")
+    counts = dict.fromkeys(pattern_names, 0)
     try:
-        for name in ("codeql-pack.yml", "qlpack.yml"):
-            found_for_name = 0
-            for p in target.rglob(name):
-                if found_for_name >= _MAX_PACK_FILES:
-                    capped = True
-                    break
-                rel_parts = p.relative_to(target).parts
-                if any(
-                    part.startswith(".") and part != ".github"
-                    for part in rel_parts[:-1]
-                ):
+        for dirpath, dirnames, filenames in os.walk(
+            target, followlinks=False,
+        ):
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if not d.startswith(".") or d == ".github"
+            )
+            entries = set(filenames).union(dirnames)
+            for name in pattern_names:
+                if name not in entries:
                     continue
-                pack_files.append(p)
-                found_for_name += 1
+                if counts[name] >= _MAX_PACK_FILES:
+                    capped = True
+                    continue
+                pack_files.append(Path(dirpath) / name)
+                counts[name] += 1
     except OSError:
         pass
 

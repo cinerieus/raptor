@@ -657,3 +657,57 @@ class TestExtraStripSpelling:
             "the escaped spellings so the set stays reviewable")
         # The escaped spellings are present in the source text.
         assert "u2028" in src and "u2029" in src
+
+
+# ---------------------------------------------------------------------------
+# Directory-symlink containment (hostile-repo walk)
+# ---------------------------------------------------------------------------
+
+
+class TestWalkNeverFollowsDirectorySymlinks:
+    """pathlib's ``**`` follows directory symlinks on every Python
+    before 3.13; the scan runs against untrusted repos BEFORE
+    ``codeql database create``, so a repo shipping ``dir -> <host
+    path>`` must not steer the trust gate at host files (or into a
+    symlink loop). The walk is pinned to os.walk(followlinks=False)
+    semantics on every supported interpreter."""
+
+    def test_out_of_repo_dir_symlink_not_followed(self, tmp_path, capsys):
+        outside = tmp_path / "outside"
+        (outside / "pack").mkdir(parents=True)
+        (outside / "pack" / "qlpack.yml").write_text(
+            "extractor: /bin/evil\n")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "vendored").symlink_to(outside, target_is_directory=True)
+        # Host-side pack content behind the link must NOT surface as a
+        # repo finding (nor block dispatch).
+        assert _check(str(repo)) is False
+        assert "qlpack" not in capsys.readouterr().out
+
+    def test_symlink_loop_terminates_and_scans_real_files(
+        self, tmp_path, capsys,
+    ):
+        repo = tmp_path / "repo"
+        (repo / "a").mkdir(parents=True)
+        (repo / "a" / "loop").symlink_to(repo, target_is_directory=True)
+        (repo / "qlpack.yml").write_text("extractor: /bin/evil\n")
+        # Terminates (no unbounded walk) and the real blocking file is
+        # still found exactly once.
+        assert _check(str(repo)) is True
+        assert capsys.readouterr().out.count("extractor") == 1
+
+    def test_dir_symlink_named_like_pack_file_still_blocks(
+        self, tmp_path, capsys,
+    ):
+        """A symlink NAMED qlpack.yml (even one pointing at a
+        directory) is a structural blocking finding, same as the
+        file-symlink case."""
+        outside = tmp_path / "outside-dir"
+        outside.mkdir()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "qlpack.yml").symlink_to(
+            outside, target_is_directory=True)
+        assert _check(str(repo)) is True
+        assert "symlink" in capsys.readouterr().out
