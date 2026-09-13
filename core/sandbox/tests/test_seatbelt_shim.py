@@ -265,3 +265,21 @@ class TestSeatbeltShim:
         assert "EVILPATH=False" in out, (
             "restore payload must not overwrite non-loader variables"
         )
+
+
+class TestPsCandidatesAbsolute:
+    def test_no_path_relative_ps(self):
+        """ps output drives the descendant-collection → SIGKILL list
+        and the watcher runs unsandboxed — a PATH-resolved ps could
+        fabricate a table attributing arbitrary same-UID pids to the
+        sandbox tree. Every candidate must be an absolute path."""
+        import importlib.machinery
+        import importlib.util
+        os.environ.setdefault("_RAPTOR_TRUSTED", "1")
+        loader = importlib.machinery.SourceFileLoader(
+            "raptor_seatbelt_shim_test", str(SHIM_PATH))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        assert mod._PS_CANDIDATES
+        assert all(c.startswith("/") for c in mod._PS_CANDIDATES)

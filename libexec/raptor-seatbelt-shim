@@ -212,7 +212,12 @@ def _pin_violation(pins):
 # attempted because label enumeration cannot be attributed to this
 # run safely.
 
-_PS_CANDIDATES = ("/bin/ps", "/usr/bin/ps", "ps")
+# Absolute paths only: ps output drives the descendant-collection →
+# SIGKILL list, and this watcher runs UNsandboxed — a PATH-resolved
+# `ps` could fabricate a table attributing arbitrary same-UID pids to
+# the sandbox tree. macOS ships /bin/ps; /usr/bin/ps covers other
+# layouts. No bare fallback.
+_PS_CANDIDATES = ("/bin/ps", "/usr/bin/ps")
 _PS_ARGS = ["-axo", "pid=,ppid=,pgid="]
 _SWEEP_MAX_PASSES = 3
 _SNAPSHOT_INTERVAL_S = 0.5
@@ -731,7 +736,11 @@ def main() -> int:
         except InterruptedError:
             continue
         except ChildProcessError:
-            return 254
+            # The child was already reaped elsewhere — the descendant
+            # sweep below must still run (skipping it left fork+setsid
+            # orphans alive on exactly this abnormal path).
+            status = None
+            break
         if reaped == child:
             status = st
 
@@ -749,6 +758,8 @@ def main() -> int:
         sys.stderr.write(
             "raptor-seatbelt-shim: post-exit descendant sweep failed\n")
 
+    if status is None:
+        return 254
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status)
     if os.WIFSIGNALED(status):
