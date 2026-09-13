@@ -6,8 +6,17 @@ Two concerns:
   comment removal for C-family, Python, and shell languages.
 - **Line-range slicing** (``core.source.lines``) — 1-indexed, inclusive
   line range operations used throughout RAPTOR.
+- **Contained/capped reads** (``core.source.contained``) — containment
+  under an analysed root plus size-capped reads, for paths derived
+  from untrusted finding records.
 """
 
+from core.source.contained import (
+    DEFAULT_MAX_SOURCE_CHARS,
+    read_bytes_capped,
+    read_contained,
+    read_text_capped,
+)
 from core.source.lines import (
     number_lines,
     read_context,
@@ -25,9 +34,13 @@ from core.source.strip import (
 
 __all__ = [
     "C_FAMILY_SUFFIXES",
+    "DEFAULT_MAX_SOURCE_CHARS",
     "number_lines",
+    "read_bytes_capped",
+    "read_contained",
     "read_context",
     "read_lines",
+    "read_text_capped",
     "slice_lines",
     "slice_text",
     "strip_c_comments",
