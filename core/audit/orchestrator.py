@@ -1273,6 +1273,12 @@ class OrchestratorResult:
         repr=False,
     )
 
+    def counter_lock(self) -> _threading.Lock:
+        """Public handle on the counter lock, for cross-module tallies
+        (verdict_reuse's sweep re-validation counters) — result
+        counters are mutated from parallel workers."""
+        return self._lock
+
 
 class _LockedOutcomes:
     """Thread-safe dict-like for reviewed_outcomes shared across workers."""

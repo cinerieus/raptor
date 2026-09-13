@@ -1078,3 +1078,20 @@ class TestProvisionalFourPathMatrix:
             verdict="finding",
         )
         assert "auth.c:check_pw" in covered
+
+
+class TestCounterLockAccessor:
+    def test_counter_lock_is_the_instance_lock(self):
+        from core.audit.orchestrator import OrchestratorResult
+        result = OrchestratorResult()
+        lock = result.counter_lock()
+        assert lock is result._lock
+        with lock:
+            pass  # acquirable
+
+    def test_module_does_not_touch_the_private_lock(self):
+        import inspect
+
+        from core.audit import verdict_reuse
+        src = inspect.getsource(verdict_reuse)
+        assert "._lock" not in src

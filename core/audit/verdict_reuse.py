@@ -168,7 +168,7 @@ def import_reused_verdicts(
                     "verdict reuse: sweep validation failed for %s",
                     key, exc_info=True,
                 )
-            with result._lock:
+            with result.counter_lock():
                 if outcome.status == "finding":
                     result.sweep_validated += 1
                     # "Confirmed" only when a tool actually stamped a
