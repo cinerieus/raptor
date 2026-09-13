@@ -203,3 +203,37 @@ class TestApplyDiffPriority:
         reason = result["files"][0]["items"][0]["priority_reason"]
         assert "binary-oracle" in reason
         assert "ghidra-diff" in reason
+
+
+class TestAtomicChecklistWrite:
+    def test_checklist_write_routes_through_save_json(
+        self, tmp_path, version_diff, checklist,
+    ):
+        """checklist.json has concurrent lock-free readers — the boost
+        write must go through the atomic save_json chokepoint, never a
+        truncate-in-place open('w') (which hands readers the
+        empty-file window)."""
+        import core.json as core_json
+
+        real_save = core_json.save_json
+        calls = []
+
+        def spy(path, data, *args, **kwargs):
+            calls.append(path)
+            return real_save(path, data, *args, **kwargs)
+
+        with patch(
+            "packages.ghidra.diff_priority._find_version_diff",
+            return_value=version_diff,
+        ), patch.object(core_json, "save_json", side_effect=spy):
+            n = apply_diff_priority(tmp_path, checklist)
+
+        assert n == 2
+        assert checklist in calls
+        # And the content survived the atomic path.
+        data = json.loads(checklist.read_text())
+        parse = next(
+            i for i in data["files"][0]["items"]
+            if i["function"] == "parse_input"
+        )
+        assert parse["priority"] == "high"

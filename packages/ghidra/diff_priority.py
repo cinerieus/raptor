@@ -97,8 +97,13 @@ def apply_diff_priority(
                 boosted += 1
 
     if boosted > 0:
-        with open(checklist_path, "w") as f:
-            json.dump(checklist, f, indent=2)
+        # Atomic replace: checklist.json is a shared pipeline artifact
+        # with concurrent lock-free readers (bookmarks_bridge writes
+        # the same file via save_json for exactly this reason) — a
+        # truncate-in-place write hands a reader the empty-file window
+        # and a JSONDecodeError mid-pipeline.
+        from core.json import save_json
+        save_json(checklist_path, checklist)
         logger.info(
             "diff priority: boosted %d functions from %s",
             boosted, diff_path.name,

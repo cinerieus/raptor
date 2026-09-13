@@ -23,7 +23,6 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -322,11 +321,16 @@ class REDiff:
         return names
 
     def write_json(self, path: Path) -> None:
-        """Write the diff to a JSON file."""
+        """Write the diff to a JSON file.
+
+        Atomic replace: version-diff.json is read back by later runs
+        (diff_priority._find_version_diff scans project run dirs for
+        it) — a truncate-in-place write gives a concurrent reader the
+        empty-file window and silently drops that diff-priority pass.
+        """
+        from core.json import save_json
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        save_json(path, self.to_dict())
         logger.info("wrote version diff: %s", path)
 
 
