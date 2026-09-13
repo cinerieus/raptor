@@ -360,6 +360,18 @@ class CrashAnalyser:
                 self._parse_lldb_output(context, debugger_output)
             else:
                 self._parse_gdb_output(context, debugger_output)
+            # ASan reports ride the inferior's stderr — on the LLDB
+            # path via the redirect stubs appended to the analysis
+            # output, on the GDB path interleaved into batch stdout.
+            # Route them through the ASan parser when the direct
+            # ASan re-run above didn't already capture a report
+            # (that path's diagnostics take precedence), so the
+            # sanitizer's crash type / stack trace reach the record.
+            if (debugger_output
+                    and "AddressSanitizer" in debugger_output
+                    and "asan_output" not in context.binary_info):
+                self._parse_asan_output(context, debugger_output)
+                logger.info("✓ ASan diagnostics parsed from debugger output")
             logger.info("✓ Debugger analysis complete")
         except Exception as e:  # noqa: BLE001 — defensive: degrade, never crash the analysis
             logger.error("✗ Debugger analysis failed: %s", e)
@@ -645,6 +657,39 @@ class CrashAnalyser:
 
         return result.stdout
 
+    # Per-stream cap on how much of the inferior's redirected
+    # stdout/stderr is folded back into the analysis output. ASan
+    # reports are tens of KB at most; 64 KB keeps the whole report
+    # while bounding a runaway inferior that spews gigabytes.
+    _INFERIOR_OUTPUT_CAP = 64 * 1024
+
+    @staticmethod
+    def _read_inferior_capped(path: Path | None, cap: int) -> str:
+        """First ``cap`` chars of an inferior redirect stub ('' when
+        missing/unreadable — the stub may not exist if launch failed)."""
+        if path is None:
+            return ""
+        try:
+            with Path(path).open(
+                "r", encoding="utf-8", errors="replace",
+            ) as f:
+                return f.read(cap)
+        except OSError:
+            return ""
+
+    @classmethod
+    def _inferior_output_sections(
+        cls, lldb_out: Path | None, lldb_err: Path | None,
+    ) -> str:
+        """Labelled, size-capped dump of the inferior's redirected
+        stdout/stderr, or '' when both are empty."""
+        sections = []
+        for label, stub in (("stdout", lldb_out), ("stderr", lldb_err)):
+            text = cls._read_inferior_capped(stub, cls._INFERIOR_OUTPUT_CAP)
+            if text.strip():
+                sections.append(f"=== inferior {label} ===\n{text}")
+        return "\n".join(sections)
+
     def _run_lldb_analysis(self, input_file: Path) -> str:
         """Run LLDB to analyze crash (macOS)."""
         # Initialise to None so the outer finally can safely reference
@@ -718,13 +763,21 @@ class CrashAnalyser:
                     )
             except subprocess.TimeoutExpired:
                 logger.warning("LLDB analysis timed out - trying fallback approach")
+                # The inferior may already have written its ASan
+                # report / abort message to the redirect stubs before
+                # LLDB wedged — read them before the cleanup below so
+                # the diagnostics survive into the fallback's output.
+                inferior = self._inferior_output_sections(lldb_out, lldb_err)
                 # Clean up temp files before fallback
                 try:
                     lldb_out.unlink()
                     lldb_err.unlink()
                 except OSError:
                     pass
-                return self._run_lldb_fallback(input_file)
+                fallback_output = self._run_lldb_fallback(input_file)
+                if inferior:
+                    return f"{fallback_output}\n{inferior}"
+                return fallback_output
 
             # Pre-fix this branch wrote LLDB output to a
             # `tempfile.NamedTemporaryFile(delete=False)` debug
@@ -738,7 +791,18 @@ class CrashAnalyser:
             if result.stderr:
                 logger.debug("LLDB stderr length: %d chars", len(result.stderr))
 
-            return result.stdout
+            # `process launch -o/-e` redirected the CRASHING INFERIOR's
+            # stdout/stderr into the two stub files — result.stdout is
+            # only LLDB's own output. On macOS the ASan report / abort
+            # message lands on the inferior's stderr, which is exactly
+            # what the ASan parser and crash classification want. Read
+            # the stubs (size-capped) into the returned analysis output
+            # before the finally below deletes them.
+            output = result.stdout or ""
+            inferior = self._inferior_output_sections(lldb_out, lldb_err)
+            if inferior:
+                output = f"{output}\n{inferior}" if output else inferior
+            return output
         finally:
             # Clean up temp files. cmd_file may be None if the initial
             # write raised before assignment.

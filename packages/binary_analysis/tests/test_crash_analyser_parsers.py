@@ -223,5 +223,136 @@ class TestAslrEnabledStringConvention(unittest.TestCase):
         self.assertIsInstance(info["aslr_enabled"], str)
 
 
+ASAN_REPORT = """\
+==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000018
+READ of size 4 at 0x602000000018 thread T0
+    #0 0x1004013a4 in parse_record main.c:42
+    #1 0x1004010f0 in main main.c:80
+==12345==ABORTING
+"""
+
+
+class TestInferiorAsanCapture(unittest.TestCase):
+    """`process launch -o/-e` redirects the crashing inferior's
+    stdout/stderr to stub files; on macOS the ASan report lands on the
+    INFERIOR's stderr. Pre-fix both stubs were deleted unread and the
+    diagnostics silently discarded."""
+
+    def _run_lldb_with_inferior_stderr(self, stderr_text: str) -> tuple:
+        import re
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="lldb-inferior-") as td:
+            binary = Path(td) / "bin"
+            binary.write_bytes(b"\x7fELF" + b"\x00" * 12)
+            input_file = Path(td) / "input"
+            input_file.write_bytes(b"A")
+
+            analyser = _bare_analyser()
+            analyser.binary = binary
+
+            captured: dict = {}
+
+            def fake_write_script(commands: list, prefix: str = "") -> Path:
+                captured["commands"] = list(commands)
+                script = Path(td) / "script"
+                script.write_text("\n".join(commands))
+                return script
+
+            def fake_sandbox_run(argv: list, **kwargs) -> MagicMock:
+                launch = next(
+                    c for c in captured["commands"]
+                    if c.startswith("process launch")
+                )
+                m = re.search(r'-o "([^"]+)" -e "([^"]+)"', launch)
+                out_path, err_path = m.group(1), m.group(2)
+                # The inferior writes to the redirect stubs; LLDB's
+                # own transcript is result.stdout.
+                Path(out_path).write_text("inferior said hello\n")
+                Path(err_path).write_text(stderr_text)
+                captured["stubs"] = (Path(out_path), Path(err_path))
+                return MagicMock(
+                    stdout="(lldb) process launch\nProcess 1 stopped\n",
+                    stderr="", returncode=0,
+                )
+
+            with patch.object(
+                CrashAnalyser, "_write_debugger_script",
+                side_effect=fake_write_script,
+            ), patch(
+                "packages.binary_analysis.crash_analyser._sandbox_run",
+                side_effect=fake_sandbox_run,
+            ):
+                output = analyser._run_lldb_analysis(input_file)
+            return output, captured["stubs"]
+
+    def test_inferior_stderr_read_into_analysis_output(self):
+        output, (out_stub, err_stub) = (
+            self._run_lldb_with_inferior_stderr(ASAN_REPORT))
+        # LLDB's own transcript is still there...
+        self.assertIn("Process 1 stopped", output)
+        # ...and the inferior's streams now ride along, labelled.
+        self.assertIn("=== inferior stdout ===", output)
+        self.assertIn("inferior said hello", output)
+        self.assertIn("=== inferior stderr ===", output)
+        self.assertIn("AddressSanitizer: heap-buffer-overflow", output)
+        # Cleanup contract unchanged: the stubs are still removed.
+        self.assertFalse(out_stub.exists())
+        self.assertFalse(err_stub.exists())
+
+    def test_inferior_read_is_size_capped(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            stub = Path(td) / "stub"
+            stub.write_text("x" * (CrashAnalyser._INFERIOR_OUTPUT_CAP + 500))
+            text = CrashAnalyser._read_inferior_capped(
+                stub, CrashAnalyser._INFERIOR_OUTPUT_CAP)
+            self.assertEqual(len(text), CrashAnalyser._INFERIOR_OUTPUT_CAP)
+        # Missing stub degrades to empty, never raises.
+        self.assertEqual(
+            CrashAnalyser._read_inferior_capped(
+                Path("/nonexistent/stub"), 10),
+            "",
+        )
+
+    def _wired_analyser(self, debugger_output: str) -> CrashAnalyser:
+        analyser = _bare_analyser()
+        analyser.binary = Path("/nonexistent/bin")
+        analyser._debugger = "gdb"
+        analyser._get_binary_info = lambda: {}
+        analyser._detect_asan_binary = lambda: False
+        analyser._run_gdb_analysis = lambda input_file: debugger_output
+        analyser._get_disassembly = lambda addr: ""
+        analyser._get_memory_layout_info = lambda: {}
+        analyser._detect_environmental_crash = lambda ctx: {}
+        analyser._analyze_memory_regions = lambda ctx: {}
+        return analyser
+
+    def test_analyse_crash_parses_asan_from_debugger_output(self):
+        """ASan text arriving via the debugger path must reach the
+        analysis record (binary_info.asan_output + crash_type)."""
+        analyser = self._wired_analyser("(gdb) run\n" + ASAN_REPORT)
+        context = analyser.analyse_crash(
+            "c1", Path("/nonexistent/input"), "06")
+        self.assertIn("AddressSanitizer", context.binary_info["asan_output"])
+        self.assertEqual(context.crash_type, "heap_buffer_overflow")
+        self.assertIn("parse_record", context.stack_trace)
+
+    def test_direct_asan_run_takes_precedence(self):
+        """When the dedicated ASan re-run already captured a report,
+        the debugger-path text must not overwrite it."""
+        analyser = self._wired_analyser("(gdb) run\n" + ASAN_REPORT)
+        analyser._detect_asan_binary = lambda: True
+        direct_report = ASAN_REPORT.replace(
+            "heap-buffer-overflow", "use-after-free")
+        analyser._run_asan_analysis = lambda input_file: direct_report
+        context = analyser.analyse_crash(
+            "c1", Path("/nonexistent/input"), "06")
+        self.assertEqual(context.crash_type, "use_after_free")
+        self.assertIn(
+            "use-after-free", context.binary_info["asan_output"])
+
+
 if __name__ == "__main__":
     unittest.main()
