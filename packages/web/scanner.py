@@ -2136,6 +2136,7 @@ class WebScanner:
             result = oracle.verify(
                 url, param, finding.get('payload', ''),
                 finding.get('vulnerability_type', ''), method,
+                base_data=finding.get('base_data') or None,
             )
             finding['verification'] = {
                 'status': result.status,

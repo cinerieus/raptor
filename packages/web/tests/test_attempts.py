@@ -154,7 +154,8 @@ class _StubOracle:
         self.requests_used = 0
         self.errors = 0
 
-    def verify(self, url, param, payload, vuln_type, method="GET"):
+    def verify(self, url, param, payload, vuln_type, method="GET",
+               base_data=None):
         self.requests_used += 3
         return _result(VERIFIED)
 

@@ -417,6 +417,12 @@ class WebFuzzer:
                     'url': url,
                     'parameter': param_name,
                     'payload': payload,
+                    # Sibling form fields, carried so Phase 6v replay
+                    # legs send the same request shape that confirmed
+                    # the hit — replaying the fuzzed field alone fails
+                    # multi-field/CSRF form validation and demotes the
+                    # finding to inconclusive.
+                    'base_data': dict(base_data or {}),
                     'payload_source': self._payload_source(payload),
                     'vulnerability_type': vuln_type,
                     'method': method.upper(),

@@ -492,5 +492,48 @@ class TestThreeGateVetoes(unittest.TestCase):
         self.assertEqual(finding["oracle_signal"], "xss_reflected_unescaped")
 
 
+class TestVerificationCarriesSiblingFields(unittest.TestCase):
+    def test_verify_findings_passes_hit_base_data_to_oracle(self):
+        """Phase 6v must replay the full detection-time field set —
+        a bare {param: payload} replay fails multi-field/CSRF form
+        validation and demotes every such hit to inconclusive."""
+        from packages.web.oracle import VerificationResult
+
+        seen: dict[str, object] = {}
+
+        class _RecordingOracle:
+            def __init__(self, client):
+                self.requests_used = 0
+                self.errors = 0
+
+            def verify(self, url, param, payload, vuln_type,
+                       method="GET", base_data=None):
+                seen["base_data"] = base_data
+                return VerificationResult(
+                    status="inconclusive", evidence_type="sqli_error",
+                )
+
+        hit = {
+            "endpoint": "http://example.com/form",
+            "parameter": "q",
+            "payload": "' OR 1=1--",
+            "vulnerability_type": "sqli",
+            "method": "POST",
+            "attack_vector": "request_body",
+            "base_data": {"csrf": "tok123", "email": "a@b.invalid"},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            with patch(
+                "packages.web.oracle.VerificationOracle", _RecordingOracle,
+            ):
+                scanner._verify_findings(
+                    [(hit, hit["endpoint"], "q", "POST")],
+                )
+        self.assertEqual(
+            seen["base_data"], {"csrf": "tok123", "email": "a@b.invalid"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
