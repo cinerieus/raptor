@@ -572,11 +572,14 @@ _KERNEL_SOURCE_MARKERS = (
     "#include <linux/", "#include <asm/", "EXPORT_SYMBOL",
     "MODULE_LICENSE", "MODULE_AUTHOR", "SPDX-License-Identifier: GPL-2.0",
 )
-_kernel_file_cache: dict[str, bool] = {}
+#: Keyed (target_path, relative file path) — the relative path alone
+#: collides across targets in one process (a kernel verdict from one
+#: run bled into the next target's identically-named file).
+_kernel_file_cache: dict[tuple[str, str], bool] = {}
 
 
 def _file_has_kernel_markers(ctx: dict[str, Any]) -> bool:
-    """Sniff the file head for kernel markers (cached per file).
+    """Sniff the file head for kernel markers (cached per target+file).
 
     Falls back to True (trust the path hint) when the file can't be
     read — the old, over-inclusive behaviour, chosen because kernel
@@ -584,7 +587,8 @@ def _file_has_kernel_markers(ctx: dict[str, Any]) -> bool:
     rare unreadable userland file.
     """
     fp = ctx.get("file", "")
-    cached = _kernel_file_cache.get(fp)
+    cache_key = (str(ctx.get("target_path") or ""), fp)
+    cached = _kernel_file_cache.get(cache_key)
     if cached is not None:
         return cached
     result = True
@@ -596,7 +600,7 @@ def _file_has_kernel_markers(ctx: dict[str, Any]) -> bool:
             if text is not None:
                 head = text[:4096]
                 result = any(m in head for m in _KERNEL_SOURCE_MARKERS)
-    _kernel_file_cache[fp] = result
+    _kernel_file_cache[cache_key] = result
     return result
 
 
