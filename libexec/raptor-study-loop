@@ -1259,8 +1259,13 @@ def main() -> int:
                 exit_code = rc
 
     # --- Attach key files, overview, and struct definitions to domain model ---
+    # Gated on success: on a failed run domain-model.json may be the
+    # PRIOR canonical model copied in by _load_prior_knowledge — the
+    # attach/synthesis pass would decorate a stale model with this
+    # run's key files and pay the synthesis LLM call for a run that
+    # already failed.
     dm_path = output_dir / "domain-model.json"
-    if dm_path.is_file():
+    if exit_code == 0 and dm_path.is_file():
         try:
             dm_data = load_json(
                 dm_path, strict=True, max_bytes=_MAX_STUDY_ARTIFACT_BYTES,
@@ -1391,8 +1396,15 @@ def main() -> int:
             q = item.get("question", "")[:100]
             print(f"  - {q}", file=sys.stderr)
 
-    _promote_to_project(output_dir, concepts_dir)
-    _store_in_sage(output_dir, str(target))
+    # Promotion and SAGE storage are durable-store WRITES — a failed
+    # run must not push its (possibly prior/stale) domain model over
+    # the project canonical copy or into persistent memory.
+    if exit_code == 0:
+        _promote_to_project(output_dir, concepts_dir)
+        _store_in_sage(output_dir, str(target))
+    else:
+        print("study-loop: run failed — skipping project promotion "
+              "and SAGE store", file=sys.stderr)
 
     return exit_code
 

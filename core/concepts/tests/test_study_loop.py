@@ -484,3 +484,57 @@ class TestCompileInvariantsExitCode:
 
     def test_compile_success_exits_zero(self, tmp_path):
         assert self._run_main(tmp_path, compile_rc=0) == 0
+
+
+class TestFailedRunDoesNotPromote:
+    """A failed run must not promote its domain model (possibly the
+    PRIOR canonical copied in by _load_prior_knowledge) over the
+    project store, nor store it in SAGE, nor pay the attach/synthesis
+    pass."""
+
+    def _run_main(self, tmp_path, prep_rc: int) -> tuple[int, Path]:
+        target = tmp_path / "src"
+        target.mkdir()
+        project = tmp_path / "proj"
+        out = project / "run_001"
+        out.mkdir(parents=True)
+        concepts = project / "concepts"
+        concepts.mkdir()
+        # Prior canonical model — _load_prior_knowledge copies it into
+        # the run dir, so a failed run HAS a domain-model.json.
+        (concepts / "domain-model.json").write_text(
+            json.dumps({"concepts": [{"id": "prior"}],
+                        "invariants": [], "contracts": []}),
+            encoding="utf-8",
+        )
+        (out / "study-list.json").write_text(
+            json.dumps({"items": []}), encoding="utf-8",
+        )
+
+        def fake_run(cmd, *, verbose=False):
+            if "raptor-study-prep" in cmd[1]:
+                return prep_rc
+            return 0
+
+        argv = ["raptor-study-loop", str(target), str(out),
+                "--identifier", "some_func"]
+        with patch.object(_loop, "_run", side_effect=fake_run), \
+                patch.object(_loop, "_store_in_sage") as sage, \
+                patch.object(_loop, "_promote_to_project") as promote, \
+                patch.object(sys, "argv", argv):
+            rc = _loop.main()
+        self._sage_called = sage.called
+        self._promote_called = promote.called
+        return rc, concepts
+
+    def test_failed_run_skips_promotion_and_sage(self, tmp_path):
+        rc, _concepts = self._run_main(tmp_path, prep_rc=7)
+        assert rc == 7
+        assert not self._promote_called
+        assert not self._sage_called
+
+    def test_successful_run_still_promotes(self, tmp_path):
+        rc, _concepts = self._run_main(tmp_path, prep_rc=0)
+        assert rc == 0
+        assert self._promote_called
+        assert self._sage_called
