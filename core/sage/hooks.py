@@ -1769,6 +1769,11 @@ def store_study_concepts(
     if client is None:
         return 0
 
+    # Shared evidence-row grammar: the core.concepts.study parsers
+    # re-derive file/line/hash from this exact shape (drift = silent
+    # loss of the cross-run study skip).
+    from core.concepts.model import sage_evidence_row
+
     stored = 0
     repo_name = Path(repo_path).name
     scope_label = study_scope or repo_name
@@ -1804,9 +1809,7 @@ def store_study_concepts(
             evidence_files = set()
             evidence_hashes = []
             for ev in concept.evidence:
-                loc = f"{ev.file}:{ev.line}" if ev.line else ev.file
-                h_tag = f" [h={ev.hash}]" if getattr(ev, "hash", None) else ""
-                parts.append(f"  Evidence ({ev.type}): {loc}{h_tag} — {ev.observation}")
+                parts.append(sage_evidence_row(ev))
                 if ev.file:
                     evidence_files.add(ev.file)
                 if getattr(ev, "hash", None):

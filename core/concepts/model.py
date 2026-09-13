@@ -36,6 +36,24 @@ class Evidence:
     quote: str | None = None
 
 
+def sage_evidence_row(ev: Evidence) -> str:
+    """Render one evidence line of a SAGE study-concept row.
+
+    THE writer half of the SAGE evidence grammar. The parsers in
+    ``core.concepts.study`` (``_SAGE_EVIDENCE_RE``,
+    ``_EVIDENCE_HASH_RE`` and the staleness verifier built on them)
+    re-derive ``(type, file, line, hash, observation)`` from exactly
+    this shape, so the writer (``core.sage.hooks.store_study_concepts``)
+    must render through here: a writer/parser drift silently disables
+    the cross-run study skip optimisation (the parse fails closed to
+    the seed path). Round-trip covered by
+    ``core/concepts/tests/test_sage_row_grammar.py``.
+    """
+    loc = f"{ev.file}:{ev.line}" if ev.line else ev.file
+    h_tag = f" [h={ev.hash}]" if ev.hash else ""
+    return f"  Evidence ({ev.type}): {loc}{h_tag} — {ev.observation}"
+
+
 # ------------------------------------------------------------------
 # Concept
 # ------------------------------------------------------------------
