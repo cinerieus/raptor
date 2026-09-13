@@ -373,6 +373,44 @@ class TestPositionalLinearity:
         key = _get_site_key(idx, src)
         assert key is not None and key.startswith("pos@")
 
+    def test_op_under_return_statement_keeps_linearity(self):
+        # A return statement directly under the block executes exactly
+        # once per block entry — an op inside it must not void
+        # positional resolution for the receiver's OTHER sites.
+        idx, src = _index(
+            "        ArrayList<String> l = new ArrayList<>();\n"
+            '        l.add("a");\n'
+            "        l.add(x);\n"
+            "        String bar = l.get(0); // READ\n"
+            "        return l.get(1);\n"
+        )
+        key = _get_site_key(idx, src)
+        assert key is not None and key.startswith("pos@")
+
+    def test_return_under_braceless_if_still_refuses(self):
+        # Two-direction: a return hanging off a braceless if body is
+        # conditional — its op must keep voiding the positional proof.
+        idx, src = _index(
+            "        ArrayList<String> l = new ArrayList<>();\n"
+            '        l.add("a");\n'
+            "        l.add(x);\n"
+            "        if (x != null) return l.remove(0);\n"
+            "        String bar = l.get(0); // READ\n"
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_ternary_under_return_still_refuses(self):
+        # Two-direction: ternary arms under the return execute
+        # conditionally — not a linear wrapper.
+        idx, src = _index(
+            "        ArrayList<String> l = new ArrayList<>();\n"
+            '        l.add("a");\n'
+            "        l.add(x);\n"
+            "        String bar = l.get(0); // READ\n"
+            '        return x != null ? l.remove(0) : "";\n'
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
 
 # ---------------------------------------------------------------------------
 # Happy paths

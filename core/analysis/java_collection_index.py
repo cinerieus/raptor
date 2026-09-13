@@ -135,9 +135,17 @@ def _int_literal(n) -> int | None:
 
 # Statement kinds that execute exactly once when their enclosing block
 # runs — the only shapes _linear_block_id accepts as the op's direct
-# statement under the block.
+# statement under the block. ``return_statement`` qualifies: a return
+# directly under the block runs exactly once per block entry (it ENDS
+# the entry, and no later op of the same receiver can execute after
+# it), while a return hanging off a braceless if/loop never reaches
+# this check — its parent is the *_statement, not the block. Omitting
+# it demoted the WHOLE receiver to ALL_ELEMENTS the moment any op sat
+# under a return (precision-only loss, but a broader cut than the
+# braceless-body hazard this allowlist exists for).
 _LINEAR_STATEMENTS = frozenset({
     "expression_statement", "local_variable_declaration",
+    "return_statement",
 })
 
 # Expression-level wrappers an op may sit under between its own node
