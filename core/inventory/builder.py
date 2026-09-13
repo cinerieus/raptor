@@ -961,10 +961,26 @@ def build_inventory(
 
     # Record limitations when extraction is incomplete
     limitations = []
-    from .extractors import _TS_AVAILABLE
+    from .extractors import _TS_AVAILABLE, _TS_PROBE_LANGUAGES, _ts_language
     if not _TS_AVAILABLE:
         limitations.append("globals not extracted (tree-sitter was not available)")
         limitations.append("SLOC counts used regex fallback (less accurate)")
+    # Per-language honesty: a language the tree-sitter loader knows but
+    # whose grammar isn't importable fell back to regex extraction for
+    # EVERY file of that language. The generic "globals not extracted"
+    # note above only fires when tree-sitter itself is missing, so a
+    # missing single grammar (e.g. tree_sitter_kotlin) previously left
+    # no signal at all — downstream coverage read as trivially complete
+    # over functions the build never saw. Python is exempt (its stdlib
+    # ast fallback is full-fidelity).
+    for lang in sorted({f.get('language') for f in files_info} - {None}):
+        if lang == 'python' or lang not in _TS_PROBE_LANGUAGES:
+            continue
+        if not _TS_AVAILABLE or _ts_language(lang) is None:
+            limitations.append(
+                f"{lang}: tree-sitter grammar not installed — regex "
+                "fallback (reduced function recall, no spans/globals, "
+                "call graph unavailable)")
 
     inventory = {
         'generated_at': datetime.now(timezone.utc).isoformat(),

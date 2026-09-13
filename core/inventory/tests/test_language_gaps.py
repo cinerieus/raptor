@@ -282,3 +282,99 @@ def test_shebang_probe_still_reads_regular_files(tmp_path):
     other = tmp_path / "run"
     other.write_text("#!/bin/sh\necho hi\n")
     assert detect_language_from_shebang(str(other)) == "shell"
+
+
+# ---------------------------------------------------------------------------
+# Grammar-absent regex fallback (Kotlin fun / paren-less Ruby defs)
+# ---------------------------------------------------------------------------
+
+
+def _force_grammars_absent(monkeypatch):
+    """Simulate a host with tree-sitter installed but no grammar
+    packages: the loader finds nothing, and the per-thread parser cache
+    is emptied so previously-cached parsers can't serve the language."""
+    from core.inventory import extractors
+
+    monkeypatch.setattr(extractors, "_ts_language", lambda _lang: None)
+    monkeypatch.setattr(extractors._TS_PARSER_LOCAL, "parsers", {},
+                        raising=False)
+
+
+def test_kotlin_fun_extracted_by_regex_fallback(monkeypatch):
+    """`fun` was missing from the GenericExtractor keyword alternation,
+    so a grammar-less host extracted ZERO functions from Kotlin."""
+    from core.inventory.extractors import extract_functions
+
+    _force_grammars_absent(monkeypatch)
+    src = (
+        'fun greet(name: String): String {\n'
+        '    return "hi " + name\n'
+        '}\n'
+        '\n'
+        'private fun main(args: Array<String>) {\n'
+        '    println(greet("x"))\n'
+        '}\n'
+    )
+    names = {f.name for f in extract_functions("a.kt", "kotlin", src)}
+    assert {"greet", "main"} <= names
+
+
+def test_ruby_parenless_defs_extracted_by_regex_fallback(monkeypatch):
+    """Idiomatic Ruby defines methods without parentheses; the generic
+    pattern's mandatory `(` matched none of them."""
+    from core.inventory.extractors import extract_functions
+
+    _force_grammars_absent(monkeypatch)
+    src = (
+        "class Order\n"
+        "  def total\n"
+        "    @items.sum\n"
+        "  end\n"
+        "\n"
+        "  def self.create\n"
+        "  end\n"
+        "\n"
+        "  def valid?\n"
+        "  end\n"
+        "\n"
+        "  def apply!(coupon)\n"
+        "  end\n"
+        "end\n"
+        "# def commented_out\n"
+    )
+    names = {f.name for f in extract_functions("a.rb", "ruby", src)}
+    assert {"total", "create", "valid?", "apply!"} <= names
+    assert "commented_out" not in names
+
+
+def test_missing_grammar_records_per_language_limitation(
+        tmp_path, monkeypatch):
+    """A language whose grammar can't load must leave a loud
+    per-language note in inventory['limitations'] — previously the only
+    signal was the generic tree-sitter-missing line, which never fires
+    when tree-sitter itself is importable."""
+    _force_grammars_absent(monkeypatch)
+    (tmp_path / "app.kt").write_text(
+        'fun main() {\n    println("x")\n}\n')
+    (tmp_path / "order.rb").write_text("def total\n  1\nend\n")
+    out = tmp_path / "out"
+    inv = build_inventory(str(tmp_path), output_dir=str(out),
+                          parallel=False)
+
+    lims = inv.get("limitations", [])
+    assert any(note.startswith("kotlin:") for note in lims), lims
+    assert any(note.startswith("ruby:") for note in lims), lims
+    # Fallback still extracted the functions themselves.
+    assert "main" in _items(inv, "app.kt")
+    assert "total" in _items(inv, "order.rb")
+
+
+def test_no_limitation_note_when_grammar_present(tmp_path):
+    """With the grammar importable the note must NOT appear."""
+    pytest.importorskip("tree_sitter_ruby")
+    (tmp_path / "order.rb").write_text("def total\n  1\nend\n")
+    out = tmp_path / "out"
+    inv = build_inventory(str(tmp_path), output_dir=str(out),
+                          parallel=False)
+    assert not any(
+        note.startswith("ruby:") for note in inv.get("limitations", []))

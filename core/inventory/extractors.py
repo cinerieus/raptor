@@ -1718,10 +1718,22 @@ class GitHubWorkflowExtractor:
 
 
 class GenericExtractor:
-    """Generic fallback extractor using common patterns."""
+    """Generic fallback extractor using common patterns.
+
+    Keyword alternation covers the ``<keyword> name(`` definition shape
+    across the languages that route here when no grammar and no
+    dedicated regex extractor exist: ``fun`` is Kotlin (without it a
+    grammar-less host inventoried whole Kotlin codebases as
+    interstitial-only — zero functions), ``fn`` Rust, ``func``
+    Go/Swift, ``def`` Python/Scala. Definitions whose name is not
+    directly followed by ``(`` (Kotlin extension/generic functions,
+    paren-less Ruby defs — Ruby has its own extractor below) are still
+    missed; the builder records a per-language limitation when a
+    language falls back here.
+    """
 
     PATTERNS: ClassVar[list[str]] = [
-        r'(?:function|def|func|fn|sub)\s+(\w+)\s*\(',
+        r'(?:function|func|fun|fn|def|sub)\s+(\w+)\s*\(',
         r'(?:public|private|protected)?\s*(?:static)?\s*\w+\s+(\w+)\s*\([^)]*\)\s*\{',
     ]
 
@@ -1739,6 +1751,42 @@ class GenericExtractor:
                         seen.add(name)
                     break
 
+        return functions
+
+
+class RubyExtractor:
+    """Regex fallback for Ruby when ``tree_sitter_ruby`` is absent.
+
+    Idiomatic Ruby defines methods WITHOUT parentheses (``def foo``),
+    which the GenericExtractor's mandatory ``(`` never matched — a
+    grammar-less host inventoried whole Ruby codebases as
+    interstitial-only. Anchored to line start (defs are statements),
+    tolerating ``self.`` singleton receivers and the ``?``/``!``/``=``
+    name suffixes. No ``line_end`` — Ruby closes blocks with ``end``,
+    which plain regex can't pair reliably; lookup falls back to fuzzy
+    matching, same as the other span-less fallbacks.
+    """
+
+    _DEF_RE = re.compile(r'^\s*def\s+(?:self\.)?([A-Za-z_]\w*[?!=]?)')
+
+    def extract(self, _filepath: str, content: str) -> list[FunctionInfo]:
+        functions: list[FunctionInfo] = []
+        seen: set = set()
+        for i, line in enumerate(content.split('\n'), 1):
+            if line.lstrip().startswith('#'):
+                continue
+            m = self._DEF_RE.match(line)
+            if not m:
+                continue
+            name = m.group(1)
+            if name in seen:
+                continue
+            functions.append(FunctionInfo(
+                name=name,
+                line_start=i,
+                signature=f"def {name}",
+            ))
+            seen.add(name)
         return functions
 
 
@@ -2909,7 +2957,7 @@ _REGEX_EXTRACTORS = {
     'typescript': JavaScriptExtractor(),
     'tsx': JavaScriptExtractor(),
     'csharp': GenericExtractor(),
-    'ruby': GenericExtractor(),
+    'ruby': RubyExtractor(),
     'php': GenericExtractor(),
     'c': CExtractor(),
     'cpp': CExtractor(),
