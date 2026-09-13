@@ -491,19 +491,48 @@ def _extract_statement_payload(
     return calls, frozenset(defs), frozenset(uses), call_sites
 
 
+# Label paren-content length cap: long conditions truncate rather than
+# bloat every node repr; downstream reference extraction only loses
+# names past the cut (a condition-text consumer degrades to fewer
+# matched guards — the not-covered direction).
+_LABEL_EXPR_MAX = 120
+
+
+def _expr_text(expr: ast.AST) -> str | None:
+    """Unparsed source of ``expr``, truncated; None when unparsing
+    fails (synthetic/malformed nodes)."""
+    try:
+        text = ast.unparse(expr)
+    except Exception:  # noqa: BLE001 — label rendering must never abort a build
+        return None
+    text = " ".join(text.split())
+    return text[:_LABEL_EXPR_MAX]
+
+
 def _short_label(stmt: ast.stmt) -> str:
-    """Brief human-facing rendering of a statement for diagnostics."""
+    """Brief human-facing rendering of a statement for diagnostics.
+
+    Conditional headers embed their CONDITION text — ``If (x > 0)`` —
+    not just the line number: cfg_conditions/lifecycle_collector parse
+    the paren content of ``If``/``While``/``For`` labels as the guard
+    expression (same contract as the C/C++ and Java builders), and
+    :class:`PyCFGNode` documents that shape. A positional-only label
+    would hand those consumers ``line N`` as the guard text.
+    """
     kind = type(stmt).__name__
-    if isinstance(stmt, ast.If):
-        return f"If (line {stmt.lineno})"
-    if isinstance(stmt, ast.While):
-        return f"While (line {stmt.lineno})"
+    if isinstance(stmt, (ast.If, ast.While)):
+        cond = _expr_text(stmt.test)
+        if cond is not None:
+            return f"{kind} ({cond})"
+        return f"{kind} (line {stmt.lineno})"
     if isinstance(stmt, ast.For):
+        target = _expr_text(stmt.target)
+        it = _expr_text(stmt.iter)
+        if target is not None and it is not None:
+            return f"For ({target} in {it})"
         return f"For (line {stmt.lineno})"
     if isinstance(stmt, ast.Try):
         return f"Try (line {stmt.lineno})"
-    if isinstance(stmt, (ast.Return, ast.Raise)):
-        return f"{kind} (line {stmt.lineno})"
     return f"{kind} (line {stmt.lineno})"
 
 

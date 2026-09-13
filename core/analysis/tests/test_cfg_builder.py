@@ -360,6 +360,43 @@ def test_return_terminates_flow():
 
 
 # ---------------------------------------------------------------------------
+# Condition labels
+# ---------------------------------------------------------------------------
+
+
+def test_if_label_embeds_condition_text():
+    """cfg_conditions parses the paren content of If/While/For labels
+    as the guard expression — a positional-only label would hand it
+    'line N' as the condition."""
+    cfg = _cfg("def f(x):\n    if x > 0:\n        return x\n    return -x\n")
+    if_node = next(n for n in cfg.nodes() if n.label.startswith("If"))
+    assert if_node.label == "If (x > 0)"
+
+
+def test_while_label_embeds_condition_text():
+    cfg = _cfg("def f(x):\n    while x.ok():\n        step(x)\n    return x\n")
+    node = next(n for n in cfg.nodes() if n.label.startswith("While ("))
+    assert node.label == "While (x.ok())"
+
+
+def test_for_label_embeds_target_and_iter():
+    cfg = _cfg("def f(xs):\n    for x in xs:\n        use(x)\n    return 0\n")
+    node = next(
+        n for n in cfg.nodes()
+        if n.label.startswith("For (") and "exit" not in n.label
+    )
+    assert node.label == "For (x in xs)"
+
+
+def test_long_condition_label_truncated():
+    cond = " or ".join(f"flag_{i}" for i in range(40))
+    cfg = _cfg(f"def f():\n    if {cond}:\n        return 1\n    return 0\n")
+    node = next(n for n in cfg.nodes() if n.label.startswith("If ("))
+    from core.analysis.cfg_builder import _LABEL_EXPR_MAX
+    assert len(node.label) <= len("If ()") + _LABEL_EXPR_MAX
+
+
+# ---------------------------------------------------------------------------
 # match statements
 # ---------------------------------------------------------------------------
 
