@@ -515,25 +515,85 @@ def _parse_section(
     return _parse_meta(meta_search), body.strip("\n")
 
 
+class AnnotationFileError(ValueError):
+    """An existing annotation file could not be read faithfully
+    (unreadable, undecodable, future-format, or content the parser
+    cannot account for).
+
+    Raised only by strict reads — the read-modify-write cycle inside
+    ``write_annotation`` / ``remove_annotation``. A write path that
+    treated such a file as empty would render only the new record and
+    atomically replace the file, silently destroying every prior
+    operator note; failing the write loudly leaves the original bytes
+    untouched for the operator to inspect or repair. Subclasses
+    ``ValueError`` so existing callers that surface write-validation
+    errors report this one the same way."""
+
+
+def _unaccounted_content(text: str) -> bool:
+    """Whether *text* carries content the section parser would drop.
+
+    A file our own writer produced always has at least one ``##``
+    section (the last removal deletes the file), so a non-empty file
+    that parses to zero sections is truncated, hand-mangled, or
+    foreign. Blank lines, the version marker, and ``# <label>`` lines
+    are the only shapes the renderer emits outside sections."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _VERSION_MARKER_RE.match(stripped):
+            continue
+        if stripped.startswith("# "):
+            continue
+        return True
+    return False
+
+
 def read_file_annotations(
-    base_dir: Path, source_file: str,
+    base_dir: Path, source_file: str, *, strict: bool = False,
 ) -> list[Annotation]:
     """Read all annotations for one source file. Returns an empty
-    list if no annotation file exists for the source path."""
+    list if no annotation file exists for the source path.
+
+    ``strict=False`` (default, read-only consumers): a corrupt or
+    unreadable file degrades to an empty result with a warning —
+    crashing the reader on a single bad file would block
+    ``iter_all_annotations`` across the whole tree.
+
+    ``strict=True`` (the write paths' read-modify-write cycle):
+    the same conditions raise :class:`AnnotationFileError` instead.
+    Fail-closed rationale: the writer re-renders the whole file from
+    what this function returns, so any content it cannot faithfully
+    account for — unreadable bytes, a future format version, or
+    non-empty text yielding zero sections — would be silently
+    destroyed by the subsequent atomic replace.
+    """
     path = annotation_path(base_dir, source_file)
-    if not path.exists():
-        return []
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        # Corrupt or unreadable annotation file — return empty rather
-        # than propagate. The caller can detect "no annotations" and
-        # decide what to do; crashing the reader on a single bad file
-        # would block iter_all_annotations across the whole tree.
+    except FileNotFoundError:
+        # Genuinely absent — the legitimate new-file path.
+        return []
+    except (OSError, UnicodeDecodeError) as e:
+        if strict:
+            msg = (
+                f"annotation file {path} is unreadable ({e}); refusing "
+                f"to rewrite it — inspect or repair the file (it may "
+                f"hold operator notes), then retry"
+            )
+            raise AnnotationFileError(msg) from e
+        logger.warning(
+            "annotation file %s unreadable (%s) — treating as empty",
+            path, e,
+        )
         return []
     # Detect format version. Files without a marker are legacy v1 —
     # parse permissively. Files with a future version emit a warning
-    # but still try (partial-results-better-than-nothing).
+    # but still try (partial-results-better-than-nothing). In strict
+    # mode a future version refuses instead: rewriting it with this
+    # version's renderer would destroy structure this parser cannot
+    # see.
     version_match = _VERSION_MARKER_RE.search(text)
     if version_match:
         try:
@@ -541,11 +601,26 @@ def read_file_annotations(
         except ValueError:
             version = CURRENT_VERSION
         if version > CURRENT_VERSION:
+            if strict:
+                msg = (
+                    f"annotation file {path} declares format version "
+                    f"{version} (writer supports up to "
+                    f"{CURRENT_VERSION}); refusing to rewrite it"
+                )
+                raise AnnotationFileError(msg)
             logger.warning(
                 "annotation file %s declares version %s (reader supports up to %s); attempting to parse anyway", path, version, CURRENT_VERSION
             )
+    sections = _split_sections(text)
+    if strict and not sections and _unaccounted_content(text):
+        msg = (
+            f"annotation file {path} is non-empty but no ## sections "
+            f"parse (truncated or hand-mangled?); refusing to rewrite "
+            f"it — inspect or repair the file, then retry"
+        )
+        raise AnnotationFileError(msg)
     out: list[Annotation] = []
-    for name, start, end in _split_sections(text):
+    for name, start, end in sections:
         meta, body = _parse_section(text, name, start, end)
         out.append(Annotation(
             file=source_file,
@@ -588,6 +663,11 @@ def write_annotation(
 
     Atomic via tempfile + rename — concurrent readers see either the
     pre-write or post-write content, never a partial rewrite.
+
+    Raises :class:`AnnotationFileError` (a ``ValueError``) when an
+    existing annotation file for ``ann.file`` cannot be read
+    faithfully — the write is refused so the rewrite can't silently
+    destroy the notes already on disk.
     """
     if overwrite not in _OVERWRITE_MODES:
         msg = (
@@ -614,12 +694,20 @@ def write_annotation(
     # it, two concurrent writers could each load state A, then write
     # A+B1 and A+B2 — one B is dropped. The lock serialises them.
     with _file_lock(path):
+        # Strict read: an unreadable/corrupt existing file raises
+        # AnnotationFileError here instead of reading as empty — the
+        # render below would otherwise atomically replace the file
+        # with just the new record, silently destroying every prior
+        # note (respect-manual included: a prior human note it cannot
+        # read is one it must not clobber).
+        existing = read_file_annotations(base_dir, ann.file, strict=True)
         if overwrite == "respect-manual":
-            prior = read_annotation(base_dir, ann.file, ann.function)
+            prior = next(
+                (a for a in existing if a.function == ann.function), None,
+            )
             if prior is not None and prior.metadata.get("source") == "human":
                 return None
 
-        existing = read_file_annotations(base_dir, ann.file)
         by_name = {a.function: a for a in existing}
         by_name[ann.function] = ann
         rendered = _render_file(ann.file, by_name.values())
@@ -645,7 +733,10 @@ def remove_annotation(
     """
     path = annotation_path(base_dir, source_file)
     with _file_lock(path):
-        existing = read_file_annotations(base_dir, source_file)
+        # Strict read — same fail-closed contract as write_annotation:
+        # a corrupt file must not be re-rendered (or unlinked) from a
+        # partial parse.
+        existing = read_file_annotations(base_dir, source_file, strict=True)
         if not any(a.function == function for a in existing):
             return False
         remaining = [a for a in existing if a.function != function]

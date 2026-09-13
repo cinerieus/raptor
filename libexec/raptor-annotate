@@ -574,7 +574,14 @@ def cmd_edit(opts: argparse.Namespace) -> int:
 
 def cmd_rm(opts: argparse.Namespace) -> int:
     base = _resolve_base(opts.base)
-    removed = remove_annotation(base, opts.file, opts.function)
+    try:
+        removed = remove_annotation(base, opts.file, opts.function)
+    except ValueError as e:
+        # Covers AnnotationFileError: a corrupt/unreadable annotation
+        # file refuses the rewrite rather than dropping notes it
+        # couldn't parse. Surface the reason instead of a traceback.
+        sys.stderr.write(f"raptor-annotate: {e}\n")
+        return 2
     if not removed:
         sys.stderr.write(
             f"raptor-annotate: no annotation for "

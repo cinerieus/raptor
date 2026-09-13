@@ -65,6 +65,7 @@ from .provenance import (
     is_human_grade,
 )
 from .storage import (
+    AnnotationFileError,
     annotation_file_mtime,
     annotation_path,
     compute_function_hash,
@@ -83,6 +84,7 @@ __all__ = [
     "PROVENANCE_KEYS",
     "STAMP_ERA_START",
     "Annotation",
+    "AnnotationFileError",
     "annotation_file_mtime",
     "annotation_path",
     "classify_provenance",

@@ -986,3 +986,42 @@ class TestBodyForgeryRejected:
         text = (tmp_path / "src" / "a.py.md").read_text()
         assert "<!-- annotations-version:" in text
         assert "## f1" in text
+
+
+# ---------------------------------------------------------------------------
+# corrupt annotation file (regression: next add silently destroyed notes)
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptFileAddRefused:
+    """One stray non-UTF-8 byte in an annotation file made the next
+    ``add`` read it as empty and atomically replace it — silent loss
+    of every operator note. The CLI must refuse with a clear error and
+    leave the bytes untouched."""
+
+    def test_add_refuses_and_preserves_original_bytes(self, tmp_path):
+        r = _run("add", "src/a.py", "op_note", "-m", "operator note",
+                 "--base", str(tmp_path))
+        assert r.returncode == 0, r.stderr
+        md = tmp_path / "src" / "a.py.md"
+        corrupted = md.read_bytes() + b"\xff\xfe"
+        md.write_bytes(corrupted)
+
+        r = _run("add", "src/a.py", "other_fn", "-m", "agent note",
+                 "--base", str(tmp_path))
+        assert r.returncode != 0
+        assert "refusing" in r.stderr
+        assert md.read_bytes() == corrupted
+
+    def test_rm_refuses_on_corrupt_file(self, tmp_path):
+        r = _run("add", "src/a.py", "op_note", "-m", "operator note",
+                 "--base", str(tmp_path))
+        assert r.returncode == 0, r.stderr
+        md = tmp_path / "src" / "a.py.md"
+        corrupted = md.read_bytes() + b"\xff\xfe"
+        md.write_bytes(corrupted)
+
+        r = _run("rm", "src/a.py", "op_note", "--base", str(tmp_path))
+        assert r.returncode != 0
+        assert "refusing" in r.stderr
+        assert md.read_bytes() == corrupted

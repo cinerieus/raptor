@@ -14,6 +14,8 @@ Covers:
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from core.annotations import (
@@ -670,3 +672,154 @@ class TestFunctionNameEdgeWhitespace:
         assert len(victims) == 1
         assert victims[0].body == "operator note"
         assert is_human_grade(victims[0].metadata)
+
+
+# ---------------------------------------------------------------------------
+# Corrupt existing file: writes fail closed (regression: silent data loss)
+# ---------------------------------------------------------------------------
+
+
+class TestCorruptFileWritesFailClosed:
+    """A corrupt/unreadable annotation file used to read as EMPTY
+    inside the read-modify-write cycle, so the next add re-rendered
+    only the new record and atomically replaced the file — one stray
+    non-UTF-8 byte silently destroyed every operator note in it, and
+    ``respect-manual`` failed open. Writes must refuse instead,
+    leaving the original bytes untouched for inspection."""
+
+    def _seed_human_note(self, tmp_path):
+        from core.annotations import AnnotationFileError  # noqa: F401
+        write_annotation(tmp_path, Annotation(
+            file="b.py", function="op_note", body="operator note",
+            metadata={"source": "human", "provenance": "interactive-tty",
+                      "tty": "stdin"},
+        ))
+        return annotation_path(tmp_path, "b.py")
+
+    def test_binary_garbage_refuses_add_and_preserves_bytes(self, tmp_path):
+        from core.annotations import AnnotationFileError
+        path = self._seed_human_note(tmp_path)
+        corrupted = path.read_bytes() + b"\xff\xfe"
+        path.write_bytes(corrupted)
+        with pytest.raises(AnnotationFileError):
+            write_annotation(tmp_path, Annotation(
+                file="b.py", function="other_fn", body="agent note",
+                metadata={"source": "agent"},
+            ))
+        assert path.read_bytes() == corrupted
+
+    def test_respect_manual_fails_closed_on_corrupt_file(self, tmp_path):
+        """The exact repro: one invalid byte, then a respect-manual add
+        of a DIFFERENT function wiped the human note without warning."""
+        from core.annotations import AnnotationFileError
+        path = self._seed_human_note(tmp_path)
+        corrupted = path.read_bytes() + b"\xff\xfe"
+        path.write_bytes(corrupted)
+        with pytest.raises(AnnotationFileError):
+            write_annotation(tmp_path, Annotation(
+                file="b.py", function="other_fn", body="agent note",
+                metadata={"source": "agent"},
+            ), overwrite="respect-manual")
+        assert path.read_bytes() == corrupted
+
+    def test_truncated_file_refuses_add(self, tmp_path):
+        """ASCII-boundary truncation still decodes but parses to zero
+        sections — content we cannot account for must not be replaced."""
+        from core.annotations import AnnotationFileError
+        path = self._seed_human_note(tmp_path)
+        truncated = path.read_bytes()[:20]
+        path.write_bytes(truncated)
+        with pytest.raises(AnnotationFileError):
+            write_annotation(tmp_path, Annotation(
+                file="b.py", function="other_fn", body="x",
+            ))
+        assert path.read_bytes() == truncated
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0, reason="root bypasses file permissions",
+    )
+    def test_permission_denied_refuses_add(self, tmp_path):
+        from core.annotations import AnnotationFileError
+        path = self._seed_human_note(tmp_path)
+        original = path.read_bytes()
+        path.chmod(0o000)
+        try:
+            with pytest.raises(AnnotationFileError):
+                write_annotation(tmp_path, Annotation(
+                    file="b.py", function="other_fn", body="x",
+                ))
+        finally:
+            path.chmod(0o644)
+        assert path.read_bytes() == original
+
+    def test_future_format_version_refuses_add(self, tmp_path):
+        """Rewriting a future-version file with this writer's renderer
+        could destroy structure this parser cannot see."""
+        from core.annotations import AnnotationFileError
+        path = annotation_path(tmp_path, "b.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            "<!-- annotations-version: 99 -->\n# b.py\n\n"
+            "## f\n<!-- meta: source=human -->\n\nnote\n"
+        )
+        path.write_text(content)
+        with pytest.raises(AnnotationFileError):
+            write_annotation(tmp_path, Annotation(
+                file="b.py", function="g", body="x",
+            ))
+        assert path.read_text() == content
+        # The permissive read path still parses it (warn-and-try).
+        assert len(read_file_annotations(tmp_path, "b.py")) == 1
+
+    def test_prose_only_file_refuses_add(self, tmp_path):
+        """Decodable text with zero ## sections is unattributable —
+        a rewrite would drop it wholesale."""
+        from core.annotations import AnnotationFileError
+        path = annotation_path(tmp_path, "b.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("hand-written operator prose, no sections\n")
+        with pytest.raises(AnnotationFileError):
+            write_annotation(tmp_path, Annotation(
+                file="b.py", function="f", body="x",
+            ))
+
+    def test_remove_refuses_on_corrupt_file(self, tmp_path):
+        from core.annotations import AnnotationFileError
+        path = self._seed_human_note(tmp_path)
+        corrupted = path.read_bytes() + b"\xff\xfe"
+        path.write_bytes(corrupted)
+        with pytest.raises(AnnotationFileError):
+            remove_annotation(tmp_path, "b.py", "op_note")
+        assert path.read_bytes() == corrupted
+
+    def test_fresh_file_add_succeeds(self, tmp_path):
+        assert write_annotation(tmp_path, Annotation(
+            file="new.py", function="f", body="x",
+        )) is not None
+
+    def test_empty_file_add_succeeds(self, tmp_path):
+        path = annotation_path(tmp_path, "b.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("")
+        assert write_annotation(tmp_path, Annotation(
+            file="b.py", function="f", body="x",
+        )) is not None
+        assert len(read_file_annotations(tmp_path, "b.py")) == 1
+
+    def test_header_only_file_add_succeeds(self, tmp_path):
+        """Version marker + label heading is fully accounted for —
+        nothing an add could destroy."""
+        path = annotation_path(tmp_path, "b.py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<!-- annotations-version: 1 -->\n# b.py\n\n")
+        assert write_annotation(tmp_path, Annotation(
+            file="b.py", function="f", body="x",
+        )) is not None
+
+    def test_nonstrict_read_still_degrades_to_empty(self, tmp_path):
+        """Read-only consumers keep the tolerant contract — one bad
+        file must not block iter_all_annotations over the tree."""
+        path = self._seed_human_note(tmp_path)
+        path.write_bytes(b"\xff\xfe garbage")
+        assert read_file_annotations(tmp_path, "b.py") == []
+        assert list(iter_all_annotations(tmp_path)) == []
