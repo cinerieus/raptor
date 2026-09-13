@@ -34,6 +34,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
+from ._base import build_purl
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -120,7 +121,7 @@ def _build_dep(
         is_lockfile=True,
         pin_style=pin_style,
         direct=False,
-        purl=_build_purl(name, version),
+        purl=build_purl("pypi", pep503_name(name), version),
         parser_confidence=_confidence(pin_style, version),
     )
 
@@ -133,12 +134,6 @@ def _strip_eq(value: Any) -> str | None:
         return v[2:].strip() or None
     return v or None
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{pep503_name(name)}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:

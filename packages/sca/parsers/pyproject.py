@@ -28,6 +28,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
+from ._base import build_purl
 from . import _safe_read, register
 from .requirements import _spec_bounds
 
@@ -256,7 +257,7 @@ def _from_pep508(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(req.name, version),
+        purl=build_purl("pypi", pep503_name(req.name), version),
         parser_confidence=_confidence_for_pep508(pin_style, version),
         version_floor=version_floor,
         version_ceiling=version_ceiling,
@@ -302,7 +303,7 @@ def _from_poetry(
             is_lockfile=False,
             pin_style=pin_style,
             direct=True,
-            purl=_build_purl(name, version),
+            purl=build_purl("pypi", pep503_name(name), version),
             parser_confidence=Confidence(
                 "medium",
                 reason="Poetry multi-constraint entry; first match recorded",
@@ -323,7 +324,7 @@ def _from_poetry(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(name, version),
+        purl=build_purl("pypi", pep503_name(name), version),
         parser_confidence=_confidence_for_poetry(pin_style, version),
         version_floor=version_floor,
         version_ceiling=version_ceiling,
@@ -425,12 +426,6 @@ def _confidence_for_poetry(
         return Confidence("medium", reason="Poetry wildcard version")
     return Confidence("high", reason="Poetry tool table")
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{pep503_name(name)}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 register(filenames=["pyproject.toml"])(parse)

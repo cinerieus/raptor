@@ -34,6 +34,7 @@ import re
 from xml.etree import ElementTree as _ET
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -308,7 +309,7 @@ def _build_msbuild_dep(
     ``cpm_global`` deps round-trip through the csproj rewriter, which
     finds no ``Version=`` attribute and emits no patch.
     """
-    purl = _build_purl(name, version)
+    purl = build_purl(_PURL_TYPE, name, version)
     extra = dict(source_extra) if source_extra else {}
     extra["origin"] = source_origin
     if resolved_in is not None:
@@ -546,7 +547,7 @@ def parse_packages_config(path: Path) -> list[Dependency]:
         floor, ceiling = _spec_corridor(version)
         if normalised is not None:
             version = normalised
-        purl = _build_purl(name, version)
+        purl = build_purl(_PURL_TYPE, name, version)
         dep = Dependency(
             ecosystem=ECOSYSTEM,
             name=name,
@@ -625,7 +626,7 @@ def parse_lockfile(path: Path) -> list[Dependency]:
                 continue
             kind = (spec.get("type") or "").strip().lower()
             direct = kind == "direct"
-            purl = _build_purl(name, version)
+            purl = build_purl(_PURL_TYPE, name, version)
             dep = Dependency(
                 ecosystem=ECOSYSTEM,
                 name=name,
@@ -757,12 +758,6 @@ def _spec_corridor(spec: str | None) -> tuple[str | None, str | None]:
         return s, None
     return None, None
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 __all__ = [

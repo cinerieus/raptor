@@ -32,6 +32,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -143,7 +144,7 @@ def parse_lockfile(path: Path) -> list[Dependency]:
         source = entry.get("source") if isinstance(
             entry.get("source"), str) else None
         pin_style = _lockfile_pin_style(source)
-        purl = _build_purl(name, version)
+        purl = build_purl(_PURL_TYPE, name, version)
         dep = Dependency(
             ecosystem=ECOSYSTEM,
             name=name,
@@ -261,7 +262,7 @@ def _build_dep(
         if path_ref:
             source_extra["cargo_path"] = path_ref
 
-    purl = _build_purl(name, version)
+    purl = build_purl(_PURL_TYPE, name, version)
     return Dependency(
         ecosystem=ECOSYSTEM,
         name=name,
@@ -333,12 +334,6 @@ def _lockfile_pin_style(source: str | None) -> PinStyle:
         return PinStyle.GIT
     return PinStyle.EXACT
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 __all__ = ["parse_lockfile", "parse_manifest"]

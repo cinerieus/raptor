@@ -31,6 +31,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from ._npm_alias import looks_like_package_name as _looks_like_package_name
 
@@ -200,7 +201,7 @@ def _from_classic_block(
         is_lockfile=True,
         pin_style=pin_style,
         direct=False,
-        purl=_build_purl(name, version),
+        purl=build_purl("npm", name, version),
         parser_confidence=_confidence(pin_style, version),
         alias_name=alias,
     )
@@ -260,7 +261,7 @@ def _parse_berry(text: str, path: Path) -> list[Dependency]:
             is_lockfile=True,
             pin_style=pin_style,
             direct=False,
-            purl=_build_purl(name, version),
+            purl=build_purl("npm", name, version),
             parser_confidence=_confidence(pin_style, version),
             alias_name=alias,
         ))
@@ -356,12 +357,6 @@ def _pin_from_berry_resolution(
         return PinStyle.EXACT
     return PinStyle.WILDCARD
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:npm/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:

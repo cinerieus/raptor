@@ -39,6 +39,7 @@ import logging
 import re
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -234,7 +235,7 @@ def _build_dep_from_ref(
         else PinStyle.RANGE if (version and _is_range(version))
         else PinStyle.WILDCARD
     )
-    purl = _build_purl(name, version)
+    purl = build_purl(_PURL_TYPE, name, version)
     return Dependency(
         ecosystem=ECOSYSTEM,
         name=name,
@@ -286,9 +287,3 @@ def _is_range(version: str) -> bool:
     style accurately."""
     return version.startswith("[") and version.endswith("]")
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base

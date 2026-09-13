@@ -37,6 +37,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
+from ._base import build_purl
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -137,7 +138,7 @@ def _build_dep(pkg: dict[str, Any], path: Path) -> Dependency | None:
         is_lockfile=True,
         pin_style=pin_style,
         direct=False,
-        purl=_build_purl(name, version),
+        purl=build_purl("pypi", pep503_name(name), version),
         parser_confidence=_confidence(pin_style, version, scope, confidence_reason),
     )
 
@@ -168,12 +169,6 @@ def _confidence(
         return Confidence("low", reason="poetry.lock entry without version")
     return Confidence("high", reason=base_reason)
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{pep503_name(name)}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 register(filenames=["poetry.lock"])(parse)

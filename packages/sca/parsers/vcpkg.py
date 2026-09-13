@@ -37,6 +37,7 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -129,7 +130,7 @@ def _build_dep(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(name, version),
+        purl=build_purl(_PURL_TYPE, name, version),
         parser_confidence=_confidence(pin_style, version),
     )
 
@@ -172,9 +173,3 @@ def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
         )
     return Confidence("medium", reason="vcpkg.json port name only")
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base

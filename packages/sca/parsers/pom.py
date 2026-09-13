@@ -28,6 +28,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -253,7 +254,7 @@ def _apply_inherited_view(
         if dep.pin_style is PinStyle.RANGE:
             dep.version_floor, dep.version_ceiling = _range_corridor(resolved)
         dep.parser_confidence = _confidence(True, resolved, dep.scope == "build")
-        dep.purl = _build_purl(group, artifact, resolved)
+        dep.purl = build_purl("maven", artifact, resolved, namespace=group)
 
 
 def _resolve_local_dep_management(deps: list[Dependency]) -> None:
@@ -423,7 +424,7 @@ def _build_dep(
         scope = "build"
 
     confidence = _confidence(fully_resolved, version_for_record, is_managed)
-    purl = _build_purl(group, artifact, version_for_record)
+    purl = build_purl("maven", artifact, version_for_record, namespace=group)
 
     return Dependency(
         ecosystem=ECOSYSTEM,
@@ -516,13 +517,6 @@ def _confidence(
         return Confidence("high", reason="POM dependencyManagement entry")
     return Confidence("high", reason="POM dependency block")
 
-
-def _build_purl(group: str, artifact: str, version: str | None) -> str:
-    """Build a Maven purl. Encoding follows the purl spec for Maven."""
-    base = f"pkg:maven/{group}/{artifact}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 register(filenames=["pom.xml"])(parse)

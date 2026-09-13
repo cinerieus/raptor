@@ -36,6 +36,7 @@ from typing import Any
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
+from ._base import build_purl
 from . import _safe_read, register
 
 logger = logging.getLogger(__name__)
@@ -450,7 +451,7 @@ def _parse_requirement_line(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(name, version),
+        purl=build_purl("pypi", pep503_name(name), version),
         parser_confidence=_confidence(pin_style, version, editable),
         version_floor=version_floor,
         version_ceiling=version_ceiling,
@@ -501,7 +502,7 @@ def _from_url_spec(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(name, version),
+        purl=build_purl("pypi", pep503_name(name), version),
         parser_confidence=Confidence(
             "medium",
             reason="requirements.txt URL/path requirement; name from #egg=",
@@ -616,12 +617,6 @@ def _confidence(
         return Confidence("medium", reason="requirements.txt unpinned entry")
     return Confidence("high", reason="requirements.txt structured spec")
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{pep503_name(name)}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 def _is_requirements_file(path: Path) -> bool:

@@ -40,6 +40,7 @@ import logging
 import re
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -349,7 +350,7 @@ def _build_dep(
     """
     coord = f"{group}/{name}"
     pin_style = _classify_version(version)
-    purl = _build_purl(group, name, version)
+    purl = build_purl(_PURL_TYPE, name, version, namespace=group)
     is_catalog = source_origin.startswith("gradle_catalog")
     confidence_level = "high" if is_catalog else "medium"
     confidence_reason = (
@@ -401,12 +402,6 @@ def _classify_version(version: str | None) -> PinStyle:
         return PinStyle.RANGE
     return PinStyle.EXACT
 
-
-def _build_purl(group: str, name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{group}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 __all__ = ["parse"]

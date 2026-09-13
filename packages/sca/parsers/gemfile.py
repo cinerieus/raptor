@@ -36,6 +36,7 @@ import logging
 import re
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -187,7 +188,7 @@ def parse_lockfile(path: Path) -> list[Dependency]:
             is_lockfile=True,
             pin_style=PinStyle.EXACT,
             direct=False,                    # join layer flips when matched
-            purl=_build_purl(name, version),
+            purl=build_purl(_PURL_TYPE, name, version),
             parser_confidence=Confidence(
                 "high",
                 reason="Gemfile.lock plain-text — deterministic structure",
@@ -233,7 +234,7 @@ def _build_dep(
     else:
         pin_style, version = _parse_version_specs(rest_clean)
 
-    purl = _build_purl(name, version)
+    purl = build_purl(_PURL_TYPE, name, version)
     return Dependency(
         ecosystem=ECOSYSTEM,
         name=name,
@@ -283,12 +284,6 @@ def _parse_version_specs(rest: str) -> tuple[PinStyle, str | None]:
         return PinStyle.CARET, ver
     return PinStyle.RANGE, ver
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 __all__ = ["parse_lockfile", "parse_manifest"]

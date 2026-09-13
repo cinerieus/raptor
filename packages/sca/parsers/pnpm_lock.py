@@ -43,6 +43,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias
 
@@ -130,7 +131,7 @@ def parse(path: Path) -> list[Dependency]:
                 is_lockfile=True,
                 pin_style=pin_style,
                 direct=name in direct_names,
-                purl=_build_purl(name, version_for_record),
+                purl=build_purl("npm", name, version_for_record),
                 parser_confidence=_confidence(pin_style, version_for_record),
                 alias_name=(alias_by_real.get((name, version_for_record))
                             or alias_by_real.get((name, None))
@@ -362,12 +363,6 @@ def _classify_packages_entry(
         return PinStyle.WILDCARD, None
     return PinStyle.EXACT, version
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:npm/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:

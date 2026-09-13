@@ -74,6 +74,7 @@ import re
 from pathlib import Path
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from ..versions import semver
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias as _split_npm_alias
@@ -399,7 +400,7 @@ def _build_dep(
                 name=name, version=None, declared_in=path, scope=scope,
                 is_lockfile=False, pin_style=PinStyle.UNKNOWN,
                 direct=True,
-                purl=_build_purl(name, None),
+                purl=build_purl("npm", name, None),
                 parser_confidence=Confidence(
                     "low",
                     reason=(
@@ -443,7 +444,7 @@ def _build_dep(
         is_lockfile=False,
         pin_style=pin_style,
         direct=True,
-        purl=_build_purl(real_name, version),
+        purl=build_purl("npm", real_name, version),
         parser_confidence=_confidence(pin_style, version),
         alias_name=alias_name,
         version_floor=version_floor,
@@ -545,13 +546,6 @@ def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
         return Confidence("medium", reason="package.json wildcard version")
     return Confidence("high", reason="package.json structured field")
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    """Build an npm purl. Scoped packages keep the leading ``@``."""
-    base = f"pkg:npm/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 register(filenames=["package.json"])(parse)

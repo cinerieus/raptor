@@ -53,6 +53,7 @@ from typing import Any
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
+from ._base import build_purl
 from . import _safe_read, register
 
 try:
@@ -150,7 +151,7 @@ def _build_dep(
         # view defers to the manifest-side parser when both are
         # present.
         direct=False,
-        purl=f"pkg:{_PURL_TYPE}/{name}@{version}",
+        purl=build_purl(_PURL_TYPE, name, version),
         parser_confidence=Confidence(
             "high",
             reason="uv.lock pinned dependency",

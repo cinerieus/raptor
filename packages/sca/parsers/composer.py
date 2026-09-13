@@ -24,6 +24,7 @@ import logging
 import re
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -80,7 +81,7 @@ def parse_manifest(path: Path) -> list[Dependency]:
             if _is_platform_req(name):
                 continue
             pin_style, version = _classify_version_spec(spec)
-            purl = _build_purl(name, version)
+            purl = build_purl(_PURL_TYPE, name, version)
             dep = Dependency(
                 ecosystem=ECOSYSTEM,
                 name=name,
@@ -156,7 +157,7 @@ def parse_lockfile(path: Path) -> list[Dependency]:
                           and source.get("type") == "git"
                           and not _looks_like_release_tag(version)
                           else PinStyle.EXACT)
-            purl = _build_purl(name, version)
+            purl = build_purl(_PURL_TYPE, name, version)
             dep = Dependency(
                 ecosystem=ECOSYSTEM,
                 name=name,
@@ -243,12 +244,6 @@ def _looks_like_release_tag(version: str) -> bool:
         return False
     return bool(_RELEASE_TAG_RE.match(version))
 
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:{_PURL_TYPE}/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 __all__ = ["parse_lockfile", "parse_manifest"]

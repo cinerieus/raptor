@@ -31,6 +31,7 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ._base import build_purl
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias
 
@@ -135,7 +136,7 @@ def _parse_v2_or_v3(data: dict[str, Any], path: Path) -> list[Dependency]:
             is_lockfile=True,
             pin_style=pin_style,
             direct=is_direct,
-            purl=_build_purl(name, version_for_record),
+            purl=build_purl("npm", name, version_for_record),
             parser_confidence=_confidence(pin_style, version_for_record),
             alias_name=alias,
         ))
@@ -302,7 +303,7 @@ def _walk_v1(
             # The v1 tree is keyed by DECLARED names, so directness
             # matches on the declared spelling (the alias, if any).
             direct=(depth == 0 and declared in direct_names),
-            purl=_build_purl(name, version),
+            purl=build_purl("npm", name, version),
             parser_confidence=_confidence(pin_style, version),
             alias_name=alias,
         ))
@@ -320,12 +321,6 @@ def _walk_v1(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:npm/{name}"
-    if version:
-        return f"{base}@{version}"
-    return base
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
