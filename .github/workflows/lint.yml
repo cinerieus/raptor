@@ -103,6 +103,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # Belt-and-braces: no step in this job needs git credentials.
+          persist-credentials: false
           # Need merge-base history for ``git diff origin/main...HEAD``.
           # Depth 200 covers any sane PR; shallower clones miss the base.
           fetch-depth: 200
@@ -181,6 +183,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Belt-and-braces: no step in this job needs git credentials.
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -222,6 +227,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Belt-and-braces: no step in this job needs git credentials.
+          persist-credentials: false
 
       - name: Lint slash-command metadata
         run: python3 .github/scripts/check_command_metadata.py

@@ -67,6 +67,8 @@ jobs:
       - name: Checkout PR merge result
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # Belt-and-braces: no step in this job needs git credentials.
+          persist-credentials: false
           # Need full history so we can check out main as the
           # baseline below.
           fetch-depth: 0
