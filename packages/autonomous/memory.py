@@ -5,14 +5,19 @@ This module enables RAPTOR to learn from past fuzzing campaigns and
 improve over time through persistent knowledge storage.
 """
 
+import fcntl
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from core.json import load_json, save_json
 from core.logging import get_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = get_logger()
 
@@ -104,6 +109,10 @@ class FuzzingMemory:
         self._last_save_time: float = 0.0
         self._save_interval: float = 30.0  # seconds
 
+        # Keys deliberately removed this session (prune) — the
+        # merge-on-save must not resurrect them from disk.
+        self._removed_keys: set[str] = set()
+
         # Load existing memory
         self.load()
 
@@ -126,17 +135,7 @@ class FuzzingMemory:
 
             # Load knowledge entries
             for key, k_dict in data.get("knowledge", {}).items():
-                self.knowledge[key] = FuzzingKnowledge(
-                    knowledge_type=k_dict["knowledge_type"],
-                    key=k_dict["key"],
-                    value=k_dict["value"],
-                    confidence=k_dict.get("confidence", 0.5),
-                    success_count=k_dict.get("success_count", 0),
-                    failure_count=k_dict.get("failure_count", 0),
-                    last_updated=k_dict.get("last_updated", time.time()),
-                    binary_hash=k_dict.get("binary_hash"),
-                    campaign_id=k_dict.get("campaign_id"),
-                )
+                self.knowledge[key] = self._knowledge_from_dict(k_dict)
 
             # Load campaign history
             self.campaigns = data.get("campaigns", [])
@@ -146,6 +145,75 @@ class FuzzingMemory:
         except Exception as e:  # noqa: BLE001 — memory is additive; never crash the campaign
             logger.error("Failed to load memory: %s", e)
 
+    @staticmethod
+    def _knowledge_from_dict(k_dict: dict) -> FuzzingKnowledge:
+        """Rehydrate one serialised knowledge entry."""
+        return FuzzingKnowledge(
+            knowledge_type=k_dict["knowledge_type"],
+            key=k_dict["key"],
+            value=k_dict["value"],
+            confidence=k_dict.get("confidence", 0.5),
+            success_count=k_dict.get("success_count", 0),
+            failure_count=k_dict.get("failure_count", 0),
+            last_updated=k_dict.get("last_updated", time.time()),
+            binary_hash=k_dict.get("binary_hash"),
+            campaign_id=k_dict.get("campaign_id"),
+        )
+
+    @contextmanager
+    def _locked(self) -> "Iterator[None]":
+        """Exclusive advisory lock over the shared memory file.
+
+        The store is shared across processes (default:
+        ``~/.raptor/fuzzing_memory.json``) and every save is a full
+        read-merge-write; without the lock two concurrent campaigns
+        interleave their RMW cycles and the last writer silently
+        discards the other's learned knowledge. flock on a sibling
+        ``.lock`` file (never the data file itself — save_json
+        replaces it by rename, which would drop the lock identity).
+        """
+        lock_path = self.memory_file.with_name(self.memory_file.name + ".lock")
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _merge_from_disk(self) -> None:
+        """Fold concurrent writers' state into memory before saving.
+
+        Newest-entry-wins per knowledge key (``last_updated``), except
+        keys this session deliberately removed (prune). Campaigns are
+        a union: disk order first, then our unsaved records.
+        """
+        if not self.memory_file.exists():
+            return
+        data = load_json(self.memory_file)
+        if not isinstance(data, dict):
+            return
+        knowledge = data.get("knowledge")
+        if isinstance(knowledge, dict):
+            for key, k_dict in knowledge.items():
+                if key in self._removed_keys:
+                    continue
+                if not isinstance(k_dict, dict):
+                    continue
+                try:
+                    entry = self._knowledge_from_dict(k_dict)
+                except (KeyError, TypeError):
+                    continue
+                ours = self.knowledge.get(key)
+                if ours is None or entry.last_updated > ours.last_updated:
+                    self.knowledge[key] = entry
+        disk_campaigns = data.get("campaigns")
+        if isinstance(disk_campaigns, list):
+            merged = list(disk_campaigns)
+            for c in self.campaigns:
+                if c not in merged:
+                    merged.append(c)
+            self.campaigns = merged
+
     def flush(self) -> None:
         """Flush any pending dirty state to disk."""
         if self._dirty_count > 0:
@@ -154,33 +222,42 @@ class FuzzingMemory:
             self._last_save_time = time.time()
 
     def save(self) -> None:
-        """Save memory to persistent storage."""
+        """Save memory to persistent storage.
+
+        Lock → merge-from-disk → atomic write: concurrent campaigns
+        each keep the union of learned state instead of last-writer-
+        wins dropping whichever process saved first.
+        """
         try:
-            data = {
-                "knowledge": {
-                    key: {
-                        "knowledge_type": k.knowledge_type,
-                        "key": k.key,
-                        "value": k.value,
-                        "confidence": k.confidence,
-                        "success_count": k.success_count,
-                        "failure_count": k.failure_count,
-                        "last_updated": k.last_updated,
-                        "binary_hash": k.binary_hash,
-                        "campaign_id": k.campaign_id,
-                    }
-                    for key, k in self.knowledge.items()
-                },
-                "campaigns": self.campaigns,
-                "last_saved": time.time(),
-            }
-
-            save_json(self.memory_file, data)
-
-            logger.debug("Memory saved to %s", self.memory_file)
-
+            with self._locked():
+                self._save_locked()
+            self._removed_keys.clear()
         except Exception as e:  # noqa: BLE001 — memory is additive; never crash the campaign
             logger.error("Failed to save memory: %s", e)
+
+    def _save_locked(self) -> None:
+        """Merge + serialise + write. Caller holds the file lock."""
+        self._merge_from_disk()
+        data = {
+            "knowledge": {
+                key: {
+                    "knowledge_type": k.knowledge_type,
+                    "key": k.key,
+                    "value": k.value,
+                    "confidence": k.confidence,
+                    "success_count": k.success_count,
+                    "failure_count": k.failure_count,
+                    "last_updated": k.last_updated,
+                    "binary_hash": k.binary_hash,
+                    "campaign_id": k.campaign_id,
+                }
+                for key, k in self.knowledge.items()
+            },
+            "campaigns": self.campaigns,
+            "last_saved": time.time(),
+        }
+        save_json(self.memory_file, data)
+        logger.debug("Memory saved to %s", self.memory_file)
 
     def remember(self, knowledge: FuzzingKnowledge) -> None:
         """
@@ -495,10 +572,14 @@ class FuzzingMemory:
         """
         before_count = len(self.knowledge)
 
-        self.knowledge = {
+        kept = {
             key: k for key, k in self.knowledge.items()
             if k.confidence >= threshold
         }
+        # Tombstone the removed keys so the merge-on-save doesn't
+        # immediately resurrect them from the shared file.
+        self._removed_keys.update(set(self.knowledge) - set(kept))
+        self.knowledge = kept
 
         pruned = before_count - len(self.knowledge)
         if pruned > 0:

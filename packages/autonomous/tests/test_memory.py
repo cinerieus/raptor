@@ -130,3 +130,111 @@ def test_flush_is_noop_after_record_campaign(tmp_path: Path):
     mem.save = counting_save
     mem.flush()
     assert saves == []
+
+
+# ---------------------------------------------------------------------------
+# Concurrent writers — shared store must merge, not last-writer-wins
+# ---------------------------------------------------------------------------
+
+
+def _k(key: str, value: str = "v", confidence: float = 0.9) -> FuzzingKnowledge:
+    return FuzzingKnowledge(
+        knowledge_type="strategy", key=key, value={"name": value},
+        confidence=confidence,
+    )
+
+
+def test_concurrent_instances_do_not_lose_each_others_knowledge(
+    tmp_path: Path,
+):
+    """Two campaigns share the default store. Each loads before the
+    other saves (the classic RMW race); the save-side merge must keep
+    the union instead of the last writer discarding the first's
+    learning."""
+    memory_file = tmp_path / "fuzzing_memory.json"
+    mem1 = FuzzingMemory(memory_file=memory_file)
+    mem2 = FuzzingMemory(memory_file=memory_file)  # loads pre-k1 state
+
+    mem1.remember(_k("from_campaign_1"))
+    mem1.flush()
+    mem2.remember(_k("from_campaign_2"))
+    mem2.flush()  # without merge this would drop from_campaign_1
+
+    reloaded = FuzzingMemory(memory_file=memory_file)
+    assert reloaded.recall("strategy", "from_campaign_1") is not None
+    assert reloaded.recall("strategy", "from_campaign_2") is not None
+
+
+def test_concurrent_campaign_records_are_united(tmp_path: Path):
+    memory_file = tmp_path / "fuzzing_memory.json"
+    mem1 = FuzzingMemory(memory_file=memory_file)
+    mem2 = FuzzingMemory(memory_file=memory_file)
+    mem1.record_campaign({"binary_name": "target-a"})
+    mem2.record_campaign({"binary_name": "target-b"})
+    reloaded = FuzzingMemory(memory_file=memory_file)
+    names = {c.get("binary_name") for c in reloaded.campaigns}
+    assert {"target-a", "target-b"} <= names
+
+
+def test_merge_keeps_newest_entry_per_key(tmp_path: Path):
+    """Same key updated by both writers: last_updated decides, so a
+    stale in-memory copy never clobbers a fresher on-disk one."""
+    memory_file = tmp_path / "fuzzing_memory.json"
+    mem1 = FuzzingMemory(memory_file=memory_file)
+    mem2 = FuzzingMemory(memory_file=memory_file)
+
+    old = _k("shared", value="old")
+    old.last_updated = time.time() - 100
+    mem1.knowledge["strategy:shared"] = old
+
+    fresh = _k("shared", value="fresh")
+    fresh.last_updated = time.time()
+    mem2.knowledge["strategy:shared"] = fresh
+    mem2.save()
+
+    mem1.save()  # stale copy must not win
+    reloaded = FuzzingMemory(memory_file=memory_file)
+    recalled = reloaded.recall("strategy", "shared")
+    assert recalled is not None
+    assert recalled.value["name"] == "fresh"
+
+
+def test_prune_is_not_resurrected_by_merge(tmp_path: Path):
+    """prune_low_confidence removes an on-disk entry; the merge-on-save
+    must honour the removal rather than re-adopting the disk copy."""
+    memory_file = tmp_path / "fuzzing_memory.json"
+    mem = FuzzingMemory(memory_file=memory_file)
+    mem.remember(_k("weak", confidence=0.05))
+    mem.flush()
+
+    mem.prune_low_confidence(threshold=0.2)
+    reloaded = FuzzingMemory(memory_file=memory_file)
+    assert reloaded.recall("strategy", "weak") is None
+
+
+def test_parallel_flush_threads_keep_all_entries(tmp_path: Path):
+    """Interleaved writers under real lock contention: every entry
+    from both writers survives."""
+    import threading
+
+    memory_file = tmp_path / "fuzzing_memory.json"
+
+    def writer(tag: str) -> None:
+        mem = FuzzingMemory(memory_file=memory_file)
+        for i in range(10):
+            mem.remember(_k(f"{tag}_{i}"))
+            mem.flush()
+
+    threads = [threading.Thread(target=writer, args=(t,))
+               for t in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    reloaded = FuzzingMemory(memory_file=memory_file)
+    for tag in ("a", "b"):
+        for i in range(10):
+            assert reloaded.recall("strategy", f"{tag}_{i}") is not None, (
+                f"lost {tag}_{i}"
+            )
