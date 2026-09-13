@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
+import pytest
+
 from packages.sca.findings import build_vuln_findings
 from packages.sca.models import (
     AffectedRange,
@@ -97,6 +99,103 @@ def test_fix_handles_unknown_ecosystem_comparator() -> None:
         [dep], [OsvResult(dep.key(), [adv])],
     )
     assert findings[0].fixed_version in ("2.0", "2.5")
+
+
+# ---------------------------------------------------------------------------
+# Group-max fix combining — parseable candidates outrank unparseable
+# ---------------------------------------------------------------------------
+
+# Ecosystems with strict comparators (unparseable input raises).
+# npm / crates.io / Go route through the semver comparator, whose
+# ``a == b`` pre-parse short-circuit once made a self-comparison
+# parse probe vacuous — the hijack below reproduced on all three
+# while PyPI (parse-before-compare) masked it in the original test.
+_STRICT_ECOSYSTEMS = ("npm", "crates.io", "Go", "PyPI")
+
+
+@pytest.mark.parametrize("ecosystem", _STRICT_ECOSYSTEMS)
+def test_group_max_prefers_parseable_fix_over_git_sha(
+    ecosystem: str,
+) -> None:
+    """Alias-merged group where one advisory carries only a GIT-range
+    ``fixed`` event (a commit SHA — routine in OSS-Fuzz-sourced OSV
+    records): the parseable sibling's fix must win the group-max
+    combine, not the unparseable SHA."""
+    dep = _dep(version="2.0.0", name="pkg", ecosystem=ecosystem)
+    good = _adv("GHSA-good", fixed=["2.4.0"],
+                aliases=["CVE-2024-0001"])
+    sha = _adv("GHSA-shaonly",
+               fixed=["3f2b1c0d9e8a7f6b5c4d3e2f1a0b9c8d7e6f5a4b"],
+               aliases=["CVE-2024-0001"])
+    findings = build_vuln_findings(
+        [dep], [OsvResult(dep.key(), [good, sha])],
+    )
+    assert len(findings) == 1
+    assert findings[0].fixed_version == "2.4.0"
+
+
+@pytest.mark.parametrize("ecosystem", _STRICT_ECOSYSTEMS)
+def test_group_max_hostile_fixed_string_never_wins(
+    ecosystem: str,
+) -> None:
+    """A crafted advisory whose ``fixed`` entry is arbitrary attacker
+    text must not hijack fixed_version away from a parseable sibling."""
+    dep = _dep(version="2.0.0", name="pkg", ecosystem=ecosystem)
+    good = _adv("GHSA-good", fixed=["2.4.0"],
+                aliases=["CVE-2024-0003"])
+    hostile = _adv("GHSA-hostile", fixed=["~pwned-not-a-version"],
+                   aliases=["CVE-2024-0003"])
+    findings = build_vuln_findings(
+        [dep], [OsvResult(dep.key(), [good, hostile])],
+    )
+    assert len(findings) == 1
+    assert findings[0].fixed_version == "2.4.0"
+
+
+@pytest.mark.parametrize("ecosystem", _STRICT_ECOSYSTEMS)
+def test_group_max_still_takes_highest_parseable_fix(
+    ecosystem: str,
+) -> None:
+    """The conservative direction is unchanged: between two parseable
+    per-advisory fixes, the HIGHER one wins (an attacker-lowered fix
+    version is not adopted)."""
+    dep = _dep(version="2.0.0", name="pkg", ecosystem=ecosystem)
+    low = _adv("GHSA-low", fixed=["2.1.0"], aliases=["CVE-2024-0002"])
+    high = _adv("GHSA-high", fixed=["2.4.0"], aliases=["CVE-2024-0002"])
+    findings = build_vuln_findings(
+        [dep], [OsvResult(dep.key(), [low, high])],
+    )
+    assert len(findings) == 1
+    assert findings[0].fixed_version == "2.4.0"
+
+
+@pytest.mark.parametrize("ecosystem", _STRICT_ECOSYSTEMS)
+def test_parse_probe_rejects_garbage_per_ecosystem(
+    ecosystem: str,
+) -> None:
+    """The probe must invoke the real parser — a self-comparison
+    probe was vacuous on the comparators that short-circuit equal
+    strings before parsing."""
+    from packages.sca.findings import _is_parseable_version
+
+    assert _is_parseable_version(ecosystem, "2.4.0") is True
+    assert _is_parseable_version(
+        ecosystem, "~pwned-not-a-version") is False
+    assert _is_parseable_version(
+        ecosystem, "3f2b1c0d9e8a7f6b5c4d3e2f1a0b9c8d7e6f5a4b") is False
+
+
+def test_group_max_all_unparseable_still_surfaces_a_fix() -> None:
+    """When EVERY candidate is unparseable there is nothing better to
+    prefer — the combine still returns one of them rather than
+    crashing or dropping the fix hint."""
+    dep = _dep(version="2.0.0", name="pydantic")
+    sha = "3f2b1c0d9e8a7f6b5c4d3e2f1a0b9c8d7e6f5a4b"
+    adv = _adv("GHSA-shaonly", fixed=[sha])
+    findings = build_vuln_findings(
+        [dep], [OsvResult(dep.key(), [adv])],
+    )
+    assert findings[0].fixed_version == sha
 
 
 # ---------------------------------------------------------------------------

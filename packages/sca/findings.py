@@ -483,8 +483,22 @@ def _assemble_finding(
             for a in group
         ) if f
     ]
+    # An unparseable candidate must never outrank a parseable one:
+    # ``_Sortable``'s fallback ordering sorts unparseable strings
+    # HIGH (so that ``min()`` in ``_smallest_applicable_fix`` prefers
+    # parseable fixes), which would make ``max()`` here adopt a
+    # GIT-commit ``fixed`` event (routine in OSS-Fuzz-sourced OSV
+    # records) — or a crafted garbage string from a hostile advisory
+    # — as the finding's fixed_version, defeating the conservative
+    # combine documented above and steering the fix planner at a
+    # non-version. Prefer the parseable pool whenever it is
+    # non-empty; all-unparseable groups still surface something.
+    parseable = [
+        f for f in fix_candidates
+        if _is_parseable_version(dep.ecosystem, f)
+    ]
     fixed = (
-        max(fix_candidates, key=_VersionKey(dep.ecosystem))
+        max(parseable or fix_candidates, key=_VersionKey(dep.ecosystem))
         if fix_candidates else None
     )
     # Group-maximum severity — the representative achieves it by
@@ -626,6 +640,30 @@ def _smallest_applicable_fix(
         return target_pool[0]
 
 
+def _is_parseable_version(ecosystem: str, value: str) -> bool:
+    """True when ``value`` parses under the ecosystem's comparator.
+
+    Probes with a comparison against the universally-parseable
+    sentinel ``"0"`` — NOT against ``value`` itself: most comparators
+    short-circuit ``a == b`` BEFORE parsing (semver, maven, rpm,
+    debian, alpine, conan, vcpkg), so a self-comparison probe
+    vacuously succeeds on any string for those ecosystems and the
+    parseable-preference becomes a no-op exactly where it matters
+    (npm / crates.io / Go). ``value == "0"`` still hits that
+    short-circuit, but ``"0"`` is genuinely parseable everywhere.
+
+    Comparators that never raise on garbage (Maven, RubyGems, NuGet,
+    Debian — they order unparseable strings best-effort by design)
+    report everything parseable here; the preference is a no-op there
+    by those comparators' own contract, not by probe failure.
+    """
+    try:
+        version_compare(ecosystem, value, "0")
+    except VersionError:
+        return False
+    return True
+
+
 class _VersionKey:
     """Functor that wraps the per-ecosystem version comparator into a
     sortable key. Avoids repeatedly capturing ``ecosystem`` in lambdas."""
@@ -651,18 +689,17 @@ class _Sortable:
         self.v = value
 
     def __lt__(self, other: _Sortable) -> bool:
-        self_ok = other_ok = True
         try:
             return version_compare(self.eco, self.v, other.v) < 0
         except VersionError:
-            try:
-                version_compare(self.eco, self.v, self.v)
-            except VersionError:
-                self_ok = False
-            try:
-                version_compare(other.eco, other.v, other.v)
-            except VersionError:
-                other_ok = False
+            # Parseability probe — sentinel-based (see
+            # ``_is_parseable_version``): a self-comparison probe is
+            # vacuous on the comparators that short-circuit equal
+            # strings before parsing. A parseable version sorts LOW
+            # relative to an unparseable one so ``min()`` (smallest
+            # applicable fix) prefers real versions.
+            self_ok = _is_parseable_version(self.eco, self.v)
+            other_ok = _is_parseable_version(other.eco, other.v)
             if self_ok != other_ok:
                 return self_ok
             return self.v < other.v
