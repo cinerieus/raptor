@@ -19,6 +19,8 @@ from typing import Any, TYPE_CHECKING
 from core.json import load_json, save_json
 from core.orchestration.skill_dispatch import (
     MAX_VALIDATE_FINDINGS,
+    SkillDispatchResult,
+    is_sandbox_setup_skip,
     run_skill_dispatch,
     truncate_findings_by_signal,
 )
@@ -313,19 +315,33 @@ def _dispatch_validate_unsafe(
     # such gate — an untrusted repo's config reached the CC child.
     from core.security.cc_trust import check_repo_claude_trust
 
-    dispatch = run_skill_dispatch(
-        command="validate",
-        target=target_path,
-        tools=_VALIDATE_TOOLS,
-        budget_usd=_VALIDATE_BUDGET_USD,
-        timeout_s=_VALIDATE_TIMEOUT_S,
-        caller_label="audit-validate",
-        log_label="validate post-pass",
-        build_prompt=_prompt,
-        block_cc_dispatch=check_repo_claude_trust(str(target_path)),
-        context_dirs=(audit_out_dir,),
-        stage=_stage,
-    )
+    def _run_dispatch() -> SkillDispatchResult:
+        return run_skill_dispatch(
+            command="validate",
+            target=target_path,
+            tools=_VALIDATE_TOOLS,
+            budget_usd=_VALIDATE_BUDGET_USD,
+            timeout_s=_VALIDATE_TIMEOUT_S,
+            caller_label="audit-validate",
+            log_label="validate post-pass",
+            build_prompt=_prompt,
+            block_cc_dispatch=check_repo_claude_trust(str(target_path)),
+            context_dirs=(audit_out_dir,),
+            stage=_stage,
+        )
+
+    dispatch = _run_dispatch()
+    if not dispatch.ran and is_sandbox_setup_skip(dispatch.skipped_reason):
+        # One bounded retry, sandbox-setup failures only: the child
+        # never launched (no billed work to double-run) and the
+        # refusal can be transient host state rather than a property
+        # of this pass. A second identical refusal is treated as real
+        # and surfaces through the postpass record and run report.
+        logger.warning(
+            "validate post-pass: %s — retrying once",
+            dispatch.skipped_reason,
+        )
+        dispatch = _run_dispatch()
     return ValidatePostpassResult(
         ran=dispatch.ran,
         selected_count=findings_count,

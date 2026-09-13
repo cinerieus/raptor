@@ -176,6 +176,12 @@ def generate_report(
             completeness, out_dir, len(dark_findings), target_path,
         )
 
+    # A /validate post-pass that never ran leaves every emitted
+    # finding unvalidated — the skip reason must reach the report
+    # summary, not just the on-disk record (unconditional: a run with
+    # zero dark rows still owes this statement).
+    _annotate_validate_postpass(completeness, out_dir, target_path)
+
     # Finding-survival metric: per-evidence-channel /validate outcomes
     # (pure read-side aggregation over the journal — empty until a
     # /validate feedback import has run).
@@ -905,6 +911,42 @@ def _annotate_dark_awaiting(
     completeness["dark_followup"] = followup
 
 
+def _annotate_validate_postpass(
+    completeness: dict[str, Any],
+    out_dir: Path,
+    target_path: Path | None,
+) -> None:
+    """Surface a skipped /validate post-pass on the completeness block.
+
+    Reads ``validate-postpass.json``. When the post-pass never ran,
+    ``validate_postpass_skipped`` carries the recorded reason and
+    ``validate_postpass_followup`` the exact re-run command — without
+    this the reason lives only in the record file and the summary
+    reads as if the findings had been validated. The record lives in
+    a directory the dispatched CC child can write, so the reason is
+    sanitised at render time and the follow-up command is accepted
+    only in /validate shape (same policy as the dark followup).
+    """
+    record_path = out_dir / "validate-postpass.json"
+    if not record_path.is_file():
+        return
+    record = load_json(record_path, max_bytes=_MAX_RUN_META_BYTES)
+    if not isinstance(record, dict) or record.get("ran") is not False:
+        return
+    reason = record.get("skipped_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "unknown (no reason recorded)"
+    completeness["validate_postpass_skipped"] = reason
+    followup = record.get("followup_command")
+    if not (isinstance(followup, str) and followup.startswith("/validate ")):
+        target = str(target_path) if target_path else _run_meta_target(out_dir)
+        followup = (
+            f"/validate {target or '<target>'} "
+            f"--findings {out_dir / 'findings-graded.json'}"
+        )
+    completeness["validate_postpass_followup"] = followup
+
+
 def _run_meta_target(out_dir: Path) -> str:
     """Target path recorded in the run metadata, or ""."""
     meta_path = out_dir / ".raptor-run.json"
@@ -1200,6 +1242,20 @@ def _completeness_lines(report: dict[str, Any]) -> list[str]:
         followup = completeness.get("dark_followup")
         if followup:
             lines.append(f"  Follow up: {_line(followup, max_chars=400)}")
+    # A skipped /validate post-pass means NO emitted finding was
+    # validated — stated with the recorded reason and the exact
+    # re-run command, never left to the on-disk record alone.
+    skipped = completeness.get("validate_postpass_skipped")
+    if skipped:
+        lines.append(
+            "/validate post-pass skipped — findings were not "
+            f"validated: {_line(skipped, max_chars=300)}"
+        )
+        vp_followup = completeness.get("validate_postpass_followup")
+        if vp_followup:
+            lines.append(
+                f"  Re-run: {_line(vp_followup, max_chars=400)}"
+            )
     return lines
 
 

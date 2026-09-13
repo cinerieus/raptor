@@ -247,6 +247,23 @@ _LIFECYCLE_TIMEOUT_S = 30   # lifecycle helpers are mechanical; should be instan
 _CHECKLIST_TIMEOUT_S = 300  # build_checklist parses every source file
 
 
+# Reason prefix stamped on SkillDispatchResult.skipped_reason when the
+# sandbox refused to set up (the child never launched). Callers use
+# is_sandbox_setup_skip to classify — never their own string matching.
+_SANDBOX_SETUP_REASON_PREFIX = "sandbox setup failed: "
+
+
+def is_sandbox_setup_skip(reason: str | None) -> bool:
+    """True when a dispatch skip records a sandbox SETUP failure.
+
+    Setup failures happen before any billed work (the child process
+    never launched), so a bounded caller-side retry is safe: it can
+    never double-run a skill pass, only re-attempt the launch.
+    """
+    return bool(reason) and str(reason).startswith(
+        _SANDBOX_SETUP_REASON_PREFIX)
+
+
 @dataclass
 class SkillDispatchResult:
     """Outcome of :func:`run_skill_dispatch`.
@@ -753,10 +770,11 @@ def run_skill_dispatch(
             # bridge that cannot engage must fail THIS pass, not crash
             # the whole pipeline.
             lifecycle_settled = True
-            fail_lifecycle(run_dir, f"sandbox setup failed: {e}")
+            reason = f"{_SANDBOX_SETUP_REASON_PREFIX}{e}"
+            fail_lifecycle(run_dir, reason)
             logger.warning("%s sandbox setup failed: %s", log_label, e)
             return SkillDispatchResult(
-                ran=False, skipped_reason=f"sandbox setup failed: {e}",
+                ran=False, skipped_reason=reason,
                 run_dir=run_dir, duration_s=time.monotonic() - t0)
         finally:
             if prompt_fh is not None:

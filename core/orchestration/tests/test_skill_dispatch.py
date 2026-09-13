@@ -253,6 +253,28 @@ class DispatchFlowTests(unittest.TestCase):
         self.assertFalse(result.ran)
         self.assertEqual(result.skipped_reason, "subprocess returned 3")
 
+    def test_sandbox_setup_error_reason_is_classifiable(self):
+        """A SandboxSetupError skip must classify via
+        is_sandbox_setup_skip so callers can bound-retry the launch
+        (the child never executed — nothing billed to double-run);
+        every other skip shape must not classify."""
+        from core.orchestration.skill_dispatch import is_sandbox_setup_skip
+        from core.sandbox.errors import SandboxSetupError
+        with TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+
+            def _sandbox(cmd, *args, **kwargs):
+                raise SandboxSetupError("mount namespace could not engage")
+
+            result = _run(tmp, run_dir, sandbox=_sandbox)
+        self.assertFalse(result.ran)
+        self.assertTrue(is_sandbox_setup_skip(result.skipped_reason))
+        self.assertIn("mount namespace could not engage",
+                      result.skipped_reason)
+        for other in ("timeout after 60s", "subprocess returned 3",
+                      "launch failed: exec format error", "", None):
+            self.assertFalse(is_sandbox_setup_skip(other), other)
+
     def test_validate_outputs_error_fails_run(self):
         with TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"

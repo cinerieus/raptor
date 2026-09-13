@@ -213,3 +213,82 @@ class TestStudyStarvationLabel:
             "study results" in m
             for m in _assess_completeness(tmp_path)["missing"]
         )
+
+
+class TestValidatePostpassSkipSurfaced:
+    """A /validate post-pass that never ran must state its reason in
+    the report summary (and markdown) — the on-disk record alone is
+    not operator-visible."""
+
+    _REASON = "sandbox setup failed: mount namespace could not engage"
+
+    def _run_dir(self, tmp_path: Path, record: dict) -> Path:
+        out = tmp_path / "audit-run"
+        out.mkdir()
+        _meta(out, "completed")
+        (out / "checklist.json").write_text(json.dumps({
+            "target_path": str(tmp_path), "files": [],
+        }))
+        (out / "gaps.json").write_text(json.dumps({"count": 0, "gaps": []}))
+        (out / "findings-graded.json").write_text(
+            json.dumps({"findings": [], "stats": {}}),
+        )
+        (out / "cost-breakdown.json").write_text(
+            json.dumps({"phases": {}, "totals": {}}),
+        )
+        _journal(out, "f1", "finding")
+        (out / "validate-postpass.json").write_text(json.dumps(record))
+        return out
+
+    def _record(self, **overrides) -> dict:
+        record = {
+            "ran": False,
+            "skipped_reason": self._REASON,
+            "validate_dir": None,
+            "findings_selected": 1,
+            "dark_total": 0,
+            "dark_selected": 0,
+            "dark_awaiting": 0,
+            "followup_command": "/validate /some/target "
+                                "--findings findings-graded.json",
+        }
+        record.update(overrides)
+        return record
+
+    def test_skip_reason_in_summary_and_markdown(self, tmp_path):
+        out = self._run_dir(tmp_path, self._record())
+        report = generate_report(out)
+        summary = report["summary"]
+        assert "/validate post-pass skipped" in summary
+        assert self._REASON in summary
+        assert "Re-run: /validate" in summary
+        comp = report["completeness"]
+        assert comp["validate_postpass_skipped"] == self._REASON
+        md = write_markdown_report(report, out).read_text()
+        assert self._REASON in md
+
+    def test_ran_postpass_is_silent(self, tmp_path):
+        out = self._run_dir(tmp_path, self._record(
+            ran=True, skipped_reason="", validate_dir="/v",
+        ))
+        report = generate_report(out)
+        assert "post-pass skipped" not in report["summary"]
+        assert "validate_postpass_skipped" not in report["completeness"]
+
+    def test_missing_reason_states_unknown(self, tmp_path):
+        out = self._run_dir(tmp_path, self._record(skipped_reason=""))
+        report = generate_report(out)
+        assert "/validate post-pass skipped" in report["summary"]
+        assert "unknown (no reason recorded)" in report["summary"]
+
+    def test_followup_wrong_shape_rebuilt_locally(self, tmp_path):
+        # The record lives in a directory the dispatched child can
+        # write — a followup that is not a /validate command must be
+        # replaced with the locally-built one, never rendered.
+        out = self._run_dir(tmp_path, self._record(
+            followup_command="do-something-else --now",
+        ))
+        report = generate_report(out, target_path=tmp_path)
+        comp = report["completeness"]
+        assert comp["validate_postpass_followup"].startswith("/validate ")
+        assert "do-something-else" not in report["summary"]

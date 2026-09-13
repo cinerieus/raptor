@@ -384,6 +384,89 @@ class TestDispatchValidate:
         assert "RuntimeError" in postpass.skipped_reason
 
 
+class TestSandboxSetupRetry:
+    """Sandbox-setup dispatch skips get exactly ONE bounded retry (the
+    child never launched, so a re-attempt cannot double-run the pass);
+    a second refusal — and every other skip shape — dispatches once
+    and surfaces its reason."""
+
+    _SETUP_SKIP = "sandbox setup failed: mount namespace could not engage"
+
+    @pytest.fixture(autouse=True)
+    def _open_cc_trust(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.security.cc_trust.check_repo_claude_trust",
+            lambda repo_path, trust_override=None: False,
+        )
+
+    def _patch_dispatch(self, monkeypatch, results):
+        calls: list[dict] = []
+
+        def fake(**kwargs):
+            calls.append(kwargs)
+            return results[min(len(calls), len(results)) - 1]
+
+        monkeypatch.setattr("core.audit.validate.run_skill_dispatch", fake)
+        return calls
+
+    def test_retry_once_then_succeed(self, tmp_path, monkeypatch):
+        from core.orchestration.skill_dispatch import SkillDispatchResult
+        run_dir = tmp_path / "validate-run"
+        calls = self._patch_dispatch(monkeypatch, [
+            SkillDispatchResult(ran=False, skipped_reason=self._SETUP_SKIP),
+            SkillDispatchResult(ran=True, run_dir=run_dir, duration_s=1.0),
+        ])
+        postpass = _dispatch_validate(
+            target_path=tmp_path, audit_out_dir=tmp_path,
+            findings_path=tmp_path / "findings.json", findings_count=2,
+        )
+        assert len(calls) == 2
+        assert postpass.ran
+        assert postpass.validate_dir == str(run_dir)
+        assert postpass.skipped_reason == ""
+
+    def test_retry_exhausted_surfaces_reason(self, tmp_path, monkeypatch):
+        from core.orchestration.skill_dispatch import SkillDispatchResult
+        calls = self._patch_dispatch(monkeypatch, [
+            SkillDispatchResult(ran=False, skipped_reason=self._SETUP_SKIP),
+            SkillDispatchResult(ran=False, skipped_reason=self._SETUP_SKIP),
+        ])
+        postpass = _dispatch_validate(
+            target_path=tmp_path, audit_out_dir=tmp_path,
+            findings_path=tmp_path / "findings.json", findings_count=2,
+        )
+        assert len(calls) == 2
+        assert not postpass.ran
+        assert postpass.skipped_reason == self._SETUP_SKIP
+
+    def test_non_sandbox_skip_not_retried(self, tmp_path, monkeypatch):
+        from core.orchestration.skill_dispatch import SkillDispatchResult
+        calls = self._patch_dispatch(monkeypatch, [
+            SkillDispatchResult(ran=False,
+                                skipped_reason="claude not on PATH"),
+        ])
+        postpass = _dispatch_validate(
+            target_path=tmp_path, audit_out_dir=tmp_path,
+            findings_path=tmp_path / "findings.json", findings_count=2,
+        )
+        assert len(calls) == 1
+        assert not postpass.ran
+        assert postpass.skipped_reason == "claude not on PATH"
+
+    def test_success_dispatches_once(self, tmp_path, monkeypatch):
+        from core.orchestration.skill_dispatch import SkillDispatchResult
+        calls = self._patch_dispatch(monkeypatch, [
+            SkillDispatchResult(ran=True, run_dir=tmp_path / "v",
+                                duration_s=1.0),
+        ])
+        postpass = _dispatch_validate(
+            target_path=tmp_path, audit_out_dir=tmp_path,
+            findings_path=tmp_path / "findings.json", findings_count=2,
+        )
+        assert len(calls) == 1
+        assert postpass.ran
+
+
 @pytest.mark.usefixtures("cc_spawn_machinery_enabled")
 class TestDispatchGates:
     """Consolidation fixes: the audit handoff shares /agentic's gate
