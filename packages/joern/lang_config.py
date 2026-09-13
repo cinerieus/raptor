@@ -257,6 +257,7 @@ def parse_languages_for(target_path: str) -> set[str] | None:
 
 def detect_language(target_path: str) -> str:
     """Best-effort language detection from file extensions in target."""
+    import os
     from pathlib import Path
 
     counts: dict[str, int] = {}
@@ -272,11 +273,19 @@ def detect_language(target_path: str) -> str:
         ext = p.suffix.lower()
         return ext_map.get(ext, "python")
 
-    for f in p.rglob("*"):
-        if any(part in _EXCLUDED_DIRS for part in f.parts):
-            continue
-        if f.is_file():
-            lang = ext_map.get(f.suffix.lower())
+    # os.walk with in-place dirnames pruning (the idiom runner.py's
+    # _target_content_hash uses): the previous rglob still DESCENDED
+    # into .git/, node_modules/, target/ and enumerated every entry
+    # before the parts check discarded it — on a large JS/Rust
+    # monorepo the census paid a full-tree walk dominated by exactly
+    # the directories it ignores. Pruning also only applies BELOW the
+    # target: the old any-part check matched excluded names in the
+    # target's own ancestors (a project checked out under
+    # .../build/proj counted zero files and fell back to "python").
+    for _dirpath, dirnames, filenames in os.walk(str(p)):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        for fname in filenames:
+            lang = ext_map.get(os.path.splitext(fname)[1].lower())
             if lang:
                 counts[lang] = counts.get(lang, 0) + 1
 
