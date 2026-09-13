@@ -794,3 +794,60 @@ class TestGetCallers:
     def test_accepts_valid_inventory(self):
         result = get_callers("src/a.c", "func", 10, inventory={"files": {}})
         assert result is None or isinstance(result, list)
+
+
+class TestCoccinelleCallerCap:
+    def _fake_runner(self, n_matches: int):
+        matches = [
+            SimpleNamespace(file=f"src/f{i}.c", line=i + 1)
+            for i in range(n_matches)
+        ]
+        fake_result = SimpleNamespace(ok=True, matches=matches)
+        return SimpleNamespace(
+            is_available=lambda: True,
+            run_rules_batched=lambda *a, **k: {"rule": fake_result},
+            run_rule=lambda *a, **k: fake_result,
+            # Unrelated consumers of the runner module may import
+            # during fixture teardown while the patch is active.
+            contains_script_block=lambda *a, **k: False,
+        )
+
+    def test_matches_capped_at_max_callers_per_hop(
+        self, monkeypatch, tmp_path: Path,
+    ):
+        import sys
+
+        monkeypatch.setitem(
+            sys.modules, "packages.coccinelle.runner", self._fake_runner(25),
+        )
+        c = _constraint(
+            kind="precondition",
+            mechanical_check="copy_to_user_uninit.cocci",
+        )
+        config = PropagationConfig(
+            coccinelle_available=True,
+            target_path=tmp_path,
+            max_callers_per_hop=10,
+        )
+        result = try_coccinelle_resolve(c, config)
+        assert result is not None
+        assert len(result.callers_scheduled) == 10
+
+    def test_under_cap_all_matches_kept(self, monkeypatch, tmp_path: Path):
+        import sys
+
+        monkeypatch.setitem(
+            sys.modules, "packages.coccinelle.runner", self._fake_runner(3),
+        )
+        c = _constraint(
+            kind="precondition",
+            mechanical_check="copy_to_user_uninit.cocci",
+        )
+        config = PropagationConfig(
+            coccinelle_available=True,
+            target_path=tmp_path,
+            max_callers_per_hop=10,
+        )
+        result = try_coccinelle_resolve(c, config)
+        assert result is not None
+        assert len(result.callers_scheduled) == 3

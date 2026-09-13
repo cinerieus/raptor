@@ -566,11 +566,17 @@ def try_coccinelle_resolve(
                 ) for m in result.matches if m.file)
 
     if all_callers:
+        # Same per-hop discipline as the heuristic tier: spatch can
+        # match every call site in the tree, and an uncapped schedule
+        # would bypass the max_callers_per_hop budget every other
+        # resolver honours.
         return PropagationResult(
             constraint=constraint,
             resolved=False,
             resolver_used="coccinelle",
-            callers_scheduled=all_callers,
+            callers_scheduled=rank_callers(
+                all_callers, max_callers=config.max_callers_per_hop,
+            ),
         )
 
     return None
