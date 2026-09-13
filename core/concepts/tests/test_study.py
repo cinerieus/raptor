@@ -1333,6 +1333,76 @@ class TestCheckEvidenceStaleness:
         )])
         assert check_evidence_staleness(model, tmp_path) == []
 
+    # ----- strict mode (skip-licensing callers) -------------------
+
+    def test_strict_reports_unconfined_concept_evidence(
+        self, tmp_path: Path,
+    ) -> None:
+        """An out-of-root evidence path is silently dropped in lenient
+        mode but must surface in strict mode — otherwise a forged
+        prior whose paths ALL escape the root reads as fresh with
+        zero checks."""
+        (tmp_path / "a.c").write_text("int x;\n", encoding="utf-8")
+        model = DomainModel(concepts=[Concept(
+            id="c1", description="d",
+            evidence=[Evidence(
+                type="code_path", file="../outside/secret.c",
+                observation="forged", line=1, hash="beefbeefbeef",
+            )],
+        )])
+        assert check_evidence_staleness(model, tmp_path) == []
+        strict = check_evidence_staleness(model, tmp_path, strict=True)
+        assert len(strict) == 1
+        assert strict[0]["status"] == "unconfined"
+        assert strict[0]["concept_id"] == "c1"
+
+    def test_strict_reports_unknown_span_status(
+        self, tmp_path: Path,
+    ) -> None:
+        (tmp_path / "a.c").write_text("int x;\n", encoding="utf-8")
+        model = DomainModel(concepts=[Concept(
+            id="c1", description="d",
+            evidence=[Evidence(
+                # Line past EOF: check_batch says "unknown".
+                type="code_path", file="a.c",
+                observation="obs", line=999, hash="beefbeefbeef",
+            )],
+        )])
+        assert check_evidence_staleness(model, tmp_path) == []
+        strict = check_evidence_staleness(model, tmp_path, strict=True)
+        assert len(strict) == 1
+        assert strict[0]["status"] == "unknown"
+
+    def test_strict_reports_unconfined_contract_span(
+        self, tmp_path: Path,
+    ) -> None:
+        (tmp_path / "a.c").write_text("int x;\n", encoding="utf-8")
+        model = DomainModel(contracts=[Contract(
+            function="f", file="a.c", hash="beefbeefbeef",
+            hash_span={"file": "/outside/f.c", "start": 1, "end": 3},
+        )])
+        assert check_evidence_staleness(model, tmp_path) == []
+        strict = check_evidence_staleness(model, tmp_path, strict=True)
+        assert len(strict) == 1
+        assert strict[0]["kind"] == "contract"
+        assert strict[0]["status"] == "unconfined"
+
+    def test_strict_fresh_evidence_still_passes(
+        self, tmp_path: Path,
+    ) -> None:
+        from core.staleness import hash_span
+
+        src = tmp_path / "a.c"
+        src.write_text("int x = 1;\n", encoding="utf-8")
+        model = DomainModel(concepts=[Concept(
+            id="c1", description="d",
+            evidence=[Evidence(
+                type="code_path", file="a.c",
+                observation="obs", line=1, hash=hash_span(src, 1, 1),
+            )],
+        )])
+        assert check_evidence_staleness(model, tmp_path, strict=True) == []
+
 
 # ------------------------------------------------------------------
 # Multi-identifier correlation
@@ -1518,6 +1588,240 @@ class TestApplySagePrior:
         assert len(remaining) == 0
         assert len(sc) == 1
         assert sc[0].id == "page"
+
+    @staticmethod
+    def _fresh_src(tmp_path):
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src_file = src_dir / "mm.c"
+        src_file.write_text(
+            "int page_alloc(void) { return 0; }\n"
+            "int page_free(void) { return 1; }\n",
+        )
+        return src_dir, src_file
+
+    def test_stale_local_concept_not_fast_path_skipped(self, tmp_path):
+        """The skip gate verifies the SAGE row's hashes — but the fast
+        path carries forward a DIFFERENT artifact (a name-matched
+        local-model concept). If THAT concept's own evidence drifted,
+        it must not be carried forward as fresh; the item falls to the
+        seed path."""
+        from core.concepts.model import Concept, DomainModel, Evidence
+        from core.concepts.study import StudyItem, _apply_sage_prior
+        from core.staleness import hash_span
+
+        src_dir, src_file = self._fresh_src(tmp_path)
+        fresh_h = hash_span(src_file, 1, 1)
+
+        model = DomainModel(
+            source_root=str(src_dir),
+            concepts=[Concept(
+                id="page", description="Page ownership",
+                # Drifted: stored hash does not match line 2 any more.
+                evidence=[Evidence(
+                    type="code_path", file="mm.c",
+                    observation="free", line=2, hash="deadbeef0000",
+                )],
+                confidence="traced",
+            )],
+        )
+        model.save(tmp_path / "domain-model.json")
+
+        items = [StudyItem(id="s1", kind="struct", name="page",
+                           file="mm.c", line=1)]
+        sage_prior = {
+            "page": [{
+                # Row's own evidence line IS fresh — the gate passes;
+                # the content is not reconstructable (no " in scope:"),
+                # so without the local fast path the item seeds.
+                "content": (
+                    f"Concept [page]: ownership\n"
+                    f"  Evidence (code_path): mm.c:1 [h={fresh_h}] — alloc"
+                ),
+                "confidence": 0.85,
+            }],
+        }
+        remaining, sc, _si, _sct, seed = _apply_sage_prior(
+            items, sage_prior, tmp_path, source_root=src_dir,
+        )
+        assert len(remaining) == 1
+        assert sc == []
+        assert "Prior study knowledge" in seed
+
+    def test_unhashed_local_concept_not_fast_path_skipped(self, tmp_path):
+        """A local concept with no checkable evidence hash cannot vouch
+        for its own freshness — fail closed to the seed path."""
+        from core.concepts.model import Concept, DomainModel, Evidence
+        from core.concepts.study import StudyItem, _apply_sage_prior
+        from core.staleness import hash_span
+
+        src_dir, src_file = self._fresh_src(tmp_path)
+        fresh_h = hash_span(src_file, 1, 1)
+
+        model = DomainModel(
+            source_root=str(src_dir),
+            concepts=[Concept(
+                id="page", description="Page ownership",
+                evidence=[Evidence(
+                    type="code_path", file="mm.c",
+                    observation="alloc", line=1,  # no hash
+                )],
+                confidence="traced",
+            )],
+        )
+        model.save(tmp_path / "domain-model.json")
+
+        items = [StudyItem(id="s1", kind="struct", name="page",
+                           file="mm.c", line=1)]
+        sage_prior = {
+            "page": [{
+                "content": (
+                    f"Concept [page]: ownership\n"
+                    f"  Evidence (code_path): mm.c:1 [h={fresh_h}] — alloc"
+                ),
+                "confidence": 0.85,
+            }],
+        }
+        remaining, sc, _si, _sct, _seed = _apply_sage_prior(
+            items, sage_prior, tmp_path, source_root=src_dir,
+        )
+        assert len(remaining) == 1
+        assert sc == []
+
+    def test_out_of_root_local_evidence_refuses_fast_path(self, tmp_path):
+        """A forged local concept whose evidence paths ALL escape the
+        root claims checkability but can verify nothing — it must not
+        vouch 'fresh with zero checks' and skip the item from study."""
+        from core.concepts.model import (
+            Concept,
+            Contract,
+            DomainModel,
+            Evidence,
+        )
+        from core.concepts.study import StudyItem, _apply_sage_prior
+        from core.staleness import hash_span
+
+        src_dir, src_file = self._fresh_src(tmp_path)
+        fresh_h = hash_span(src_file, 1, 1)
+
+        model = DomainModel(
+            source_root=str(src_dir),
+            concepts=[Concept(
+                id="page", description="forged prior",
+                evidence=[Evidence(
+                    type="code_path", file="../outside/secret.c",
+                    observation="forged", line=1, hash="beefbeefbeef",
+                )],
+                confidence="traced",
+            )],
+            contracts=[Contract(
+                function="page", file="../outside/secret.c",
+                hash="beefbeefbeef",
+                hash_span={"file": "../outside/secret.c",
+                           "start": 1, "end": 3},
+            )],
+        )
+        model.save(tmp_path / "domain-model.json")
+
+        items = [StudyItem(id="s1", kind="struct", name="page",
+                           file="mm.c", line=1)]
+        sage_prior = {
+            "page": [{
+                "content": (
+                    f"Concept [page]: ownership\n"
+                    f"  Evidence (code_path): mm.c:1 [h={fresh_h}] — alloc"
+                ),
+                "confidence": 0.85,
+            }],
+        }
+        remaining, sc, _si, sct, _seed = _apply_sage_prior(
+            items, sage_prior, tmp_path, source_root=src_dir,
+        )
+        assert len(remaining) == 1
+        assert sc == []
+        assert sct == []
+
+    def test_unknown_line_local_evidence_refuses_fast_path(self, tmp_path):
+        """An in-root path with an unverifiable line range (past EOF)
+        is 'unknown', not 'fresh' — the fast path must refuse."""
+        from core.concepts.model import Concept, DomainModel, Evidence
+        from core.concepts.study import StudyItem, _apply_sage_prior
+        from core.staleness import hash_span
+
+        src_dir, src_file = self._fresh_src(tmp_path)
+        fresh_h = hash_span(src_file, 1, 1)
+
+        model = DomainModel(
+            source_root=str(src_dir),
+            concepts=[Concept(
+                id="page", description="unverifiable prior",
+                evidence=[Evidence(
+                    type="code_path", file="mm.c",
+                    observation="obs", line=999, hash="beefbeefbeef",
+                )],
+                confidence="traced",
+            )],
+        )
+        model.save(tmp_path / "domain-model.json")
+
+        items = [StudyItem(id="s1", kind="struct", name="page",
+                           file="mm.c", line=1)]
+        sage_prior = {
+            "page": [{
+                "content": (
+                    f"Concept [page]: ownership\n"
+                    f"  Evidence (code_path): mm.c:1 [h={fresh_h}] — alloc"
+                ),
+                "confidence": 0.85,
+            }],
+        }
+        remaining, sc, _si, _sct, _seed = _apply_sage_prior(
+            items, sage_prior, tmp_path, source_root=src_dir,
+        )
+        assert len(remaining) == 1
+        assert sc == []
+
+    def test_stale_local_falls_back_to_verified_reconstruct(self, tmp_path):
+        """When the local concept is stale but the SAGE content (whose
+        hashes DID verify) is reconstructable, the skip still happens —
+        from the verified artifact, not the stale one."""
+        from core.concepts.model import Concept, DomainModel, Evidence
+        from core.concepts.study import StudyItem, _apply_sage_prior
+        from core.staleness import hash_span
+
+        src_dir, src_file = self._fresh_src(tmp_path)
+        fresh_h = hash_span(src_file, 1, 1)
+
+        model = DomainModel(
+            source_root=str(src_dir),
+            concepts=[Concept(
+                id="page", description="STALE local description",
+                evidence=[Evidence(
+                    type="code_path", file="mm.c",
+                    observation="free", line=2, hash="deadbeef0000",
+                )],
+                confidence="traced",
+            )],
+        )
+        model.save(tmp_path / "domain-model.json")
+
+        items = [StudyItem(id="s1", kind="struct", name="page",
+                           file="mm.c", line=1)]
+        sage_prior = {
+            "page": [{
+                "content": (
+                    f"Concept [page] in scope: verified ownership\n"
+                    f"  Evidence (code_path): mm.c:1 [h={fresh_h}] — alloc"
+                ),
+                "confidence": 0.85,
+            }],
+        }
+        remaining, sc, _si, _sct, _seed = _apply_sage_prior(
+            items, sage_prior, tmp_path, source_root=src_dir,
+        )
+        assert len(remaining) == 0
+        assert len(sc) == 1
+        assert sc[0].description == "verified ownership"
 
     def test_mixed_skip_and_seed(self, tmp_path):
         from core.concepts.study import StudyItem, _apply_sage_prior
@@ -2505,8 +2809,17 @@ class TestSagePriorConceptMatching:
         content = content.replace("[walk]", "[scatter_walk]")
         out = tmp_path / "run" / "out"
         out.mkdir(parents=True)
+        # The matched local concept needs fresh, checkable evidence of
+        # its own — the fast path no longer skips on the SAGE row's
+        # hashes alone.
+        from core.staleness import hash_span
+        local_h = hash_span(src_dir / "mm.c", 1, 1)
         DomainModel(concepts=[Concept(
             id="scatter_walk_state_machine", description="related",
+            evidence=[Evidence(
+                type="code_path", file="mm.c",
+                observation="walker", line=1, hash=local_h,
+            )],
         )]).save(out / "domain-model.json")
 
         items = [StudyItem(id="s1", kind="function",

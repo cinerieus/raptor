@@ -4208,13 +4208,36 @@ def _apply_sage_prior(
                             concept = c
                             break
                 if concept is not None:
-                    skipped_concepts.append(concept)
                     concept_fns = {item.name} | {
                         ev.item for ev in concept.evidence if ev.item
                     }
-                    skipped_invariants.extend(inv for inv in local_model.invariants if inv.concept == concept.id)
-                    skipped_contracts.extend(ct for ct in local_model.contracts if ct.function in concept_fns)
-                    skipped = True
+                    attached_invs = [
+                        inv for inv in local_model.invariants
+                        if inv.concept == concept.id
+                    ]
+                    attached_cts = [
+                        ct for ct in local_model.contracts
+                        if ct.function in concept_fns
+                    ]
+                    # The hash gate above verified the SAGE row's OWN
+                    # evidence lines — but this fast path carries
+                    # forward a DIFFERENT artifact: a local-model
+                    # concept found by (possibly fuzzy) name match,
+                    # potentially from a sibling run dir. Its evidence
+                    # must verify on its own before it may cause a
+                    # mechanical skip of LLM study; stale or
+                    # uncheckable falls through to the SAGE-content
+                    # reconstruct path (whose hashes DID verify) or to
+                    # seeding — never a skip on another artifact's
+                    # hashes.
+                    if _local_prior_is_fresh(
+                        concept, attached_invs, attached_cts,
+                        Path(source_root),
+                    ):
+                        skipped_concepts.append(concept)
+                        skipped_invariants.extend(attached_invs)
+                        skipped_contracts.extend(attached_cts)
+                        skipped = True
             # Slow path: reconstruct from SAGE text content
             if not skipped:
                 reconstructed = _reconstruct_from_sage(item, content)
@@ -4263,6 +4286,51 @@ def _apply_sage_prior(
     )
 
 
+def _local_prior_is_fresh(
+    concept: Concept,
+    invariants: list[Invariant],
+    contracts: list[Contract],
+    source_root: Path,
+) -> bool:
+    """Whether a locally-recalled prior's OWN evidence still verifies.
+
+    Guards the SAGE-prior fast path: the concept (plus its attached
+    invariants/contracts) is about to be carried forward while its
+    study item is mechanically skipped from LLM analysis, so ITS
+    evidence — not the SAGE row's — must match the current source.
+
+    Fail closed: a concept with no checkable evidence hash, a claim
+    that cannot actually be verified (out-of-root path, unknown span
+    status — ``strict=True`` reports those as records instead of
+    dropping them), or a staleness-check error, refuses the fast path
+    (the caller falls back to reconstructing from the hash-verified
+    SAGE content, or to seeding). A wrong "fresh" verdict here
+    silently skips analysis — the false-suppression direction — so
+    "fresh" requires at least one hash-bearing evidence item AND
+    every checkability claim verifying as current.
+    """
+    if not any(
+        ev.hash and ev.file and ev.line is not None
+        for ev in concept.evidence
+    ):
+        return False
+    mini = DomainModel(
+        concepts=[concept],
+        invariants=invariants,
+        contracts=contracts,
+    )
+    try:
+        return not check_evidence_staleness(
+            mini, source_root, strict=True,
+        )
+    except Exception:
+        logger.debug(
+            "SAGE-prior fast path: staleness check on local concept "
+            "%s failed — not skipping", concept.id, exc_info=True,
+        )
+        return False
+
+
 def _find_local_models(output_dir: Path) -> list[Path]:
     """Find domain-model.json candidates near the output directory."""
     candidates = []
@@ -4292,6 +4360,8 @@ def _find_local_models(output_dir: Path) -> list[Path]:
 def check_evidence_staleness(
     model: DomainModel,
     source_root: Path,
+    *,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     """Check evidence freshness for concepts, invariants, AND contracts.
 
@@ -4313,20 +4383,49 @@ def check_evidence_staleness(
     Entries without a stored hash / receipt / span are skipped (no
     baseline to check). Uses ``core.staleness.check_batch`` for
     batched reads.
+
+    ``strict`` hardens the verdict for callers whose "no records"
+    result LICENSES an action (the SAGE-prior fast-path skip): an
+    entry that CLAIMS checkability (hash + file + line / span) but
+    cannot actually be verified — its path escapes ``source_root``
+    (status ``unconfined``) or the span check comes back ``unknown``
+    (invalid range, unreadable file, missing stored hash) — is
+    reported as a record instead of silently dropped. Without strict,
+    a forged prior whose evidence paths ALL point out of the root
+    would read as "fresh with zero checks". The default (lenient)
+    mode keeps the quarantine path's semantics: only positively
+    drifted evidence quarantines.
     """
     from core.staleness import CheckItem, check_batch
 
     items: list[CheckItem] = []
     item_keys: list[tuple[str, str, str, int | None]] = []
+    stale: list[dict[str, Any]] = []
+
+    def _unconfined(kind: str, entry_id: str, ev_file: str,
+                    ev_line: int | None) -> None:
+        record: dict[str, Any] = {
+            "kind": kind,
+            "id": entry_id,
+            "evidence_file": ev_file,
+            "evidence_line": ev_line,
+            "status": "unconfined",
+        }
+        if kind == "concept":
+            record["concept_id"] = entry_id
+        stale.append(record)
 
     for concept in model.concepts:
         for ev in concept.evidence:
             if not ev.hash or not ev.file or ev.line is None:
                 continue
             # Evidence paths originate from LLM output — confine to
-            # source_root; entries escaping it are dropped (not read).
+            # source_root; entries escaping it are dropped (not read;
+            # strict mode reports them as unverifiable instead).
             ev_path = _resolve_in_root(source_root, ev.file)
             if ev_path is None:
+                if strict:
+                    _unconfined("concept", concept.id, ev.file, ev.line)
                 continue
             items.append(CheckItem(
                 file=ev_path,
@@ -4346,6 +4445,8 @@ def check_evidence_staleness(
             continue
         ct_path = _resolve_in_root(source_root, str(span_file))
         if ct_path is None:
+            if strict:
+                _unconfined("contract", ct.function, str(span_file), start)
             continue
         items.append(CheckItem(
             file=ct_path,
@@ -4356,12 +4457,15 @@ def check_evidence_staleness(
         ))
         item_keys.append(("contract", ct.function, str(span_file), start))
 
-    stale: list[dict[str, Any]] = []
+    # Lenient: "unknown" (invalid range, unreadable file, no stored
+    # hash) is not evidence of drift, so it never quarantines.
+    # Strict: unknown means the claim could not be verified — record.
+    fresh_statuses = ("current",) if strict else ("current", "unknown")
     if items:
         results = check_batch(items, root=source_root)
         for (kind, entry_id, ev_file, ev_line), result in zip(
                 item_keys, results):
-            if result.status in ("current", "unknown"):
+            if result.status in fresh_statuses:
                 continue
             record: dict[str, Any] = {
                 "kind": kind,
