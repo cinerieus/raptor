@@ -216,13 +216,11 @@ _DETECTORS: list[_FrameworkDetector] = [
                 ),
                 ["CWE-352"],
             ),
-            # Template auto-escaping (detect Django template usage; the
-            # guarantee is void when |safe or mark_safe appears)
+            # Template auto-escaping (escape hatches such as mark_safe
+            # void the guarantee via _ESCAPE_HATCH_VOIDS below)
             (
                 re.compile(
-                    r"(?:from\s+django\.template|render_to_string|render\s*\()"
-                    r"(?!.*\|\s*safe)(?!.*mark_safe)",
-                    re.DOTALL,
+                    r"from\s+django\.template|render_to_string|render\s*\(",
                 ),
                 ["CWE-79"],
             ),
@@ -239,11 +237,15 @@ _DETECTORS: list[_FrameworkDetector] = [
                 ),
                 ["CWE-79"],
             ),
-            # SQLAlchemy bound parameters
+            # SQLAlchemy bound parameters.  ``.filter(`` is a generic
+            # method name, so it only counts alongside SQLAlchemy import
+            # evidence (both lookaheads are anchored at start of source).
             (
                 re.compile(
-                    r"(?:from\s+sqlalchemy|import\s+sqlalchemy)"
-                    r"|\.filter\s*\(",
+                    r"\A(?=.*(?:from\s+(?:flask_)?sqlalchemy"
+                    r"|import\s+(?:flask_)?sqlalchemy))"
+                    r"(?=.*\.filter\s*\()",
+                    re.DOTALL,
                 ),
                 ["CWE-89"],
             ),
@@ -325,9 +327,11 @@ _DETECTORS: list[_FrameworkDetector] = [
                 ),
                 ["CWE-89"],
             ),
-            # ERB escaping (default in Rails 3+)
+            # ERB escaping (default in Rails 3+).  ``.html_safe`` is the
+            # API that disables escaping, so it is a void token (see
+            # _ESCAPE_HATCH_VOIDS), never presence evidence.
             (
-                re.compile(r"<%=.*%>|ActionView|\.html_safe"),
+                re.compile(r"<%=.*%>|ActionView"),
                 ["CWE-79"],
             ),
         ],
@@ -343,6 +347,20 @@ _DETECTORS: list[_FrameworkDetector] = [
         ],
     ),
 ]
+
+# Escape hatches that VOID a guarantee, keyed by (framework, cwe).  These
+# are searched over the WHOLE source (not a post-match lookahead): a file
+# that uses the framework's escape hatch anywhere has opted out of the
+# built-in protection, so no guarantee may be claimed for it — regardless
+# of where the hatch appears relative to the presence evidence.
+_ESCAPE_HATCH_VOIDS: dict[tuple[str, str], Pattern[str]] = {
+    # Django templates: |safe filter or mark_safe() bypass auto-escaping.
+    ("django", "CWE-79"): re.compile(r"\|\s*safe\b|mark_safe"),
+    # Jinja2 (Flask): |safe filter or Markup() bypass auto-escaping.
+    ("flask", "CWE-79"): re.compile(r"\|\s*safe\b|Markup\s*\("),
+    # Rails ERB: .html_safe, raw(), or <%== bypass default escaping.
+    ("rails", "CWE-79"): re.compile(r"\.html_safe\b|<%==|\braw\s*\("),
+}
 
 # Pre-index guarantees by (framework, cwe) for O(1) lookup.
 _GUARANTEE_INDEX: dict[tuple[str, str], FrameworkGuarantee] = {}
@@ -368,6 +386,11 @@ def framework_negates_cwe(
     extension (e.g. language inference from extension) but is currently
     unused beyond logging.
 
+    A framework's escape hatch (``mark_safe``, ``.html_safe``, ``|safe``,
+    ...) anywhere in *source* voids the corresponding guarantee: the file
+    has opted out of the built-in protection, so claiming it would steer
+    review away from exactly the code most likely to be vulnerable.
+
     Returns the matching ``FrameworkGuarantee`` if one is found, or
     ``None`` if no framework protection applies.
     """
@@ -376,6 +399,9 @@ def framework_negates_cwe(
             if cwe not in covered_cwes:
                 continue
             if pattern.search(source):
+                void = _ESCAPE_HATCH_VOIDS.get((framework_name, cwe))
+                if void is not None and void.search(source):
+                    continue
                 guarantee = _GUARANTEE_INDEX.get((framework_name, cwe))
                 if guarantee is not None:
                     return guarantee

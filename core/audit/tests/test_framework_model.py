@@ -40,6 +40,70 @@ class TestFrameworkNegatesCwe:
         assert result is not None
         assert result.framework == "go"
 
+    def test_django_mark_safe_before_render_does_not_negate(self) -> None:
+        # The escape hatch voids the guarantee regardless of where it
+        # appears relative to the rendering call.
+        source = (
+            "from django.shortcuts import render\n"
+            "safe_body = mark_safe(user_html)\n"
+            "return render(request, 't.html', {'body': safe_body})\n"
+        )
+        result = framework_negates_cwe("views.py", source, "CWE-79")
+        assert result is None
+
+    def test_rails_html_safe_alone_does_not_negate(self) -> None:
+        # .html_safe disables escaping; it must never count as evidence
+        # that escaping is in force.
+        source = "raw_output = params[:name].html_safe\n"
+        result = framework_negates_cwe("show.html.erb", source, "CWE-79")
+        assert result is None
+
+    def test_rails_erb_with_html_safe_does_not_negate(self) -> None:
+        source = "<%= comment.body.html_safe %>\n"
+        result = framework_negates_cwe("show.html.erb", source, "CWE-79")
+        assert result is None
+
+    def test_rails_erb_without_escape_hatch_negates_xss(self) -> None:
+        source = "<%= user.name %>\n<%= @post.title %>\n"
+        result = framework_negates_cwe("show.html.erb", source, "CWE-79")
+        assert result is not None
+        assert result.framework == "rails"
+        assert "CWE-79" in result.negates_cwe
+
+    def test_bare_filter_without_sqlalchemy_import_does_not_negate(self) -> None:
+        # .filter( is a generic method name; without framework import
+        # evidence it says nothing about SQL parameterisation.
+        source = "results = queryset.filter(name=user_input)\n"
+        result = framework_negates_cwe("query.py", source, "CWE-89")
+        assert result is None
+
+    def test_sqlalchemy_filter_with_import_negates_sqli(self) -> None:
+        source = (
+            "from sqlalchemy import select\n"
+            "q = session.query(User).filter(User.name == name)\n"
+        )
+        result = framework_negates_cwe("query.py", source, "CWE-89")
+        assert result is not None
+        assert result.framework == "flask"
+        assert "CWE-89" in result.negates_cwe
+
+    def test_flask_render_template_negates_xss(self) -> None:
+        source = (
+            "from flask import render_template\n"
+            "return render_template('index.html', name=name)\n"
+        )
+        result = framework_negates_cwe("app.py", source, "CWE-79")
+        assert result is not None
+        assert result.framework == "flask"
+
+    def test_flask_safe_filter_does_not_negate(self) -> None:
+        source = (
+            "from flask import render_template_string\n"
+            "return render_template_string('{{ body|safe }}', body=body)\n"
+        )
+        result = framework_negates_cwe("app.py", source, "CWE-79")
+        assert result is None
+
     def test_no_framework_returns_none(self):
         source = "int main() { return 0; }"
         result = framework_negates_cwe("main.c", source, "CWE-89")
