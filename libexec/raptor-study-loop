@@ -499,14 +499,19 @@ def _synthesise_overview(
     if not concepts:
         return "", "", "", None
 
+    # .get throughout: the model is a load_json dict (drift-tolerant
+    # loader), and a KeyError here escapes the caller's
+    # (OSError, ValueError) handler.
     concept_lines = "\n".join(
-        f"- {c['id']}: {c.get('description', '')}" for c in concepts
+        f"- {c.get('id', '?')}: {c.get('description', '')}"
+        for c in concepts
     )
     invariant_lines = "\n".join(
-        f"- {inv['id']}: {inv.get('statement', '')}" for inv in invariants
+        f"- {inv.get('id', '?')}: {inv.get('statement', '')}"
+        for inv in invariants
     )
     contract_lines = "\n".join(
-        f"- {ct['function']}: {ct.get('input_semantics', '')}"
+        f"- {ct.get('function', '?')}: {ct.get('input_semantics', '')}"
         for ct in contracts
     )
     target = dm_data.get("target", "")
@@ -871,7 +876,7 @@ def _render_study_report(output_dir: Path) -> None:
         parts.append("## API Reference\n")
         for c in struct_contracts + impl_contracts:
             parts.append(
-                f"### `{c['function']}` "
+                f"### `{c.get('function', '?')}` "
                 f"({c.get('file', '')})\n")
             if c.get("when"):
                 parts.append(f"**When:** {c['when']}\n")
@@ -1082,7 +1087,6 @@ def main() -> int:
         prep_cmd.extend(["--identifier", identifiers])
     if concepts:
         prep_cmd.extend(["--concept", concepts])
-    rl_path = output_dir / "reading-list.json"
     if rl_path.is_file():
         prep_cmd.extend(["--reading-list", str(rl_path)])
     if parsed.include_dirs:
