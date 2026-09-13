@@ -138,7 +138,30 @@ def binary_item_hash(file_entry: dict, item: dict) -> str | None:
     if not sha or addr is None:
         return None
     size = item.get("size") or (item.get("metadata") or {}).get("size") or 0
+    # Checklists round-trip through JSON and other producers may spell
+    # addresses as hex strings — coerce so both forms hash identically;
+    # unparsable values return None (missing hash only widens review)
+    # instead of raising out of the caller's checklist walk.
+    addr = _as_int(addr)
+    size = _as_int(size)
+    if addr is None or size is None:
+        return None
     return f"bin:{sha[:12]}:{addr:x}:{size:x}"
+
+
+def _as_int(value: Any) -> int | None:
+    """``value`` as an int; accepts hex/octal/binary string spellings
+    (``int(x, 0)``). None when unparsable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 0)
+        except ValueError:
+            return None
+    return None
 
 
 def binary_source_hash(

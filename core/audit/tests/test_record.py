@@ -66,3 +66,31 @@ class TestResolveAnnotationsDir:
         run = tmp_path / "run_standalone"
         run.mkdir()
         assert _resolve_annotations_dir(run) == run / "annotations"
+
+
+class TestBinaryItemHash:
+    _FILE_ENTRY = {"sha256": "a" * 64}
+
+    def test_int_address(self):
+        from core.audit.record import binary_item_hash
+        h = binary_item_hash(
+            self._FILE_ENTRY, {"address": 0x401000, "size": 32},
+        )
+        assert h == f"bin:{'a' * 12}:401000:20"
+
+    def test_hex_string_address_coerced(self):
+        # Checklists round-trip through JSON and other producers; a
+        # hex-string address must hash identically to its int form,
+        # not raise ValueError and abort the caller's checklist walk.
+        from core.audit.record import binary_item_hash
+        h = binary_item_hash(
+            self._FILE_ENTRY, {"address": "0x401000", "size": "32"},
+        )
+        assert h == f"bin:{'a' * 12}:401000:20"
+
+    def test_junk_address_returns_none(self):
+        # Missing hash only widens review — never an exception.
+        from core.audit.record import binary_item_hash
+        assert binary_item_hash(
+            self._FILE_ENTRY, {"address": "not-an-addr", "size": 1},
+        ) is None
