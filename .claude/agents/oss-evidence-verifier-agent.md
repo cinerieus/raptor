@@ -41,6 +41,11 @@ print(f"Loaded {len(store)} evidence items")
 is_valid, errors = store.verify_all()
 ```
 
+Entries prefixed `[warning]` mark checks that were SKIPPED (e.g. GH
+Archive verification without BigQuery credentials, local-git sources).
+Report those evidence items as **Not Checked**, never as Verified —
+skipped verification is not verification.
+
 This calls `ConsistencyVerifier.verify_all()` which:
 - Re-fetches GH Archive evidence via BigQuery
 - Re-queries GitHub API for API-sourced evidence

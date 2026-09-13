@@ -238,8 +238,16 @@ class EvidenceStore:
         }
 
     def verify_all(self) -> tuple[bool, list[str]]:
-        """Verify all evidence against their original sources."""
+        """Verify all evidence against their original sources.
+
+        Skipped checks (no credentials, unsupported source) are carried
+        as ``[warning] ...`` entries in the returned message list so a
+        run where verification could not actually happen never reads as
+        fully-verified with zero trace.
+        """
         from .verifiers.consistency import ConsistencyVerifier
         verifier = ConsistencyVerifier()
         result = verifier.verify_all(self._evidence)
-        return result.is_valid, result.errors
+        messages = list(result.errors)
+        messages.extend(f"[warning] {w}" for w in result.warnings)
+        return result.is_valid, messages

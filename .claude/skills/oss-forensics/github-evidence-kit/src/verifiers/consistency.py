@@ -35,18 +35,26 @@ class ConsistencyVerifier:
         return VerificationResult(is_valid=False, errors=["Unknown evidence type"])
 
     def verify_all(self, evidence_list: Sequence[Event | Observation]) -> VerificationResult:
-        """Verify a list of evidence items. Aggregates all errors."""
+        """Verify a list of evidence items. Aggregates all errors.
+
+        Skipped checks (no credentials, unsupported source) surface as
+        warnings on the aggregate result: this verifier is the
+        pipeline's anti-fabrication chokepoint, so "not checked" must
+        be distinguishable from "verified" even when nothing failed.
+        """
         all_errors: list[str] = []
+        all_warnings: list[str] = []
         all_valid = True
 
         for evidence in evidence_list:
             result = self.verify(evidence)
+            evidence_id = getattr(evidence, "evidence_id", "unknown")
             if not result.is_valid:
                 all_valid = False
-                evidence_id = getattr(evidence, "evidence_id", "unknown")
                 all_errors.extend(f"[{evidence_id}] {e}" for e in result.errors)
+            all_warnings.extend(f"[{evidence_id}] {w}" for w in result.warnings)
 
-        return VerificationResult(is_valid=all_valid, errors=all_errors)
+        return VerificationResult(is_valid=all_valid, errors=all_errors, warnings=all_warnings)
 
     def _verify_event(self, event: Event) -> VerificationResult:
         """Verify an event against the original source."""
@@ -55,7 +63,10 @@ class ConsistencyVerifier:
         if source == EvidenceSource.GHARCHIVE:
             return self._verify_gharchive_event(event)
         if source == EvidenceSource.GIT:
-            return VerificationResult(is_valid=True, errors=["Local git verification not supported"])
+            return VerificationResult(
+                is_valid=True,
+                warnings=["Local git verification not supported - not checked"],
+            )
         
         return VerificationResult(is_valid=False, errors=[f"Unknown verification source for event: {source}"])
 
@@ -68,7 +79,10 @@ class ConsistencyVerifier:
             EvidenceSource.GHARCHIVE: self._verify_gharchive_observation,
             EvidenceSource.WAYBACK: self._verify_url_accessible,
             EvidenceSource.SECURITY_VENDOR: self._verify_security_vendor,
-            EvidenceSource.GIT: lambda _o: VerificationResult(is_valid=True, errors=["Local git verification not supported"]),
+            EvidenceSource.GIT: lambda _o: VerificationResult(
+                is_valid=True,
+                warnings=["Local git verification not supported - not checked"],
+            ),
         }
 
         verifier = verifiers.get(source)
@@ -325,7 +339,10 @@ class ConsistencyVerifier:
             return VerificationResult(is_valid=False, errors=["No BigQuery table specified"])
 
         if not self._has_gharchive_credentials():
-            return VerificationResult(is_valid=True, errors=["GH Archive verification skipped - no credentials"])
+            return VerificationResult(
+                is_valid=True,
+                warnings=["GH Archive verification skipped - no credentials - not checked"],
+            )
 
         try:
             rows = self.gharchive_client.query_events(
@@ -345,7 +362,10 @@ class ConsistencyVerifier:
             return VerificationResult(is_valid=False, errors=["No BigQuery table specified"])
 
         if not self._has_gharchive_credentials():
-            return VerificationResult(is_valid=True, errors=["GH Archive verification skipped - no credentials"])
+            return VerificationResult(
+                is_valid=True,
+                warnings=["GH Archive verification skipped - no credentials - not checked"],
+            )
 
         try:
             rows = self.gharchive_client.query_events(

@@ -134,8 +134,15 @@ class VerificationInfo(BaseModel):
 
 
 class VerificationResult(BaseModel):
-    """Result of verification."""
+    """Result of verification.
+
+    ``warnings`` carries checks that were SKIPPED (no credentials,
+    unsupported source) rather than performed. A skipped check must
+    never read as "verified" — reports distinguish "verified" from
+    "not checked" via this field.
+    """
     is_valid: bool
     errors: list[str] = []
+    warnings: list[str] = []
 
 
