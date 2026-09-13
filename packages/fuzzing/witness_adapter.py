@@ -25,6 +25,21 @@ if TYPE_CHECKING:
     from packages.fuzzing.crash_collector import Crash
     from packages.fuzzing.crash_attribution import CrashAttribution
 
+# Cap on a single crash-input read. The crashes dir is written by the
+# (untrusted, possibly attacker-built) fuzz target: CrashCollector
+# refuses symlinks, but a hostile target can still plant an arbitrarily
+# large REGULAR file named "id:..." there, and an unbounded
+# read_bytes() loads it whole into host memory and then persists it
+# into the durable witness store. Trade-off both ways: AFL++'s default
+# max input is 1 MiB, so real crash inputs sit far below 4 MiB —
+# raising the cap only admits plants deeper into host memory and the
+# store; lowering it below AFL's configured max_len (operators can bump
+# it with -G) risks dropping genuine oversized crash inputs. Callers
+# treat the raise as a per-crash skip (logged), never a campaign abort.
+# TODO: migrate to the shared capped-read helper once one lands in
+# core.
+_MAX_CRASH_INPUT_BYTES = 4 * 1024 * 1024
+
 
 def witness_from_crash(
     crash: Crash,
@@ -57,7 +72,19 @@ def witness_from_crash(
     ``raptor-verified-outcomes`` — a solver-predicted input family
     produced an observed crash.
     """
-    data = Path(crash.input_file).read_bytes()
+    # Bounded read (cap + 1 probe byte) rather than stat-then-read:
+    # the file is target-writable, so a size check followed by an
+    # unbounded read would still race a growing plant.
+    with Path(crash.input_file).open("rb") as f:
+        data = f.read(_MAX_CRASH_INPUT_BYTES + 1)
+    if len(data) > _MAX_CRASH_INPUT_BYTES:
+        msg = (
+            f"crash input {crash.input_file} exceeds the "
+            f"{_MAX_CRASH_INPUT_BYTES}-byte witness cap — refusing to "
+            f"load a target-planted oversized file into the witness "
+            f"store"
+        )
+        raise ValueError(msg)
     bytes_hash = compute_bytes_hash(data)
 
     outcome_detail: dict = {
