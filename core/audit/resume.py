@@ -303,6 +303,14 @@ def persist_spend_floor(
     Monotonic: never lowers the recorded figure (a resumed segment's
     ledger starts below the whole-run floor until it re-books the
     prior segments).
+
+    Single-writer assumption: the read-compare-write below is not
+    atomic ACROSS processes — two concurrent writers could interleave
+    and let the lower figure land last. The orchestrator runs one
+    segment per run directory at a time (resume replaces, never
+    overlaps), so within that contract the file write itself being
+    atomic (save_json tempfile+rename) is sufficient; no locking
+    machinery here.
     """
     out_dir = Path(out_dir)
     if not out_dir.is_dir():
