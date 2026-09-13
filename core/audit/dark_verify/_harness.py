@@ -257,9 +257,12 @@ def generate_c_harness(
 def _c_format_for_type(return_type: str) -> str:
     stripped = return_type.strip()
     if stripped.endswith("*"):
-        base = stripped.rstrip("*").strip()
-        if base == "char":
-            return "%s"
+        # Every pointer — including char* — prints as %p pointer
+        # identity. %s would make the HARNESS dereference the returned
+        # buffer after the pre-call sentinel: a function legitimately
+        # returning a non-NUL-terminated buffer then overreads inside
+        # harness code, and the post-sentinel sanitizer report would
+        # classify as a confirmed bug in the target.
         return "%p"
     rt = stripped
     if rt in ("float", "double"):

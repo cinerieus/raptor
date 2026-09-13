@@ -674,6 +674,18 @@ def execute_witness(
 _MESSAGE_MATCH_LANGS = frozenset({"lua", "perl"})
 
 
+def _char_ptr_return(spec: DarkWitnessSpec) -> bool:
+    """True when a C-family spec declares a ``char*`` return.
+
+    The C harness prints every pointer return — including char* — as
+    %p pointer identity (a %s dereference in the HARNESS could itself
+    fault; see ``_c_format_for_type``), so the printed value is an
+    address a predicted string value can never match.
+    """
+    rt = str(spec.lang_config.get("return_type", "")).strip()
+    return rt.endswith("*") and rt.rstrip("*").strip() == "char"
+
+
 def _classify_json_output(
     spec: DarkWitnessSpec,
     stdout: str,
@@ -817,6 +829,16 @@ def _classify_json_output(
                 ),
             )
         if spec.expected_return is not None:
+            if language in ("c", "cpp") and _char_ptr_return(spec):
+                return DarkVerifyResult(
+                    finding_key=spec.finding_key, verdict="inconclusive",
+                    language=language, actual_return=actual_repr,
+                    match_detail=(
+                        "char* return is printed as pointer identity "
+                        "(see _c_format_for_type), so the predicted "
+                        "value cannot be compared; not a refutation"
+                    ),
+                )
             if language == "python":
                 # Python harness uses repr(), which includes quotes for strings
                 expected_repr = repr(spec.expected_return)

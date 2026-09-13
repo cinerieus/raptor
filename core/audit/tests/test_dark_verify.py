@@ -228,6 +228,27 @@ class TestGenerateCHarness:
         assert 'char buf[10] = "AAAA";' in harness
         assert "copy_buf(buf, 256)" in harness
 
+    def test_char_ptr_return_printed_as_pointer(self, tmp_path):
+        # %s would make the HARNESS dereference the returned buffer
+        # after the pre-call sentinel — a function legitimately
+        # returning a non-NUL-terminated buffer then overreads inside
+        # harness code, and the post-sentinel sanitizer report would
+        # read as a confirmed bug in the target.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="src/str.c", function="dup_prefix",
+            language="c",
+            lang_config={
+                "param_types": ["char *", "int"],
+                "return_type": "char *",
+                "arg_expressions": ["buf", "4"],
+                "includes": [],
+                "setup_lines": ['char buf[10] = "AAAA";'],
+            },
+        )
+        harness = generate_c_harness(spec, tmp_path)
+        assert "%s" not in harness
+        assert "%p" in harness
+
 
 # -- generate_go_harness ------------------------------------------------------
 
@@ -467,6 +488,29 @@ class TestClassifyOutput:
         )
         r = _classify_output(spec, "not json at all", "python")
         assert r.verdict == "inconclusive"
+
+    def test_char_ptr_return_value_check_is_inconclusive(self):
+        # char* results print as %p pointer identity, so a predicted
+        # string value can never be compared against the output — the
+        # mismatch is insufficiency of evidence, not a refutation.
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.c", function="f", language="c",
+            expected_return="hello",
+            lang_config={"return_type": "char *"},
+        )
+        stdout = json.dumps({"status": "returned", "value": "0x5591ab0"})
+        r = _classify_output(spec, stdout, "c")
+        assert r.verdict == "inconclusive"
+
+    def test_int_return_value_check_still_compares(self):
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.c", function="f", language="c",
+            expected_return="7",
+            lang_config={"return_type": "int"},
+        )
+        stdout = json.dumps({"status": "returned", "value": "7"})
+        r = _classify_output(spec, stdout, "c")
+        assert r.verdict == "confirmed"
 
     def test_no_expected_return_is_inconclusive(self):
         spec = DarkWitnessSpec(
