@@ -301,6 +301,81 @@ class TestRecording:
         assert sweep_rec.tp_rate is None  # no triage → no verdict
         assert entry.tp_rate == pytest.approx(0.9)  # precision untouched
 
+    def test_engine_errored_run_records_no_coverage(
+        self, tmp_path, monkeypatch,
+    ):
+        # A target the engine could NOT scan proves nothing: it must
+        # not become a zero-match TargetRecord (negative coverage
+        # evidence that inflates targets_tested and feeds
+        # auto-archive). The failure surfaces on report.errors only.
+        lib_dir = _write_library(tmp_path, [_manifest_entry("sg")])
+        before = (lib_dir / "manifest.json").read_text()
+        target = tmp_path / "t"
+        target.mkdir()
+        monkeypatch.setattr(
+            rs.semgrep_runner, "run_rule",
+            lambda *a, **k: SemgrepResult(
+                name="sg", errors=["sandbox unavailable"], returncode=-1,
+            ),
+        )
+        report = rs.run_sweep([target], library_dir=lib_dir, record=True)
+        assert report.recorded_updates == 0
+        assert report.matches == []
+        assert len(report.errors) == 1
+        entry = RuleLibrary(lib_dir).all_entries()[0]
+        assert len(entry.targets) == 1  # original only — no sweep record
+        assert (lib_dir / "manifest.json").read_text() == before
+
+    def test_cocci_errored_run_records_no_coverage(
+        self, tmp_path, monkeypatch,
+    ):
+        lib_dir = _write_library(
+            tmp_path, [_manifest_entry("cc", engine="coccinelle")],
+        )
+        target = tmp_path / "t"
+        target.mkdir()
+        (target / "a.c").write_text("int main(void){return 0;}\n")
+        monkeypatch.setattr(
+            rs.cocci_runner, "run_rule",
+            lambda *a, **k: SpatchResult(
+                rule="cc", errors=["spatch crashed"], returncode=2,
+            ),
+        )
+        report = rs.run_sweep([target], library_dir=lib_dir, record=True)
+        assert report.recorded_updates == 0
+        assert report.matches == []
+        assert len(report.errors) == 1
+        entry = RuleLibrary(lib_dir).all_entries()[0]
+        assert len(entry.targets) == 1
+
+    def test_errored_rule_does_not_feed_auto_archive(
+        self, tmp_path, monkeypatch,
+    ):
+        # Counterpart to test_zero_match_sweeps_can_auto_archive:
+        # three ERRORED runs (vs three genuine zero-match runs) must
+        # NOT retire the rule — failed scans are not evidence the
+        # rule never fires.
+        lib_dir = _write_library(
+            tmp_path, [_manifest_entry("dud", n_targets=1)],
+        )
+        manifest = json.loads((lib_dir / "manifest.json").read_text())
+        manifest["rules"][0]["total_variants"] = 0
+        (lib_dir / "manifest.json").write_text(json.dumps(manifest))
+        targets = []
+        for i in range(3):
+            t = tmp_path / f"t{i}"
+            t.mkdir()
+            targets.append(t)
+        monkeypatch.setattr(
+            rs.semgrep_runner, "run_rule",
+            lambda *a, **k: SemgrepResult(
+                name="dud", errors=["engine failure"], returncode=-1,
+            ),
+        )
+        rs.run_sweep(targets, library_dir=lib_dir, record=True)
+        entry = RuleLibrary(lib_dir).all_entries()[0]
+        assert entry.archived is False
+
     def test_zero_match_sweeps_can_auto_archive(self, tmp_path, monkeypatch):
         # Enough zero-match targets push a never-firing rule over the
         # prune threshold — sweep evidence alone can retire it.

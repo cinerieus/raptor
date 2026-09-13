@@ -200,13 +200,20 @@ def _sweep_semgrep_rule(
     tier: str,
     tp_rate: float | None,
     targets_tested: int,
-) -> list[SweepMatch]:
+) -> list[SweepMatch] | None:
+    """Run one semgrep library rule against *target*.
+
+    Returns the (capped) matches, or ``None`` when the engine
+    errored — an errored run is NOT a zero-match run and must never
+    become coverage evidence (see the ``None`` handling in
+    ``run_sweep``). The error is recorded on ``report.errors``.
+    """
     result = semgrep_runner.run_rule(target, str(rule_path), name=rule_id)
     if result.errors:
         report.errors.extend(
             f"semgrep {rule_id} @ {target}: {e}" for e in result.errors
         )
-        return []
+        return None
     hits = _cap(report, rule_id, target, result.findings)
     return [
         SweepMatch(
@@ -237,13 +244,15 @@ def _sweep_cocci_rule(
     targets_tested: int,
     provenance: str = "rule-library",
     tier: str = "library",
-) -> list[SweepMatch]:
+) -> list[SweepMatch] | None:
+    """Coccinelle counterpart to ``_sweep_semgrep_rule`` — same
+    ``None``-on-engine-error contract."""
     result = cocci_runner.run_rule(target, rule_path, no_includes=True)
     if result.errors:
         report.errors.extend(
             f"coccinelle {rule_id} @ {target}: {e}" for e in result.errors
         )
-        return []
+        return None
     hits = _cap(report, rule_id, target, result.matches)
     return [
         SweepMatch(
@@ -280,6 +289,14 @@ def _record(
     keep its precision forever (auto-archive can only trigger when the
     target list grows) and overstate per-target confidence (counting
     only hit-targets).
+
+    Engine-ERRORED runs never reach this function: a target the
+    engine could not scan proves nothing (same fail-closed stance as
+    synthesis's fixture handling), so the sweep runners return
+    ``None`` and ``run_sweep`` skips both the match extend and this
+    record — the failure lives on ``report.errors`` (one explicit
+    entry per rule@target) instead of becoming zero-match coverage
+    that inflates targets_tested and feeds auto-archive.
     """
     entry = lib.update(
         rule_id,
@@ -383,6 +400,8 @@ def run_sweep(
                 tp_rate=entry.tp_rate,
                 targets_tested=len(entry.targets),
             )
+            if matches is None:
+                continue  # engine error — recorded on report.errors
             report.matches.extend(matches)
             if record:
                 _record(lib, report, entry.rule_id, target, matches,
@@ -404,6 +423,8 @@ def run_sweep(
                     tp_rate=entry.tp_rate,
                     targets_tested=len(entry.targets),
                 )
+                if matches is None:
+                    continue  # engine error — recorded on report.errors
                 report.matches.extend(matches)
                 if record:
                     _record(lib, report, entry.rule_id, target, matches,
@@ -426,6 +447,8 @@ def run_sweep(
                 tp_rate=entry.tp_rate if entry else None,
                 targets_tested=len(entry.targets) if entry else 0,
             )
+            if matches is None:
+                continue  # engine error — recorded on report.errors
             report.matches.extend(matches)
             if record and rule_id in library_rule_ids:
                 _record(lib, report, rule_id, target, matches, timestamp)
@@ -448,6 +471,8 @@ def run_sweep(
                     provenance="graduated",
                     tier="graduated",
                 )
+                if matches is None:
+                    continue  # engine error — recorded on report.errors
                 report.matches.extend(matches)
                 if record and rule_id in library_rule_ids:
                     _record(lib, report, rule_id, target, matches, timestamp)
