@@ -200,28 +200,16 @@ def _filter_fork_tag_false_positives(
     return out
 
 
-# Upstream branch / channel names that show up as prerelease tokens on
-# branch-snapshot builds of the SAME project (``1.0.0-master``). These
-# are NOT fork indicators: a branch snapshot builds the upstream
-# codebase, so a server-confirmed vulnerability match must stay
-# reported. Only genuine org/fork tags (``0.4.3-succinct``,
-# ``1.0.0-fork.mycorp``) qualify for the false-positive prune below.
-_UPSTREAM_BRANCH_TOKENS = frozenset({
-    "master", "main", "trunk", "head", "default",
-    "develop", "development", "staging",
-    "stable", "latest", "release",
-})
-
-
 def _version_has_fork_tag(version: str | None) -> bool:
     """Strict fork-tag classification for the post-filter.
 
     True only when *version* carries a semver prerelease whose tokens
-    are an org/fork tag (per ``is_fork_tag``) AND none of them is a
-    known upstream branch/channel name. Without the branch check, any
-    digit-free prerelease qualified — so a vulnerable ``1.0.0-master``
-    pin (an upstream branch snapshot, not a fork) was silently pruned
-    even though the server confirmed the match.
+    are an org/fork tag per ``is_fork_tag`` — which itself excludes
+    known upstream branch/channel names (``UPSTREAM_BRANCH_TOKENS``):
+    a vulnerable ``1.0.0-master`` pin is an upstream branch snapshot,
+    not a fork, and must never be pruned. The token set lives in
+    ``versions.semver`` so the offline ``in_range`` path shares the
+    identical guard.
     """
     if not version:
         return False
@@ -232,8 +220,6 @@ def _version_has_fork_tag(version: str | None) -> bool:
     except ValueError:
         return False
     if not pre:
-        return False
-    if any(token.lower() in _UPSTREAM_BRANCH_TOKENS for token in pre):
         return False
     return is_fork_tag(pre)
 
