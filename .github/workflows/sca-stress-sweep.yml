@@ -383,7 +383,7 @@ jobs:
         # live under the stress-clones cache root and are too big
         # for an artefact; just the per-sample summary table goes.
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sca-stress-sweep-${{ github.run_id }}
           path: |

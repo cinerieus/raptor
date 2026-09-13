@@ -46,7 +46,9 @@ env:
   # Same CI hang net as tests.yml: dump every Python stack if a single
   # test runs >120s, then let it continue.
   PYTEST_ADDOPTS: "-o faulthandler_timeout=120"
-  # See tests.yml: several pinned JS actions still declare node20.
+  # See tests.yml: every JS action pinned here declares node24 now;
+  # kept as a regression guard until the repo's last node20 action
+  # (actions/delete-package-versions) ships a Node 24 release.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
