@@ -326,18 +326,16 @@ _TABLE: tuple[KnownSafeCall, ...] = (
             "(by extension) HTML-safe for text content."
         ),
     ),
-    KnownSafeCall(
-        library_call="g_uri_escape_string",
-        sink_class="pathtrav",
-        languages=("c", "cpp"),
-        input_arg_kind="transform",
-        soundness_note=(
-            "GLib g_uri_escape_string (since GLib 2.16) percent-encodes "
-            "every byte that isn't in the user-supplied reserved set, "
-            "by default escaping path separators and traversal sequences. "
-            "Returns a newly-allocated URI-safe string."
-        ),
-    ),
+    # NB: g_uri_escape_string is DELIBERATELY absent from pathtrav:
+    # per RFC 3986 (and GLib's implementation) '.' is UNRESERVED and
+    # never percent-encoded, so the traversal sequence ".." passes
+    # through verbatim — joined under a base directory it escapes one
+    # level. The call does escape '/' (unless caller-allowed), but the
+    # pathtrav danger model includes '.' for exactly this dot-segment
+    # reason, so a separator-only claim cannot certify the sink class.
+    # Same precedent as the FilenameUtils.getName exclusion above: a
+    # sound pathtrav transform needs dot-segment stripping, which no
+    # percent-encoder provides.
     KnownSafeCall(
         library_call="g_shell_quote",
         sink_class="cmdi",

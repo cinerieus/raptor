@@ -71,3 +71,24 @@ def test_no_duplicate_entries():
             key = (e.library_call, e.sink_class, lang)
             assert key not in seen, f"duplicate entry for {key}"
             seen.add(key)
+
+
+def test_percent_encoders_never_certify_pathtrav():
+    """URI percent-encoders leave RFC-3986 unreserved characters —
+    including '.' — untouched, so '..' survives verbatim and escapes a
+    base directory by one level. No percent-encoder may appear as a
+    pathtrav entry (g_uri_escape_string was once listed and would have
+    minted a sound-tier suppression for a live '..' traversal)."""
+    for lang in ("c", "cpp", "python", "java", "javascript"):
+        assert ksc.find("g_uri_escape_string", "pathtrav", lang) is None
+
+
+def test_pathtrav_entries_defeat_dot_segments():
+    """Every remaining pathtrav claim must handle '..' itself, not just
+    separators: safe_join raises NotFound on traversal; secure_filename
+    strips leading/trailing '.' (so a bare '..' collapses to '')."""
+    pathtrav = [e for e in ksc.all_entries() if e.sink_class == "pathtrav"]
+    assert {e.library_call for e in pathtrav} == {
+        "werkzeug.security.safe_join",
+        "werkzeug.utils.secure_filename",
+    }
