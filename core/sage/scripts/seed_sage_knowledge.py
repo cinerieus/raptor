@@ -362,7 +362,11 @@ async def _seed_one(
                 return (label, "skipped")
 
             embedding = await client.embed(mem["content"])
-            mt = getattr(MemoryType, mem["memory_type"], MemoryType.observation)
+            # Shared allowlist resolution — never getattr on the enum
+            # (dunder acceptance / silent-typo default; see
+            # resolve_memory_type).
+            from core.sage.client import resolve_memory_type
+            mt = resolve_memory_type(mem["memory_type"], MemoryType)
             await client.propose(
                 content=mem["content"],
                 memory_type=mt,

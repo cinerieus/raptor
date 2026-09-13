@@ -145,6 +145,37 @@ class TestRepoRoot(unittest.TestCase):
         self.assertTrue((ssk.REPO_ROOT / "core" / "sage" / "scripts").is_dir())
 
 
+class TestSeedOneMemoryType(unittest.TestCase):
+    """_seed_one routes memory_type through the shared allowlist —
+    never getattr on the enum (dunder acceptance / silent-typo
+    default)."""
+
+    def _seed(self, memory_type: str):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        mem = {"label": "x", "domain": "d", "content": "c",
+               "memory_type": memory_type, "confidence": 0.9}
+        client = AsyncMock()
+        client.embed.return_value = [0.1]
+        enum = SimpleNamespace(fact="fact", observation="observation",
+                               inference="inference", task="task")
+        with mock.patch.object(ssk, "MemoryType", enum):
+            label, status = asyncio.run(ssk._seed_one(
+                client, mem, force=True, sem=asyncio.Semaphore(1)))
+        self.assertEqual(status, "stored")
+        return client.propose.call_args.kwargs["memory_type"]
+
+    def test_fact_maps_to_enum_member(self):
+        self.assertEqual(self._seed("fact"), "fact")
+
+    def test_dunder_name_falls_back_to_observation(self):
+        # getattr(MemoryType, "__class__", ...) resolved to the class
+        # object and shipped it as the memory type.
+        self.assertEqual(self._seed("__class__"), "observation")
+
+
 class TestScriptModePathSetup(unittest.TestCase):
     """Script-mode sys.path setup comes from RAPTOR_DIR (the
     path-safety rule), never from __file__; without RAPTOR_DIR the

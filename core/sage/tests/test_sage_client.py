@@ -211,6 +211,39 @@ class TestSageClientWithMock(unittest.TestCase):
             _restore_sdk(client_mod, snapshot)
 
 
+class TestResolveMemoryType(unittest.TestCase):
+    """The shared memory-type allowlist (used by SageClient.propose and
+    the seeding scripts): dict membership, never getattr on the enum."""
+
+    _ENUM = SimpleNamespace(
+        fact="fact", observation="observation",
+        inference="inference", task="task",
+    )
+
+    def _resolve(self, name):
+        from core.sage.client import resolve_memory_type
+        return resolve_memory_type(name, self._ENUM)
+
+    def test_canonical_names_map(self):
+        self.assertEqual(self._resolve("fact"), "fact")
+        self.assertEqual(self._resolve("task"), "task")
+
+    def test_legacy_aliases_fold(self):
+        self.assertEqual(self._resolve("hypothesis"), "inference")
+        self.assertEqual(self._resolve("lesson"), "observation")
+
+    def test_dunder_name_never_resolves_via_attribute(self):
+        # getattr(enum, "__class__") would hand back the class object;
+        # the allowlist must fall back to observation instead.
+        with self.assertLogs("raptor", level="WARNING"):
+            self.assertEqual(self._resolve("__class__"), "observation")
+
+    def test_typo_warns_and_falls_back(self):
+        with self.assertLogs("raptor", level="WARNING") as cm:
+            self.assertEqual(self._resolve("observatoin"), "observation")
+        self.assertIn("unknown memory_type", " ".join(cm.output))
+
+
 class TestQueryCacheBoundAndRace(unittest.TestCase):
     """The per-instance query cache is FIFO-bounded (256, insertion
     order — not LRU), and its eviction tolerates the concurrent-pop

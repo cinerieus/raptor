@@ -120,6 +120,57 @@ def _use_direct_embed() -> bool:
     return _direct_embed
 
 
+def resolve_memory_type(memory_type: str, enum: Any) -> Any:
+    """Resolve a memory-type NAME onto the SAGE ``MemoryType`` enum.
+
+    Explicit allowlist via dict membership rather than
+    ``getattr(enum, memory_type, default)``: ``getattr`` accepted
+    *any* attribute on the enum — including dunder methods
+    (``__init__``, ``__class__``, ``__hash__``) which would either
+    break the propose call downstream with a cryptic type error or
+    silently succeed with the wrong type. A typo (``observatoin``)
+    also fell through to the ``observation`` default silently, hiding
+    the bug from the operator. Here a typo surfaces as an explicit
+    "unknown memory_type ..." log and the call falls back
+    deliberately, not by accident.
+
+    SAGE MemoryType enum = {fact, observation, inference, task}
+    (docs/reference/python-sdk.md). The 6.6.x extras RAPTOR used to
+    reference (hypothesis, evidence, decision, lesson) no longer
+    exist on the enum. Legacy names stay accepted as inputs, folded
+    onto the nearest surviving member so any caller still passing
+    them degrades sensibly instead of silently collapsing to
+    "observation":
+      hypothesis -> inference (a drawn conclusion)
+      evidence/decision/lesson -> observation (recorded fact about
+        what happened)
+
+    ``enum`` is passed by the caller (the lazily-bound ``_MemoryType``
+    here; ``sage_sdk.models.MemoryType`` in the seeding scripts) so
+    every propose path shares this one allowlist.
+    """
+    allowed = {
+        "fact": enum.fact,
+        "observation": enum.observation,
+        "inference": enum.inference,
+        "task": enum.task,
+        # Legacy 6.6.x aliases, mapped onto the current enum.
+        "hypothesis": enum.inference,
+        "evidence": enum.observation,
+        "decision": enum.observation,
+        "lesson": enum.observation,
+    }
+    mt = allowed.get(memory_type)
+    if mt is None:
+        if memory_type != "observation":
+            logger.warning(
+                "SAGE propose: unknown memory_type=%r, "
+                "falling back to observation", memory_type,
+            )
+        mt = enum.observation
+    return mt
+
+
 def _embed_via_ollama(text: str) -> list[float] | None:
     """Call Ollama's /api/embed directly with a 60s timeout.
 
@@ -327,50 +378,7 @@ class SageClient:
             if embedding is None:
                 embedding = self.embed(content)
 
-            # Explicit allowlist via dict membership rather than
-            # `getattr(_MemoryType, memory_type, default)`. Pre-fix
-            # `getattr` accepted *any* attribute on the enum
-            # — including dunder methods (`__init__`, `__class__`,
-            # `__hash__`) which would either break the propose call
-            # downstream with a cryptic type error or silently
-            # succeed with the wrong type. A typo (`observatoin`)
-            # also fell through to the `observation` default
-            # silently, hiding the bug from the operator.
-            #
-            # Dict-keyed by the canonical lower-case name so a typo
-            # surfaces as an explicit "unknown memory_type ..." log
-            # and the call falls back deliberately, not by accident.
-            #
-            # SAGE MemoryType enum = {fact, observation,
-            # inference, task} (docs/reference/python-sdk.md). The
-            # 6.6.x extras RAPTOR used to reference (hypothesis,
-            # evidence, decision, lesson) no longer exist on the
-            # enum. We keep accepting those legacy names as inputs
-            # and fold them onto the nearest surviving member so any
-            # caller still passing them degrades sensibly instead of
-            # silently collapsing to "observation":
-            #   hypothesis -> inference (a drawn conclusion)
-            #   evidence/decision/lesson -> observation (recorded fact
-            #     about what happened)
-            allowed = {
-                "fact": _MemoryType.fact,
-                "observation": _MemoryType.observation,
-                "inference": _MemoryType.inference,
-                "task": _MemoryType.task,
-                # Legacy 6.6.x aliases, mapped onto the current enum.
-                "hypothesis": _MemoryType.inference,
-                "evidence": _MemoryType.observation,
-                "decision": _MemoryType.observation,
-                "lesson": _MemoryType.observation,
-            }
-            mt = allowed.get(memory_type)
-            if mt is None:
-                if memory_type != "observation":
-                    logger.warning(
-                        "SAGE propose: unknown memory_type=%r, "
-                        "falling back to observation", memory_type,
-                    )
-                mt = _MemoryType.observation
+            mt = resolve_memory_type(memory_type, _MemoryType)
             propose_kwargs: dict[str, Any] = dict(
                 content=content,
                 memory_type=mt,
