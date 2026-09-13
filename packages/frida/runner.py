@@ -400,9 +400,20 @@ def _attach_or_spawn(_frida_mod: Any, device: Any, cfg: RunConfig
         child_env = _spawn_env()
         try:
             pid = device.spawn([binary], env=child_env)
-        except TypeError:
-            # Older frida bindings without the env kwarg.
-            pid = device.spawn([binary])
+        except TypeError as e:
+            # Older frida bindings without the env kwarg. Spawning
+            # WITHOUT env control would hand the target the driver's
+            # full environment (credentials included) — the exact leak
+            # _spawn_env exists to stop. Fail closed: the target is
+            # untrusted code, so no spawn without a curated env.
+            msg = (
+                "frida bindings too old to control the spawned "
+                "target's environment (device.spawn lacks the env "
+                "kwarg); refusing to spawn the untrusted target with "
+                "the driver's full environment. Upgrade the frida "
+                "python bindings (>= 12 supports env=)."
+            )
+            raise RuntimeError(msg) from e
         session = device.attach(pid)
         return session, pid
     if t.pid is not None:

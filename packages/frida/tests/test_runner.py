@@ -75,7 +75,7 @@ class FakeDevice:
         self.attach_calls: list[Any] = []
         self._next_spawn_pid = 9999
 
-    def spawn(self, argv: list[str]) -> int:
+    def spawn(self, argv: list[str], env: dict | None = None) -> int:
         self.spawn_calls.append(argv)
         return self._next_spawn_pid
 
@@ -562,3 +562,33 @@ def test_fast_setup_reports_small_setup_sec(tmp_path: Path):
     assert result.ok is True
     assert result.setup_sec < 0.5
     assert result.duration_actual_sec >= 0.05
+
+
+class OldBindingsFakeDevice(FakeDevice):
+    """frida bindings predating the spawn env kwarg."""
+
+    def spawn(self, argv: list[str]) -> int:  # type: ignore[override]
+        self.spawn_calls.append(argv)
+        return self._next_spawn_pid
+
+
+def test_old_bindings_spawn_refuses_instead_of_leaking_env(
+    tmp_path: Path, monkeypatch,
+):
+    """Bindings without env control would spawn the untrusted target
+    with the driver's FULL environment — refuse instead of leaking."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret-do-not-leak")
+    device = OldBindingsFakeDevice("local")
+    binary = tmp_path / "victim"
+    binary.write_text("#!/bin/sh\necho hi\n")
+    cfg = runner.RunConfig(
+        target=runner.parse_target(str(binary)),
+        out_dir=tmp_path,
+        script_source="// noop",
+        script_origin="file:noop.js",
+        duration_sec=0.02,
+    )
+    fake = _fake_frida(device)
+    result = runner.run(cfg, frida_mod_override=fake)
+    assert result.ok is False
+    assert "refusing to spawn" in (result.error or "")
