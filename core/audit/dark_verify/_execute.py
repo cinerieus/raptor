@@ -1225,6 +1225,30 @@ def _sandbox_run_capped(
                 leftover.unlink()
 
 
+def _is_cargo_home(path: str) -> bool:
+    """True when *path* is the cargo home directory.
+
+    ``_resolve_rustc``'s fallback can hand back the ``bin/rustc``
+    proxy under the cargo home; granting that bin dir's PARENT would
+    expose the registry credential store (``credentials`` /
+    ``credentials.toml``) to target-derived code — the compile step
+    honours ``include_str!`` reads and witness stdout is persisted, so
+    that grant is a straight exfil channel. Recognise the cargo home
+    by its configured location ($CARGO_HOME, default ``~/.cargo``) or
+    by the credential files it directly holds; the bin dir grant alone
+    is enough to exec the proxy.
+    """
+    real = os.path.realpath(path)
+    cargo_home = os.environ.get("CARGO_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cargo")
+    if real == os.path.realpath(cargo_home):
+        return True
+    return any(
+        os.path.isfile(os.path.join(real, name))
+        for name in ("credentials", "credentials.toml")
+    )
+
+
 def _toolchain_read_paths(binary: str | None) -> list[str]:
     """Read-allowance roots for a toolchain binary under restrict_reads.
 
@@ -1240,7 +1264,8 @@ def _toolchain_read_paths(binary: str | None) -> list[str]:
     binary's bin dir plus its parent (the runtime root holding the
     sibling lib/ tree).  ``$HOME`` itself — or any ancestor of it — is
     never granted: that would reopen the exact channel restrict_reads
-    closes.
+    closes.  Neither is the cargo home (see :func:`_is_cargo_home`):
+    its bin dir is grantable, the credential-holding root is not.
     """
     if not binary:
         return []
@@ -1261,6 +1286,8 @@ def _toolchain_read_paths(binary: str | None) -> list[str]:
                for p in _SYSTEM_TOOLCHAIN_PREFIXES):
             continue
         if cand in ("/", home) or home.startswith(cand + "/"):
+            continue
+        if _is_cargo_home(cand):
             continue
         if cand not in paths:
             paths.append(cand)

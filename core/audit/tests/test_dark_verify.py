@@ -3793,6 +3793,42 @@ class TestToolchainReadPaths:
         for p in paths:
             assert p == str(bin_dir)
 
+    def test_never_grants_cargo_home(self, tmp_path, monkeypatch):
+        # The rustup proxy fallback resolves rustc to
+        # <cargo-home>/bin/rustc; a parent-dir grant there would expose
+        # the registry credential store to target-derived code (compile
+        # steps honour include_str! and witness stdout is persisted).
+        home = tmp_path / "home" / "user"
+        cargo = home / ".cargo"
+        bin_dir = cargo / "bin"
+        bin_dir.mkdir(parents=True)
+        tool = bin_dir / "rustc"
+        tool.write_text("#!/bin/sh\n")
+        (cargo / "credentials.toml").write_text("[registry]\n")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("CARGO_HOME", raising=False)
+
+        paths = _toolchain_read_paths(str(tool))
+        assert str(bin_dir) in paths
+        assert str(cargo) not in paths
+
+    def test_never_grants_credential_bearing_parent(
+        self, tmp_path, monkeypatch,
+    ):
+        # A relocated cargo home is recognised by the credential file
+        # it directly holds, not only by its default location.
+        root = tmp_path / "toolhome"
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True)
+        tool = bin_dir / "rustc"
+        tool.write_text("#!/bin/sh\n")
+        (root / "credentials").write_text('token = "x"\n')
+        monkeypatch.delenv("CARGO_HOME", raising=False)
+
+        paths = _toolchain_read_paths(str(tool))
+        assert str(bin_dir) in paths
+        assert str(root) not in paths
+
     def test_system_prefix_binaries_need_no_extra_grant(self):
         # /bin, /usr are already in the restricted read allowlist.
         assert _toolchain_read_paths("/bin/sh") == []
