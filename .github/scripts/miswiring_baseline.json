@@ -220,9 +220,6 @@
     "artifacts:write_only_artifact::cascade.json": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
-    "artifacts:write_only_artifact::cc-proxy-spend.json": {
-      "note": "operator-facing per-run settlement record (reconciled credential-proxy token spend vs budget), same class as suppressions.jsonl: consumed by humans/jq from the run dir, deliberately not by production code."
-    },
     "artifacts:write_only_artifact::census.json": {
       "note": "raptor-recall-measure census subcommand output: machine-readable dual of census.md, for humans/jq; the rendered markdown is also printed to stdout, same class as suppressions.jsonl"
     },
@@ -341,7 +338,7 @@
       "note": "operator/LLM-facing output: packages/frida cli._maybe_correlate_io writes the ingest-payload/call-argument correlation report after a run and prints its path for the operator to inspect; no in-repo literal-name production reader by design (tests assert the file, the CLI only echoes the path)"
     },
     "artifacts:write_only_artifact::matches.jsonl": {
-      "note": "raptor-variant-sweep output (replay_sweep.write_report): ranked sweep matches for operator review; the path is printed at the end of the run, same class as suppressions.jsonl"
+      "note": "variant-sweep output (replay_sweep.write_report, library API driven by run_sweep consumers): ranked sweep matches for operator review; the path is printed at the end of the run, same class as suppressions.jsonl"
     },
     "artifacts:write_only_artifact::matrix.json": {
       "note": "feature-matrix run artifact (core/sandbox/scripts/feature-matrix/bin/report.py): operator-facing matrix rendering, uploaded by the weekly workflow; consumed outside production code by design."
@@ -384,9 +381,6 @@
     },
     "artifacts:write_only_artifact::r.yml": {
       "note": "externally consumed: raptor-self-test writes a scratch Semgrep rule file that semgrep (external tool) reads via --config"
-    },
-    "artifacts:write_only_artifact::recon.json": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
     "artifacts:write_only_artifact::release-order.json": {
       "note": "operator-facing run artifact: release_order channel prepass receipts (core/audit/release_order.py), consumed via /review and manual triage \u2014 no production reader by design (the audit-log artifact pattern)"
@@ -443,7 +437,7 @@
       "note": "operator-facing mirror of the staleness quarantine; the machine-consumed re-derive signal rides the reading list (pending items drained on the next study pass)"
     },
     "artifacts:write_only_artifact::summary.json": {
-      "note": "raptor-variant-sweep output (replay_sweep.write_report): per-rule totals + errors for operator review (\"see summary.json\" is printed when a sweep records errors)"
+      "note": "variant-sweep output (replay_sweep.write_report, library API driven by run_sweep consumers): per-rule totals + errors for operator review (\"see summary.json\" is printed when a sweep records errors)"
     },
     "artifacts:write_only_artifact::summary.txt": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
@@ -613,31 +607,16 @@
     "dead:dead_method:packages/autonomous/corpus_generator.py:CorpusGenerator.generate_mutated_seed": {
       "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
     },
-    "dead:dead_method:packages/autonomous/corpus_generator.py:CorpusGenerator.learn_from_crash": {
-      "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
-    },
     "dead:dead_method:packages/autonomous/corpus_generator.py:CorpusGenerator.optimize_corpus": {
       "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
     },
     "dead:dead_method:packages/autonomous/exploit_validator.py:ExploitValidator.quick_syntax_check": {
       "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
     },
-    "dead:dead_method:packages/autonomous/goal_planner.py:GoalPlanner.adapt_fuzzing_strategy": {
-      "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
-    },
-    "dead:dead_method:packages/autonomous/goal_planner.py:GoalPlanner.should_continue_towards_goal": {
-      "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
-    },
-    "dead:dead_method:packages/autonomous/goal_planner.py:GoalPlanner.update_goal_progress": {
-      "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
-    },
     "dead:dead_method:packages/autonomous/planner.py:FuzzingState.is_finding_crashes": {
       "note": "kept: feature seed \u2014 autonomous fuzzing loop (operator decision 2026-08-16, reaffirmed 2026-08-17); unwired since introduction"
     },
     "dead:dead_method:packages/exploit_feasibility/analyzer.py:FeasibilityAnalyzer.quick_check": {
-      "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
-    },
-    "dead:dead_method:packages/exploit_feasibility/context.py:BinaryContext.rank_write_targets": {
       "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
     },
     "dead:dead_method:packages/exploit_feasibility/errors.py:AnalysisErrorCollector.add_binary_error": {
@@ -747,9 +726,6 @@
     },
     "plumbing:orphan_config_field:core/llm/tool_use/types.py:TurnStarted.input_token_estimate": {
       "note": "kept: published observability API (2026-08-17 config-orphan pass). TurnStarted is a frozen event dataclass exported in core.llm.tool_use.__all__ for external subscribers; per-turn input-token telemetry is the point of the event. The in-repo hunt_dispatch subscriber deliberately skips TurnStarted; the value is computed regardless for the context-policy gate (loop.py)."
-    },
-    "plumbing:orphan_config_field:packages/autonomous/planner.py:FuzzingState.last_coverage_increase": {
-      "note": "kept: autonomous fuzzing loop feature seed (operator decision 2026-08-16; re-affirmed 2026-08-17 config-orphan pass \u2014 goal_progress and strategies_tried deleted as shadowed by Goal.progress / successful_strategies). This is the natural input the wired loop derives coverage_plateau_duration from."
     }
   },
   "version": 1
