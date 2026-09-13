@@ -103,6 +103,33 @@ def test_inline_script_scan_is_linear_on_hostile_unclosed_tags():
     assert not any("bundle" in body for body in bodies)
 
 
+def test_route_extraction_is_bounded_on_hostile_ajax_fragments():
+    from packages.web.discovery.js_routes import _extract_routes
+
+    # Many `.ajax({` openers, none closed: an unbounded lazy-DOTALL
+    # `[^}]*?url` scan re-walks to end-of-body per opener —
+    # O(openers x body) on hostile input.
+    hostile = (".ajax({ " * 5000) + ("y" * 512 * 1024)
+    started = time.monotonic()
+    routes = _extract_routes(hostile)
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0, f"hostile JS took {elapsed:.1f}s to scan"
+    assert routes == []
+
+    # Oversized bodies are truncated, not scanned in full.
+    big = ("z" * (4 * 1024 * 1024)) + "fetch('/api/tail')"
+    assert "/api/tail" not in _extract_routes(big)
+
+    # Real routes inside the caps still extract.
+    normal = "fetch('/api/a'); $.ajax({ url: '/api/b' }); path: '/route'"
+    routes = _extract_routes(normal)
+    assert {"/api/a", "/api/b", "/route"} <= set(routes)
+
+    # A >4 KB "URL" is a misclassified blob, not a route.
+    blob = "fetch('" + "/a" * 3000 + "')"
+    assert _extract_routes(blob) == []
+
+
 # -- execution policy URL edge cases ----------------------------------------------
 
 

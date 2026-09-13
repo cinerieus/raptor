@@ -16,19 +16,30 @@ logger = logging.getLogger(__name__)
 
 _MAX_SCRIPT_SIZE = 512 * 1024  # 512 KB per script
 
+# Cap on JS text fed to the route patterns (inline bodies included —
+# a page body is only bounded by the client's much larger response
+# cap). Same rationale as the crawler's endpoint scan: modern SPA
+# bundles stay well under 4 MB, and a hostile body must not buy
+# scan time proportional to its size.
+_MAX_JS_BYTES = 4 * 1024 * 1024
+
+# Every quantifier is bounded: a URL over 4 KB is a misclassified
+# blob, not a route, and the lazy-DOTALL `.ajax({...url` scan was
+# O(occurrences x body) on hostile input with many unclosed braces —
+# the exact backtracking shape already fixed in the crawler's twin.
 _ROUTE_PATTERNS = [
     # fetch / axios / XHR
-    re.compile(r'''(?:fetch|axios\.(?:get|post|put|patch|delete|head))\s*\(\s*['"`]([^'"`\s]+)['"`]''', re.I),
+    re.compile(r'''(?:fetch|axios\.(?:get|post|put|patch|delete|head))\s*\(\s*['"`]([^'"`\s]{1,4096})['"`]''', re.I),
     # $.ajax url:
-    re.compile(r'''\.ajax\s*\(\s*\{[^}]*?url\s*:\s*['"`]([^'"`\s]+)['"`]''', re.I | re.DOTALL),
+    re.compile(r'''\.ajax\s*\(\s*\{[^}]{0,4096}?url\s*:\s*['"`]([^'"`\s]{1,4096})['"`]''', re.I | re.DOTALL),
     # Express-style route definitions
-    re.compile(r'''app\.(?:get|post|put|patch|delete)\s*\(\s*['"`]([^'"`\s]+)['"`]''', re.I),
+    re.compile(r'''app\.(?:get|post|put|patch|delete)\s*\(\s*['"`]([^'"`\s]{1,4096})['"`]''', re.I),
     # React Router / Vue Router path:
-    re.compile(r'''path\s*:\s*['"`](/[^'"`\s]*)['"`]'''),
+    re.compile(r'''path\s*:\s*['"`](/[^'"`\s]{0,4095})['"`]'''),
     # Generic api/endpoint keys
-    re.compile(r'''['"`](?:api|endpoint|url|baseUrl|baseURL)\s*['"`]\s*:\s*['"`]([^'"`\s]+)['"`]''', re.I),
+    re.compile(r'''['"`](?:api|endpoint|url|baseUrl|baseURL)\s*['"`]\s*:\s*['"`]([^'"`\s]{1,4096})['"`]''', re.I),
     # href/action strings starting with /api
-    re.compile(r'''['"`](/api[^'"`\s]*)['"`]'''),
+    re.compile(r'''['"`](/api[^'"`\s]{0,4095})['"`]'''),
 ]
 
 _SCRIPT_SRC_RE = re.compile(r'''<script[^>]+src\s*=\s*['"]([^'"]+)['"]''', re.I)
@@ -117,6 +128,12 @@ def _inline_scripts(html: str, max_scripts: int = 200) -> List[str]:
 
 def _extract_routes(js_text: str) -> List[str]:
     routes = []
+    if len(js_text) > _MAX_JS_BYTES:
+        logger.debug(
+            "JS body (%s chars) exceeds route-scan cap (%s); truncating",
+            len(js_text), _MAX_JS_BYTES,
+        )
+        js_text = js_text[:_MAX_JS_BYTES]
     for pattern in _ROUTE_PATTERNS:
         for m in pattern.finditer(js_text):
             route = m.group(1).strip()
