@@ -738,6 +738,8 @@ def check_semantic_consistency(
         ``function``, ``siblings``, ``inconsistency``,
         ``confidence``, ``cwe``.
     """
+    from .source_view import sanitized_view
+
     findings: list[dict] = []
 
     for group in siblings:
@@ -745,6 +747,11 @@ def check_semantic_consistency(
             continue
 
         # Resolve source code for each sibling from the checklist.
+        # The practice regexes scan a comment/string-blanked view: a
+        # comment that merely mentions an auth call or a guard
+        # ("/* check_permission handled upstream */") must not count
+        # as the practice being present — that would suppress the
+        # outlier finding (or forge one against a peer).
         sources: dict[str, str] = {}
         for sib in group.siblings:
             key = f"{sib.file}:{sib.function}"
@@ -755,7 +762,7 @@ def check_semantic_consistency(
                 else ""
             )
             if src:
-                sources[sib.function] = src
+                sources[sib.function] = sanitized_view(src, sib.file)
 
         if len(sources) < 3:
             continue
