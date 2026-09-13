@@ -505,3 +505,36 @@ class TestJsonDefault:
         stamp = datetime.datetime(
             2025, 7, 13, 20, 30, 24, tzinfo=datetime.timezone.utc)
         assert "2025-07-13" in bq._json_default(stamp)
+
+
+class TestEmptyOverridePolicyRefusal:
+    def test_empty_override_is_a_policy_error_not_a_sandbox_valueerror(
+            self, tmp_path, monkeypatch):
+        """An empty operator override means allow-nothing; the wrapper
+        must refuse with a policy-shaped structured error BEFORE the
+        sandbox turns the empty allowlist into a caller-bug-shaped
+        ValueError."""
+        import importlib.util
+        from importlib.machinery import SourceFileLoader
+        from pathlib import Path as _P
+
+        monkeypatch.setenv("_RAPTOR_TRUSTED", "1")
+        script = str(
+            _P(__file__).resolve().parents[3] / "libexec" / "raptor-bq-query")
+        loader = SourceFileLoader("raptor_bq_query_cli", script)
+        spec = importlib.util.spec_from_loader("raptor_bq_query_cli", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+
+        monkeypatch.setattr(bq, "proxy_hosts_for_bq", lambda: [])
+        err = io.StringIO()
+        monkeypatch.setattr(mod.sys, "stderr", err)
+        rc = mod._run_sandboxed(
+            {"query": "SELECT 1"},
+            types.SimpleNamespace(timeout=5, output=None),
+            "/nonexistent/creds.json",
+        )
+        assert rc == bq.EXIT_USAGE
+        payload = json.loads(err.getvalue())
+        assert payload["error"] == "policy"
+        assert "denied by policy" in payload["message"]
