@@ -10,7 +10,13 @@ behavior.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..models import Confidence, PinStyle
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
 
 
 def build_purl(
@@ -90,8 +96,73 @@ def manifest_confidence(
     return Confidence("high", reason=pinned_reason)
 
 
+# Walk-up bound shared by every ancestor-walking discovery helper
+# (pnpm / npm workspace roots, MSBuild Directory.* chains, Gradle
+# version catalogs). The scan-root / .git boundary is the primary
+# stop signal; the cap is defence-in-depth for targets scanned
+# without either (extracted tarball under a deep parent), where the
+# walk would otherwise proceed to ``/`` and could adopt an
+# out-of-tree file from a sibling checkout or the operator's own
+# tree. Trade-off, both directions: raising the cap re-opens the
+# out-of-scope adoption window on boundary-less scans; lowering it
+# breaks legitimately deep monorepos (12 matches the deepest
+# solution layouts seen in the wild — category/subcategory/service
+# nesting).
+_MAX_WALK_UP_DEPTH = 12
+
+
+def iter_walk_up(
+    start_dir: Path,
+    *,
+    include_start: bool = True,
+    max_levels: int = _MAX_WALK_UP_DEPTH,
+) -> Iterator[Path]:
+    """Yield ``start_dir`` (resolved; its parent when it's a file)
+    and its ancestors for cross-file discovery, bounded by:
+
+    * the active scan root (when declared) — a config file ABOVE the
+      scanned target must never steer resolution;
+    * the nearest ``.git`` repo boundary;
+    * ``max_levels`` yielded levels (defence-in-depth cap);
+    * a visited-set symlink-loop guard.
+
+    The bounding level itself IS yielded (a candidate at the repo /
+    scan root is legitimate); the walk stops after it.  With
+    ``include_start=False`` the start level is bound-checked but not
+    yielded — the npm workspace-root shape, where only ancestors are
+    eligible.
+    """
+    from . import _safe_read
+
+    try:
+        cur = start_dir.resolve()
+    except OSError:
+        return
+    if cur.is_file():
+        cur = cur.parent
+    bound = _safe_read.active_scan_root()
+    visited: set[Path] = set()
+    first = True
+    yielded = 0
+    while yielded < max_levels:
+        if cur in visited:      # symlink loop defence
+            return
+        visited.add(cur)
+        if include_start or not first:
+            yield cur
+            yielded += 1
+        if (bound is not None and cur == bound) or (cur / ".git").exists():
+            return
+        parent = cur.parent
+        if parent == cur:
+            return
+        cur = parent
+        first = False
+
+
 __all__ = [
     "build_purl",
+    "iter_walk_up",
     "lockfile_confidence",
     "manifest_confidence",
 ]

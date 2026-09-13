@@ -70,3 +70,112 @@ def test_manifest_ladder_shape() -> None:
     assert (c.level, c.reason) == ("medium", "w")
     c = manifest_confidence(PinStyle.EXACT, "1.0", **kw)
     assert (c.level, c.reason) == ("high", "s")
+
+
+# ---------------------------------------------------------------------------
+# iter_walk_up — the shared bounded ancestor walker
+# ---------------------------------------------------------------------------
+
+
+def test_iter_walk_up_yields_start_then_ancestors_and_stops_at_git(tmp_path) -> None:
+    from packages.sca.parsers._base import iter_walk_up
+
+    (tmp_path / ".git").mkdir()
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+    # The .git level itself is yielded (candidates there are
+    # legitimate); the walk stops after it.
+    assert list(iter_walk_up(deep)) == [deep, deep.parent, tmp_path]
+
+
+def test_iter_walk_up_include_start_false_bound_checks_start(tmp_path) -> None:
+    from packages.sca.parsers._base import iter_walk_up
+
+    (tmp_path / ".git").mkdir()
+    deep = tmp_path / "a"
+    deep.mkdir()
+    assert list(iter_walk_up(deep, include_start=False)) == [tmp_path]
+    # A start that IS the repo root has no eligible ancestor.
+    assert list(iter_walk_up(tmp_path, include_start=False)) == []
+
+
+def test_iter_walk_up_scan_root_is_yielded_then_stops(tmp_path) -> None:
+    from packages.sca.parsers._base import iter_walk_up
+    from packages.sca.parsers._safe_read import scan_root_context
+
+    target = tmp_path / "target"
+    deep = target / "x"
+    deep.mkdir(parents=True)
+    with scan_root_context(target):
+        assert list(iter_walk_up(deep)) == [deep, target]
+    # Without the scan root the walk continues above (up to the cap).
+    assert tmp_path in list(iter_walk_up(deep))
+
+
+def test_iter_walk_up_depth_cap_both_directions(tmp_path) -> None:
+    from packages.sca.parsers._base import iter_walk_up
+
+    deep = tmp_path
+    for i in range(5):
+        deep = deep / f"d{i}"
+    deep.mkdir(parents=True)
+    got = list(iter_walk_up(deep, max_levels=3))
+    assert got == [deep, deep.parent, deep.parent.parent]  # capped
+    got6 = list(iter_walk_up(deep, max_levels=6))
+    assert len(got6) == 6 and got6[-1] == tmp_path  # cap not undershot
+
+
+def test_iter_walk_up_file_start_uses_parent(tmp_path) -> None:
+    from packages.sca.parsers._base import iter_walk_up
+
+    (tmp_path / ".git").mkdir()
+    f = tmp_path / "pkg.json"
+    f.write_text("{}")
+    assert list(iter_walk_up(f)) == [tmp_path]
+
+
+# ---------------------------------------------------------------------------
+# Scan-root bound on the MSBuild / Gradle consumers (gained with the
+# shared walker — previously only .git and the cap bounded them)
+# ---------------------------------------------------------------------------
+
+
+def test_msbuild_chain_stops_at_scan_root(tmp_path) -> None:
+    from packages.sca.parsers._safe_read import scan_root_context
+    from packages.sca.parsers.directory_packages_props import find_cpm_chain
+
+    (tmp_path / "Directory.Packages.props").write_text("<Project/>")
+    target = tmp_path / "extracted"
+    proj = target / "src" / "App"
+    proj.mkdir(parents=True)
+
+    with scan_root_context(target):
+        assert find_cpm_chain(proj) == []
+    # A props file INSIDE the scan root is still collected.
+    inside = target / "Directory.Packages.props"
+    inside.write_text("<Project/>")
+    with scan_root_context(target):
+        assert find_cpm_chain(proj) == [inside]
+
+
+def test_gradle_catalog_stops_at_scan_root(tmp_path) -> None:
+    from packages.sca.parsers._safe_read import scan_root_context
+    from packages.sca.parsers.gradle_dsl import _resolve_catalog
+
+    catalog = tmp_path / "gradle" / "libs.versions.toml"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('[versions]\nokio = "3.9.0"\n')
+    target = tmp_path / "extracted"
+    proj = target / "app"
+    proj.mkdir(parents=True)
+    script = proj / "build.gradle"
+    script.write_text("")
+
+    with scan_root_context(target):
+        assert _resolve_catalog(script) is None
+    # A catalog INSIDE the scan root still resolves.
+    inner = target / "gradle" / "libs.versions.toml"
+    inner.parent.mkdir(parents=True)
+    inner.write_text('[versions]\nokio = "3.9.0"\n')
+    with scan_root_context(target):
+        assert _resolve_catalog(script) is not None

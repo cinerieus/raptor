@@ -74,6 +74,7 @@ from xml.etree import ElementTree as _ET
 from core.security.log_sanitisation import escape_nonprintable
 
 from . import _safe_read
+from ._base import iter_walk_up
 
 logger = logging.getLogger(__name__)
 
@@ -447,53 +448,27 @@ def find_build_targets_chain(start_dir: Path) -> list[Path]:
     return _find_msbuild_chain(start_dir, "Directory.Build.targets")
 
 
-_MAX_WALK_UP_DEPTH = 12
-
-
 def _find_msbuild_chain(start_dir: Path, filename: str) -> list[Path]:
     """Shared walk-up implementation for ``find_cpm_chain``
     (Directory.Packages.props), ``find_build_props_chain``
     (Directory.Build.props) and ``find_build_targets_chain``
     (Directory.Build.targets). All three follow the same MSBuild
-    auto-import convention: walk parents, stop at the nearest
-    ``.git`` or filesystem root.
+    auto-import convention: walk parents, collecting every match.
 
-    Capped at ``_MAX_WALK_UP_DEPTH`` parents as a defence-in-depth
-    bound. The .git-boundary check is the primary stop signal, but
-    SCA may be invoked on an extracted-tarball target without any
-    .git directory (CI artefact, sandboxed snapshot) — without a
-    cap, the walk would proceed all the way to ``/`` and could
-    pick up an out-of-tree ``Directory.Packages.props`` from a
-    sibling checkout under the same parent. 12 levels matches the
-    deepest legitimate solution layouts seen in the wild
-    (microservice monorepos with category/subcategory/service
-    nesting); anything beyond that is overwhelmingly outside the
-    operator's intended scan scope.
+    Bounds come from the shared :func:`iter_walk_up` walker — the
+    active scan root (a Directory.* file above the scanned target is
+    outside the operator's declared scope, even when MSBuild itself
+    would inherit it), the nearest ``.git`` boundary, and the
+    defence-in-depth depth cap for boundary-less scans (CI artefact,
+    extracted tarball) where the walk would otherwise proceed to
+    ``/`` and could pick up an out-of-tree file from a sibling
+    checkout.
     """
     out: list[Path] = []
-    try:
-        current = start_dir.resolve()
-    except OSError:
-        return out
-    visited: set = set()
-    depth = 0
-    while True:
-        if current in visited:    # symlink loop defence
-            break
-        visited.add(current)
+    for current in iter_walk_up(start_dir):
         candidate = current / filename
         if candidate.is_file():
             out.append(candidate)
-        # Stop at repo boundary if present.
-        if (current / ".git").exists():
-            break
-        depth += 1
-        if depth >= _MAX_WALK_UP_DEPTH:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
     return out
 
 

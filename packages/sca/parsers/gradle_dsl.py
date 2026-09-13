@@ -40,7 +40,7 @@ import logging
 import re
 
 from ..models import Confidence, Dependency, PinStyle
-from ._base import build_purl
+from ._base import build_purl, iter_walk_up
 from . import _safe_read, register
 from typing import TYPE_CHECKING
 
@@ -268,51 +268,27 @@ def parse(path: Path) -> list[Dependency]:
     return out
 
 
-_MAX_CATALOG_WALK_UP_DEPTH = 12
-
-
 def _resolve_catalog(build_script_path: Path):
     """Find + parse the Gradle version catalog for a given
     build.gradle(.kts) file.
 
     Walks UP from the script's directory looking for
-    ``gradle/libs.versions.toml`` (the documented default). Stops
-    at the .git repo boundary so a nested project doesn't pick up
-    a parent repo's catalog. Returns ``None`` when no catalog is
-    found in the chain.
-
-    Walk depth is capped at ``_MAX_CATALOG_WALK_UP_DEPTH`` as a
-    defence-in-depth bound — same reasoning as
-    ``parsers/directory_packages_props._find_msbuild_chain``: a
-    target scanned without a ``.git`` directory (CI artefact,
-    extracted tarball) would otherwise walk to ``/``.
+    ``gradle/libs.versions.toml`` (the documented default). Bounds
+    come from the shared :func:`iter_walk_up` walker — the active
+    scan root (a catalog above the scanned target must not steer
+    version resolution), the nearest ``.git`` boundary (a nested
+    project must not pick up a parent repo's catalog), and the
+    defence-in-depth depth cap for boundary-less scans. Returns
+    ``None`` when no catalog is found in the chain.
     """
     from .gradle_version_catalog import (
         find_default_catalog, parse_libs_versions_toml,
     )
 
-    try:
-        current = build_script_path.parent.resolve()
-    except OSError:
-        return None
-    visited: set = set()
-    depth = 0
-    while True:
-        if current in visited:
-            break
-        visited.add(current)
+    for current in iter_walk_up(build_script_path.parent):
         candidate = find_default_catalog(current)
         if candidate is not None:
             return parse_libs_versions_toml(candidate)
-        if (current / ".git").exists():
-            break
-        depth += 1
-        if depth >= _MAX_CATALOG_WALK_UP_DEPTH:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
     return None
 
 

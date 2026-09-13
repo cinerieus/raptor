@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ._base import iter_walk_up
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -38,30 +40,6 @@ logger = logging.getLogger(__name__)
 # every package.json in a workspace pays the YAML parse once.
 _CATALOG_CACHE: dict[Path, dict[str, dict[str, str]]] = {}
 
-# Walk-up bound shared by both workspace-root walkers. Same
-# reasoning as ``directory_packages_props._MAX_WALK_UP_DEPTH``: the
-# scan-root / .git boundary is the primary stop signal, but a target
-# scanned without either (extracted tarball under a deep parent)
-# would otherwise walk to ``/`` and could resolve ``catalog:`` specs
-# or workspace membership from a stray file in a SIBLING checkout —
-# or from the operator's own files above the scan root.
-_MAX_WALK_UP_DEPTH = 12
-
-
-def _walk_stops_at(cur: Path, bound: Path | None) -> bool:
-    """True when the walk must not proceed ABOVE ``cur``: the scan
-    root and a ``.git`` repo boundary both bound workspace discovery
-    (``cur`` itself was already examined by the caller)."""
-    if bound is not None and cur == bound:
-        return True
-    return (cur / ".git").exists()
-
-
-def _scan_root() -> Path | None:
-    from . import _safe_read
-    return _safe_read.active_scan_root()
-
-
 def find_workspace_root(start: Path) -> Path | None:
     """Walk up from ``start`` looking for ``pnpm-workspace.yaml``.
 
@@ -72,18 +50,9 @@ def find_workspace_root(start: Path) -> Path | None:
     defence-in-depth depth cap — a ``pnpm-workspace.yaml`` outside
     the scanned tree must never steer version resolution.
     """
-    cur = start.resolve()
-    if cur.is_file():
-        cur = cur.parent
-    bound = _scan_root()
-    for _ in range(_MAX_WALK_UP_DEPTH):
+    for cur in iter_walk_up(start):
         if (cur / "pnpm-workspace.yaml").is_file():
             return cur
-        if _walk_stops_at(cur, bound):
-            return None
-        if cur.parent == cur:
-            return None
-        cur = cur.parent
     return None
 
 
@@ -253,28 +222,19 @@ def find_npm_workspace_root(start: Path) -> Path | None:
     ``package.json`` files ABOVE the scanned tree are never read or
     adopted as workspace roots.
     """
-    cur = start.resolve()
-    if cur.is_file():
-        cur = cur.parent
+    target = start.resolve()
+    if target.is_file():
+        target = target.parent
 
-    bound = _scan_root()
-    target = cur
-    if _walk_stops_at(cur, bound):
-        # ``start`` is itself the scan / repo root — no ancestor is
-        # eligible.
-        return None
-    walk = cur.parent
-    for _ in range(_MAX_WALK_UP_DEPTH):
+    # ``include_start=False``: only ancestors are eligible, but the
+    # start level is still bound-checked — a member that IS the scan
+    # / repo root has no eligible ancestor.
+    for walk in iter_walk_up(start, include_start=False):
         parent_pkg = walk / "package.json"
         if parent_pkg.is_file():
             patterns = _read_workspaces_field(parent_pkg)
             if patterns and _target_matches_any(target, walk, patterns):
                 return walk
-        if _walk_stops_at(walk, bound):
-            return None
-        if walk.parent == walk:
-            return None
-        walk = walk.parent
     return None
 
 
