@@ -210,12 +210,14 @@ def compute_gaps(
             instead of the default blanket suppression (which assumes
             source stability within one process lifetime, an
             assumption a resumed run cannot make).
-        reuse_stats: When a dict is passed, hash-verified entries the
-            reuse eligibility screen refused are accumulated into it
-            as ``function key → reason class`` (``context_reduced`` /
+        reuse_stats: When a dict is passed, entries the reuse
+            eligibility screens refused are accumulated into it
+            as ``function key → reason class`` (``provisional`` is
+            screened before hashing; ``context_reduced`` /
             ``model_changed`` / ``strategy_changed`` /
-            ``domain_model_context``) — unique per function — for the
-            run summary's per-reason split.
+            ``domain_model_context`` refuse hash-verified entries) —
+            unique per function — for the run summary's per-reason
+            split.
 
     Returns:
         List of gap dicts sorted by priority, each containing:
@@ -1680,9 +1682,18 @@ def _fold_journal_into_covered(
                 )
             else:
                 from .journal import is_function_grade, load_entries
+                # Provisional rows (unfinalized cadence-tick
+                # promotions) are excluded here too: this is the
+                # reuse-DISABLED resume path (cold-profile
+                # --no-verdict-reuse + SIGTERM + resume), and plain
+                # coverage credit would silently suppress the very
+                # re-review that settles them — same screen as the
+                # verified folds, same fail direction (re-review).
                 covered.update(
                     e.key for e in load_entries(out_dir)
-                    if e.verdict != "error" and is_function_grade(e)
+                    if e.verdict != "error"
+                    and is_function_grade(e)
+                    and not getattr(e, "provisional", None)
                 )
         except Exception:
             logger.warning(
@@ -1793,6 +1804,9 @@ def _reuse_ineligibility(
     * ``context_reduced`` — the prior verdict came from the reduced-
       context timeout retry: lower-confidence by design, so it is
       re-reviewed rather than imported.
+    * ``provisional`` — a cadence-tick promotion the producing run
+      never finalized (interrupted before the confirming post-loop
+      pass): unsettled, so it is re-reviewed rather than imported.
     * model — when THIS run pins an explicit model and the entry
       records one, they must match; a verdict from a different model
       is not this run's verdict. Runs on the default/session model
@@ -1816,6 +1830,11 @@ def _reuse_ineligibility(
     """
     if getattr(entry, "context_reduced", None):
         return "context_reduced verdict"
+    if getattr(entry, "provisional", None):
+        # Cadence-tick promotion whose run was interrupted before the
+        # confirming post-loop pass — not a settled verdict; the
+        # function re-reviews and re-earns.
+        return "provisional verdict"
     entry_model = getattr(entry, "model", None)
     if current_model and entry_model:
         # Compare by bare identity: the journal records the resolved
@@ -1860,6 +1879,8 @@ def _reuse_ineligibility(
 def _reuse_block_class(reason: str) -> str:
     if reason.startswith("context_reduced"):
         return "context_reduced"
+    if reason.startswith("provisional"):
+        return "provisional"
     if reason.startswith("model changed"):
         return "model_changed"
     if reason.startswith("strategy set"):
@@ -2093,9 +2114,10 @@ def _verify_entries_fold(
     (``same-run`` / ``prior-run``).
 
     ``reuse_stats`` (optional dict) accumulates ``function key →
-    reason class`` for hash-verified entries the eligibility screen
-    refused (``context_reduced`` / ``model_changed`` /
-    ``strategy_changed`` / ``domain_model_context``) so callers can
+    reason class`` for entries the eligibility screens refused
+    (``provisional`` is screened before hashing; ``context_reduced`` /
+    ``model_changed`` / ``strategy_changed`` / ``domain_model_context``
+    refuse hash-verified entries) so callers can
     surface the split — an aggregate "N not reusable" hides which
     driver mass-fired (observed live: 1,461 re-reviews at one segment
     start with no way to tell strategy churn from legitimate
@@ -2134,9 +2156,51 @@ def _verify_entries_fold(
     tampered = 0
     unstamped_credited = 0
     unstamped_unverifiable = 0
+    reuse_blocked: dict[str, int] = {}
+
+    def _log_blocked_split() -> None:
+        if not reuse_blocked:
+            return
+        # Per-reason split, not an aggregate: the drivers have very
+        # different operator meaning (context_reduced re-reviews are
+        # by design; a strategy_changed mass-fire signals unstable
+        # strategy inference inputs; provisional marks an interrupted
+        # producer run).
+        split = ", ".join(
+            f"{cls}={n}" for cls, n in sorted(reuse_blocked.items()))
+        logger.info(
+            "journal-fold: %d prior %s review(s) not "
+            "reusable (%s) — resurfacing for re-review",
+            sum(reuse_blocked.values()), source_label, split,
+        )
+
     to_verify: dict[str, list] = {}
     for entry in entries:
         if entry.verdict == "error" or not is_function_grade(entry):
+            continue
+        if getattr(entry, "provisional", None):
+            # A cadence-tick promotion the producing run never
+            # finalized (interrupted before the confirming post-loop
+            # pass). Unsettled in EVERY fold mode: no coverage credit
+            # (with verdict reuse off, plain fold credit would
+            # silently suppress the very re-review that settles it,
+            # leaving the journal's latest row provisional on a
+            # COMPLETED resumed run) and no verdict reuse (the
+            # eligibility screen refuses it again for entries that
+            # reach the sink). The function resurfaces and re-earns.
+            # Counted into the not-reusable split (screened BEFORE
+            # hashing, unlike the other classes) so the run summary
+            # still names the driver.
+            _pkey = make_function_key(entry.file, entry.function)
+            reuse_blocked["provisional"] = (
+                reuse_blocked.get("provisional", 0) + 1
+            )
+            if reuse_stats is not None:
+                reuse_stats.setdefault(_pkey, "provisional")
+            logger.debug(
+                "journal-fold: %s row is a provisional (unfinalized) "
+                "promotion — resurfacing for re-review", _pkey,
+            )
             continue
         if getattr(entry, "edge_callee", None):
             # Tier-1 edge entries record an edge-contract review, not
@@ -2235,12 +2299,12 @@ def _verify_entries_fold(
         )
 
     if not to_verify:
+        _log_blocked_split()
         return
 
     from core.staleness import hash_spans
 
     stale = 0
-    reuse_blocked: dict[str, int] = {}
     for file_path, items in to_verify.items():
         resolved = safe_join(Path(target_path), file_path)
         if resolved is None or not resolved.is_file():
@@ -2377,18 +2441,7 @@ def _verify_entries_fold(
             "reuse; rows re-stamp on their next live review)",
             unstamped_credited, source_label,
         )
-    if reuse_blocked:
-        # Per-reason split, not an aggregate: the drivers have very
-        # different operator meaning (context_reduced re-reviews are
-        # by design; a strategy_changed mass-fire signals unstable
-        # strategy inference inputs).
-        split = ", ".join(
-            f"{cls}={n}" for cls, n in sorted(reuse_blocked.items()))
-        logger.info(
-            "journal-fold: %d hash-verified %s review(s) not "
-            "reusable (%s) — resurfacing for re-review",
-            sum(reuse_blocked.values()), source_label, split,
-        )
+    _log_blocked_split()
 
 
 def _build_file_tool_coverage(

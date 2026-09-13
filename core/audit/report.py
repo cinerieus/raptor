@@ -673,15 +673,25 @@ def _finding_md_lines(
     file_loc = _line(f.get("file", "?"))
     line_no = _line(f.get("line", "?"), max_chars=20)
     depth = _line(f.get("depth", "?"), max_chars=40)
-    return [
+    block = [
         f"{heading} {fid}: {title} ({tier})",
         (
             f"**File:** {file_loc}:{line_no}  "
             f"**Depth:** {depth}  "
             f"**Evidence:** {tier}"
         ),
-        "",
     ]
+    if f.get("provisional"):
+        # Cadence-tick promotion whose confirming post-loop pass
+        # never ran — completed runs strip the mark at finalization,
+        # so its presence means the run was interrupted first.
+        block.append(
+            "*Provisional at time of writing — the run was "
+            "interrupted before the post-loop pass could "
+            "confirm or retract this promotion.*"
+        )
+    block.append("")
+    return block
 
 
 def _evidence_distribution(

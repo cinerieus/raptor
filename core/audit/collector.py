@@ -359,6 +359,11 @@ def append_journal_for_outcome(
     context_reduced = bool(getattr(outcome, "context_reduced", False)) or None
     reused = bool(getattr(outcome, "reused", False)) or None
     reused_from_run = (getattr(outcome, "reused_from_run", "") or None) if reused else None
+    # Cadence-tick promotions journal immediately but unsettled: the
+    # mark rides into the row so readers (verdict reuse, report) can
+    # tell a finalized finding from one the post-loop passes have not
+    # yet confirmed or retracted.
+    provisional = bool(getattr(outcome, "provisional", False)) or None
 
     # Promotion-without-tool-evidence alarm: the journal write is the
     # chokepoint every review outcome flows through, so an evidence-less
@@ -427,6 +432,7 @@ def append_journal_for_outcome(
         context_reduced=context_reduced,
         reused=reused,
         reused_from_run=reused_from_run,
+        provisional=provisional,
         producer=producer,
         # Machine-readable failure class on error verdicts only:
         # separates environment-caused non-reviews from genuine

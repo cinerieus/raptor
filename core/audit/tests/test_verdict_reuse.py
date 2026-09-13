@@ -7,6 +7,8 @@ from the gap-folding tests; the import side drives
 
 from __future__ import annotations
 
+import pytest
+
 from core.audit.gaps import compute_gaps
 from core.audit.orchestrator import OrchestratorConfig, OrchestratorResult
 from core.audit.strategy import strategies_from_item
@@ -137,6 +139,52 @@ class TestFoldReuseEligibility:
         )
         assert sink == {}
         assert "auth.c:check_pw" not in _gap_keys(gaps)
+
+    def test_provisional_row_resurfaces_with_reuse_on(self, tmp_path):
+        """A provisional (unfinalized cadence-tick) finding row is not
+        a settled verdict: no import, no suppression."""
+        target = _write_target(tmp_path)
+        project = _project_with(
+            tmp_path, _entry(target, verdict="finding", provisional=True),
+        )
+        sink: dict = {}
+        gaps = compute_gaps(
+            _checklist(target), [], project_dir=project,
+            reuse_sink=sink, current_model="model-a",
+        )
+        assert sink == {}
+        assert "auth.c:check_pw" in _gap_keys(gaps)
+
+    def test_provisional_row_gets_no_plain_fold_credit(self, tmp_path):
+        """With verdict reuse OFF the fold must not credit a
+        provisional row either — plain coverage credit would silently
+        suppress the very re-review that settles it, leaving the
+        journal's latest row provisional on a COMPLETED resumed run."""
+        target = _write_target(tmp_path)
+        project = _project_with(
+            tmp_path, _entry(target, verdict="finding", provisional=True),
+        )
+        gaps = compute_gaps(
+            _checklist(target), [], project_dir=project,
+            reuse_sink=None,
+        )
+        assert "auth.c:check_pw" in _gap_keys(gaps)
+
+    def test_provisional_skip_counted_in_reuse_stats(self, tmp_path):
+        """The pre-hash provisional screen still feeds the run
+        summary's not-reusable split (it went silent when the screen
+        moved above the eligibility check)."""
+        target = _write_target(tmp_path)
+        project = _project_with(
+            tmp_path, _entry(target, verdict="finding", provisional=True),
+        )
+        sink: dict = {}
+        stats: dict = {}
+        compute_gaps(
+            _checklist(target), [], project_dir=project,
+            reuse_sink=sink, current_model="model-a", reuse_stats=stats,
+        )
+        assert stats == {"auth.c:check_pw": "provisional"}
 
     def test_context_reduced_verdict_resurfaces(self, tmp_path):
         target = _write_target(tmp_path)
@@ -962,3 +1010,71 @@ class TestResweepReceiptCounting:
         )
         assert "0 confirmed" in log
         assert "1 reused without live re-confirmation" in log
+
+
+class TestProvisionalFourPathMatrix:
+    """Reviewer probe matrix: a provisional (unfinalized cadence-tick)
+    finding row never suppresses and never imports on ANY fold path —
+    cross-run and same-run resume, verdict reuse on and off — while a
+    settled control row folds on every path (so a green matrix cannot
+    come from a broken harness)."""
+
+    def _fold(self, tmp_path, *, cross_run, reuse_on, **entry_over):
+        from core.audit.gaps import _fold_journal_into_covered
+
+        target = _write_target(tmp_path)
+        entry = _entry(target, **entry_over)
+        covered: set = set()
+        sink: dict | None = {} if reuse_on else None
+        spans = {"auth.c:check_pw": (1, 5)}
+        if cross_run:
+            project = _project_with(tmp_path, entry)
+            _fold_journal_into_covered(
+                covered, None, project,
+                target_path=target, current_spans=spans,
+                reuse_sink=sink,
+            )
+        else:
+            run_dir = tmp_path / "run"
+            run_dir.mkdir(exist_ok=True)
+            append_entry(run_dir, entry)
+            _fold_journal_into_covered(
+                covered, run_dir, None,
+                target_path=target, current_spans=spans,
+                reuse_sink=sink, own_run_reuse=reuse_on,
+            )
+        return covered, sink
+
+    @pytest.mark.parametrize(
+        ("cross_run", "reuse_on"),
+        [(False, False), (False, True), (True, False), (True, True)],
+        ids=[
+            "same-run-reuse-off", "same-run-reuse-on",
+            "cross-run-reuse-off", "cross-run-reuse-on",
+        ],
+    )
+    def test_provisional_never_suppresses(
+        self, tmp_path, cross_run, reuse_on,
+    ):
+        covered, sink = self._fold(
+            tmp_path, cross_run=cross_run, reuse_on=reuse_on,
+            verdict="finding", provisional=True,
+        )
+        assert covered == set()
+        if sink is not None:
+            assert sink == {}
+
+    @pytest.mark.parametrize(
+        ("cross_run", "reuse_on"),
+        [(False, False), (False, True), (True, False), (True, True)],
+        ids=[
+            "same-run-reuse-off", "same-run-reuse-on",
+            "cross-run-reuse-off", "cross-run-reuse-on",
+        ],
+    )
+    def test_settled_control_row_folds(self, tmp_path, cross_run, reuse_on):
+        covered, _ = self._fold(
+            tmp_path, cross_run=cross_run, reuse_on=reuse_on,
+            verdict="finding",
+        )
+        assert "auth.c:check_pw" in covered

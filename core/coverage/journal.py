@@ -223,6 +223,16 @@ class ReviewJournalEntry:
     # ``[{callee, call_line, verdict}]``. Additive; absent when the
     # review carried no edge-contract section.
     edge_verdicts: list[dict] | None = None
+    # ``provisional``: this finding-grade row was appended by the
+    # mid-loop promotion cadence, BEFORE the post-loop resolution
+    # passes (refutation gates, binary-oracle demotion, the
+    # counter-escalation floor) had their chance to retract it. The
+    # end-of-run finalization appends a corrective row without the
+    # mark when the promotion survives; a row still carrying it means
+    # the run was interrupted before finalization. Cross-run verdict
+    # reuse refuses provisional rows — the verdict is not settled.
+    # Additive; absent on non-provisional rows.
+    provisional: bool | None = None
     # ``integrity``: HMAC provenance token over the row's canonical
     # JSON (this field excluded), stamped by append_entry. The gap
     # fold verifies before granting verdict-reuse authority; see
@@ -599,6 +609,7 @@ def _entry_from_dict(raw: dict[str, Any]) -> ReviewJournalEntry:
         error_class=raw.get("error_class"),
         edge_callee=raw.get("edge_callee"),
         edge_verdicts=raw.get("edge_verdicts"),
+        provisional=raw.get("provisional"),
         integrity=raw.get("integrity"),
         schema_version=version,
     )

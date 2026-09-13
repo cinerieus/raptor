@@ -53,7 +53,12 @@ gate returns — while holding nothing the main pass could block on
 suspicious-promotion sweep is deliberately NOT gated: it dispatches
 no LLM calls — its per-item work is local mechanical tooling whose
 failures never feed the breaker — and it carries no per-item budget
-poll to mirror.
+poll to mirror. Its mid-loop twin, the incremental-promotion cadence
+tick, IS ``holdoff()``-gated per item: it runs on a review worker
+thread the dispatch pause cannot block, and its tool chains spawn
+subprocesses that write into the pressured TMPDIR — the tick stands
+down while the guard is paused or concluded and the post-loop sweep
+backstops the skipped window.
 
 Every bounded pause/probe wait is additionally clamped to the run
 deadline (when one is set) minus a drain margin, so a pause entered

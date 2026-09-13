@@ -290,6 +290,10 @@ def build_graded_finding(
         # Tool-blind bucket: no mechanical channel can decide this
         # class — exactly the findings /validate exists to judge.
         finding["needs_validation"] = True
+    if getattr(outcome, "provisional", False):
+        # Cadence-tick promotion not yet finalized — only interrupted
+        # runs export it (finalization clears the mark first).
+        finding["provisional"] = True
     if file_class:
         # File-class context: a finding in vendored / generated / test
         # code is not an unqualified first-party finding — a fuzz-

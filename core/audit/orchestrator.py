@@ -546,6 +546,25 @@ class OrchestratorConfig:
     # (core.audit.gap_ranking) before pins/budget. Ordering only.
     rank_gaps: bool = False
     critique_interval: int = 10
+    # Run the mechanical promotion resolution on the critique cadence
+    # (every ``critique_interval`` reviews) over the outcomes
+    # accumulated since the last tick, journaling promotions
+    # immediately with ``provisional: true``; the post-loop pass
+    # finalizes (confirms or retracts). On: the first finding reaches
+    # the journal/findings.json minutes after its evidence exists
+    # instead of at end of run, and a SIGTERM'd run keeps its
+    # provisional findings; the cost is re-deriving the (memo-cheap)
+    # tool chains post-loop for items the tick could not promote,
+    # plus non-memoized channels (joern, cocci-with-vocab) possibly
+    # running twice for those items, and the ticking review worker
+    # staying occupied for the whole mechanical pass (its window's
+    # tool chains run inline on that worker before it takes the next
+    # review). Off: exact pre-cadence behavior —
+    # all promotion resolution deferred to the post-loop pass, first
+    # journal-visible finding lands only in the run's final minutes.
+    # LLM-backed steps (on-demand checker synthesis) NEVER run on the
+    # cadence in either setting — they are finalization-only.
+    incremental_promotion: bool = True
     max_cost_usd: float | None = None
     max_seconds: float | None = None
     resume: bool = True
@@ -951,6 +970,13 @@ class ReviewOutcome:
     # ``reused_from_run`` names the ORIGINAL producing run.
     reused: bool = False
     reused_from_run: str = ""
+    # True while a cadence-tick promotion (mid-loop, journal-visible)
+    # awaits the post-loop finalization that confirms it (mark
+    # cleared) or retracts it (the demotion paths replace the object,
+    # dropping the mark with it). Rides into the journal row and the
+    # findings exports so an interrupted run's report can say
+    # "provisional at time of writing".
+    provisional: bool = False
     verification_tier: str = "speculative"
     tools_dispatched: set | None = field(default=None, repr=False)
     # Chain step types that errored or timed out while verifying THIS
@@ -969,6 +995,12 @@ class ReviewOutcome:
     caller_attributed: bool = False
     attributed_caller: str = ""
     _propagated: bool = field(default=False, repr=False)
+    # Transient bookkeeping: this outcome was already offered to an
+    # incremental-promotion cadence tick. Identity-keyed on the
+    # object (never an index) because chain re-reviews REMOVE list
+    # entries mid-loop — an index window rescans shifted items
+    # (duplicate non-memoized tool dispatch) or skips fresh ones.
+    _incr_ticked: bool = field(default=False, repr=False, compare=False)
 
     _CONFIRMED_EVIDENCE = frozenset({
         "dark_verify:confirmed", "dynamic:crash", "frida:runtime",
@@ -1195,7 +1227,20 @@ class OrchestratorResult:
         default_factory=_make_tier_counters,
     )
     cost_tracker: PhaseCostLedger = field(default_factory=PhaseCostLedger)
+    # ``file:function`` keys the incremental-promotion cadence
+    # journaled as provisional findings; the finalization pass
+    # resolves each to confirmed or retracted at end of run.
+    provisional_promoted_keys: list[str] = field(default_factory=list)
     _lock: _threading.Lock = field(
+        default_factory=_threading.Lock,
+        repr=False,
+    )
+    # Incremental-promotion cadence state: a single-flight guard so
+    # overlapping critique boundaries from parallel workers never run
+    # two ticks at once (a busy tick's window folds into the next —
+    # per-outcome ``_incr_ticked`` markers key the window, so nothing
+    # is lost or rescanned when the list mutates between ticks).
+    _incremental_tick_lock: _threading.Lock = field(
         default_factory=_threading.Lock,
         repr=False,
     )
@@ -1779,6 +1824,50 @@ def _target_library_version(target_path, library: str) -> str | None:
     return _target_lib_version_memo[key]
 
 
+def _supersede_prior_outcome(
+    result: OrchestratorResult,
+    reviewed_outcomes: Any,
+    gap_key: str,
+) -> ReviewOutcome | None:
+    """Remove and un-tally the prior outcome for a chain re-review.
+
+    The tracked object can be STALE: a mid-loop promotion (cadence
+    tick / critique) replaces the outcomes-list slot with a NEW
+    object after ``reviewed_outcomes`` recorded this one. Removing
+    nothing while un-tallying the stale status skewed the verdict
+    counters negative and left the promoted object as an orphan
+    finding beside the re-review's fresh outcome — so on an identity
+    miss, the CURRENT object at the same site is superseded instead,
+    and its ACTUAL status is what gets un-tallied. Returns the
+    outcome actually removed (the chain-status-change observation
+    compares against it), or ``None`` when nothing was superseded
+    (another pass already removed the outcome — un-tallying then
+    would skew counters for an outcome no longer in the tally).
+    """
+    prior = reviewed_outcomes.get(gap_key)
+    if prior is None:
+        return None
+    removed = False
+    with result._lock:
+        try:
+            result.outcomes.remove(prior)
+            removed = True
+        except ValueError:
+            for j, cur in enumerate(result.outcomes):
+                if (
+                    cur.file == prior.file
+                    and cur.function == prior.function
+                    and (cur.line or 0) == (prior.line or 0)
+                ):
+                    prior = result.outcomes.pop(j)
+                    removed = True
+                    break
+    if not removed:
+        return None
+    _untally_outcome(result, prior)
+    return prior
+
+
 def review_one_function(
     gap: dict,
     shared,
@@ -1873,14 +1962,9 @@ def review_one_function(
     # ── Chain re-review: un-tally the prior outcome ──────────────────
     _prior_outcome = None
     if gap.get("force_review") and reviewed_outcomes:
-        _prior_outcome = reviewed_outcomes.get(gap_key)
-        if _prior_outcome is not None:
-            with result._lock:
-                try:
-                    result.outcomes.remove(_prior_outcome)
-                except ValueError:
-                    pass
-            _untally_outcome(result, _prior_outcome)
+        _prior_outcome = _supersede_prior_outcome(
+            result, reviewed_outcomes, gap_key,
+        )
 
     # ── Triage skip ───────────────────────────────────────────────────
     triage = triage_results.get(gap_key_lined) or triage_results.get(gap_key)
@@ -3594,7 +3678,33 @@ def review_one_function(
         and review_idx > 0
         and review_idx % config.critique_interval == 0
     ):
-        _run_critique(result, config, sarif_cache, joern_server=joern_server)
+        _run_critique(
+            result, config, sarif_cache,
+            joern_server=joern_server,
+            reviewed_outcomes=reviewed_outcomes,
+        )
+        # Incremental promotion rides the same cadence: mechanical
+        # promotion resolution over the outcomes accumulated since the
+        # last tick, journaled provisionally (finalized post-loop).
+        # Same master switch as the post-loop pass; never allowed to
+        # break a review.
+        if (
+            getattr(config, "incremental_promotion", True)
+            and config.sweep_validate_findings
+        ):
+            try:
+                _incremental_promotion_tick(
+                    result, config,
+                    sarif_cache=sarif_cache,
+                    checklist=checklist,
+                    joern_server=joern_server,
+                    mechanical_findings=mechanical_findings,
+                    reviewed_outcomes=reviewed_outcomes,
+                )
+            except Exception:
+                logger.debug(
+                    "incremental promotion tick failed", exc_info=True,
+                )
 
     if on_progress:
         on_progress(review_idx, total, outcome)
@@ -9024,6 +9134,18 @@ def _run_audit_body(
             _hook(result, config)
         except Exception:
             logger.debug("pre-export hook failed", exc_info=True)
+
+    # Cadence-tick promotions are settled now: every demotion pass has
+    # run, so surviving provisional marks are confirmed (cleared) here
+    # — before the findings persist, the corrective journal pass and
+    # the export, which then all ship non-provisional rows. A run
+    # killed before this point keeps the marks (the salvage path never
+    # finalizes), which is what the report's "provisional at time of
+    # writing" note keys off.
+    try:
+        _finalize_provisional_promotions(result, config)
+    except Exception:
+        logger.debug("provisional finalization failed", exc_info=True)
 
     # Re-persist findings.json now that every status-mutating pass
     # (receipt rescue, validate, error retry, dark verification,
@@ -19534,11 +19656,290 @@ def _auto_synthesize_rules(
     _clear_phase_abort(config, "checker-synthesis", result=result)
 
 
+def _track_promoted(
+    reviewed_outcomes: Any,
+    old: ReviewOutcome,
+    promoted: ReviewOutcome,
+) -> None:
+    """Point the executor's reviewed_outcomes map at the live object.
+
+    Mid-loop promotions REPLACE the outcome object; the chain
+    re-review preamble later fetches the tracked object to supersede
+    it, and a stale entry there forces the preamble onto its
+    site-scan fallback. Only swaps when the map still tracks the
+    pre-promotion object — a newer entry (a re-review that already
+    completed) is never clobbered. get/set race with a concurrent
+    re-review is benign: the loser leaves a stale entry, which the
+    preamble fallback resolves.
+    """
+    if reviewed_outcomes is None:
+        return
+    key = f"{promoted.file}:{promoted.function}"
+    try:
+        if reviewed_outcomes.get(key) is old:
+            reviewed_outcomes[key] = promoted
+    except Exception:
+        logger.debug("promotion tracking failed for %s", key, exc_info=True)
+
+
+def _journal_provisional_promotion(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+    outcome: ReviewOutcome,
+    checklist: dict[str, Any] | None = None,
+) -> None:
+    """Journal a cadence-tick promotion immediately, marked provisional.
+
+    The mid-loop journal row for this function said ``suspicious``;
+    without this append the first finding-grade row lands only in the
+    end-of-run corrective pass — hours after the promoting evidence
+    existed on long runs, and never on a run killed before it. The row
+    carries ``provisional: true``; finalization appends the confirming
+    row (mark dropped) or the demotion paths retract the status. One
+    audit-log record mirrors the sweep-promotion entry shape.
+    Best-effort throughout: a journaling failure must never break the
+    cadence hook (the corrective end-of-run passes still run).
+    """
+    if not config.out_dir:
+        return
+    key = f"{outcome.file}:{outcome.function}"
+    with result._lock:
+        result.provisional_promoted_keys.append(key)
+    gap = None
+    if checklist:
+        try:
+            gap = _find_gap_in_checklist(
+                checklist, outcome.file, outcome.function,
+            )
+        except Exception:
+            gap = None
+    jgap: dict[str, Any] = {"line_start": outcome.line or 0}
+    if gap:
+        jgap = {
+            "line_start": gap.get("line_start", outcome.line or 0),
+            "line_end": gap.get("line_end"),
+            "strategies": list(gap.get("strategies") or []),
+        }
+        if gap.get("qualified_name"):
+            jgap["qualified_name"] = gap["qualified_name"]
+    try:
+        from .collector import append_journal_for_outcome
+
+        append_journal_for_outcome(
+            out_dir=config.out_dir,
+            target_path=config.target_path,
+            run_id=(config.out_dir.name if config.out_dir else ""),
+            outcome=outcome,
+            gap=jgap,
+        )
+    except Exception:
+        logger.debug(
+            "provisional journal append failed for %s", key, exc_info=True,
+        )
+    try:
+        entry: dict[str, Any] = {
+            "action": "incremental_promotion",
+            "key": f"{key}:{outcome.line or 0}",
+            "status": outcome.status,
+            "prior_status": "suspicious",
+            "provisional": True,
+            "cost_usd": 0.0,
+            "duration_s": 0.0,
+        }
+        entry["evidence_tool"] = outcome.evidence_tool or ""
+        entry["model"] = outcome.model or ""
+        entry["hypothesis"] = outcome.hypothesis or ""
+        if getattr(outcome, "function_qualified", ""):
+            entry["function_qualified"] = outcome.function_qualified
+        append_audit_log(config.out_dir, entry)
+    except Exception:
+        logger.debug(
+            "incremental promotion log failed for %s", key, exc_info=True,
+        )
+
+
+def _incremental_promotion_tick(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+    *,
+    sarif_cache: SarifCache | None = None,
+    checklist: dict[str, Any] | None = None,
+    joern_server=None,
+    mechanical_findings: dict[str, list[dict[str, Any]]] | None = None,
+    reviewed_outcomes: Any = None,
+) -> int:
+    """Mid-loop promotion resolution on the critique cadence.
+
+    Runs the same mechanical promotion pass the post-loop sweep runs
+    (:func:`_promote_suspicious_one`: prep-detector correlation,
+    prefilter, hypothesis tool chains, aggregation — all $0 LLM, all
+    behind the same sink-guard/premise/synth-receipt gates) over the
+    suspicious outcomes accumulated since the last tick, so a finding
+    whose evidence exists at review N is journal-visible at the next
+    cadence boundary instead of in the run's final minutes.
+
+    Divisions of labor with the post-loop chain:
+
+    * Promotions here are PROVISIONAL (journaled with the mark); the
+      post-loop pass confirms via :func:`_finalize_provisional_promotions`
+      or retracts through the existing demotion paths (refutation
+      gates, binary-oracle absent demotion, adversarial refute).
+    * On-demand checker synthesis is LLM-backed and per-run-capped —
+      finalization-only. Chain-less hypotheses are parked (discarded
+      queue); the item stays suspicious and the post-loop pass routes
+      it to synthesis exactly as before.
+    * The counter-escalation floor stays finalization-only by its own
+      precondition (machine-raised rows resolve to clean only after
+      deepen/verification had their chance); the tick handles such
+      rows exactly like the post-loop sweep does — a verification
+      receipt promotes, silence leaves them for the floor.
+
+    Single-flight: overlapping critique boundaries from parallel
+    workers skip instead of racing; the skipped window folds into the
+    next tick (and the post-loop pass is the backstop for the last
+    partial window). Returns the number of promotions committed.
+    """
+    if not result._incremental_tick_lock.acquire(blocking=False):
+        return 0
+    try:
+        with result._lock:
+            # Marker-keyed window (never an index range): chain
+            # re-reviews remove() entries mid-loop, so index windows
+            # drift — rescanning already-ticked items (duplicate
+            # non-memoized tool dispatch) or skipping fresh ones.
+            # Marked at snapshot time: an item the tick then fails or
+            # breaks out on is not retried by later ticks — the
+            # post-loop sweep is the backstop, exactly as for the
+            # window a busy tick skips.
+            candidates = [
+                (j, o)
+                for j, o in enumerate(result.outcomes)
+                if o.status == "suspicious"
+                and not o._incr_ticked
+            ]
+            for _j, _o in candidates:
+                _o._incr_ticked = True
+        promoted_n = 0
+        # On-demand synthesis requests are collected and DISCARDED:
+        # the LLM-backed step must fire once, at finalization, under
+        # its in-order per-run cap.
+        parked_synthesis: list[tuple[int, ReviewOutcome, str, str, str]] = []
+        for j, outcome in candidates:
+            if is_sigterm_requested():
+                break
+            # holdoff(), not just concluded: the tick runs on a review
+            # worker thread the guard's dispatch pause cannot block,
+            # and its tool chains spawn subprocesses that write into
+            # the pressured TMPDIR — stand down while the guard is
+            # paused too; the post-loop sweep is the backstop.
+            _guard = getattr(config, "environment_guard_state", None)
+            if _guard is not None and _guard.holdoff():
+                break
+            try:
+                promoted = _promote_suspicious_one(
+                    result, config, j, outcome,
+                    sarif_cache=sarif_cache,
+                    checklist=checklist,
+                    joern_server=joern_server,
+                    mechanical_findings=mechanical_findings,
+                    synthesis_queue=parked_synthesis,
+                    provisional=True,
+                )
+            except Exception:
+                logger.debug(
+                    "incremental promotion failed for %s:%s",
+                    outcome.file, outcome.function, exc_info=True,
+                )
+                continue
+            if promoted is not None:
+                promoted_n += 1
+                _track_promoted(reviewed_outcomes, outcome, promoted)
+                _journal_provisional_promotion(
+                    result, config, promoted, checklist=checklist,
+                )
+        if promoted_n:
+            logger.info(
+                "incremental promotion: %d provisional finding(s) "
+                "journaled at the cadence tick",
+                promoted_n,
+            )
+            # findings.json rides along so an interrupted run's report
+            # (which joins findings.json with the journal) can show the
+            # provisional finding too. Atomic idempotent rewrite.
+            try:
+                _persist_findings(result, config)
+            except Exception:
+                logger.debug(
+                    "incremental findings persist failed", exc_info=True,
+                )
+        return promoted_n
+    finally:
+        result._incremental_tick_lock.release()
+
+
+def _finalize_provisional_promotions(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+) -> int:
+    """Resolve cadence-tick provisional marks after post-loop passes.
+
+    Runs once, after every status-mutating pass (sweep, refutation
+    gates, dark verification, binary-oracle absent demotion, phase 2,
+    pre-export hooks) and BEFORE the final findings persist, the
+    corrective journal pass and the graded export — so all three
+    surfaces ship settled rows. Clearing the mark is what makes
+    ``_rejournal_final_statuses`` append the confirming row (same
+    verdict, mark dropped); retractions already re-journal through the
+    ordinary status-drift test. Exactly-once promotion side-effects
+    (checker synthesis, /validate selection) key off the post-loop
+    surfaces, not this mark — see the incremental tick's docstring.
+    Returns the number of still-provisional outcomes resolved.
+    """
+    resolved = 0
+    for outcome in result.outcomes:
+        if not getattr(outcome, "provisional", False):
+            continue
+        outcome.provisional = False
+        resolved += 1
+    if not (resolved or result.provisional_promoted_keys):
+        return 0
+    # Resolution label semantics: "confirmed" means the function ends
+    # the run as a finding — including a tick promotion that was
+    # retracted and later RE-EARNED by a post-loop pass. That is the
+    # honest end-state answer; per-transition history stays in the
+    # audit log's individual demotion/promotion records.
+    finding_keys = {
+        f"{o.file}:{o.function}"
+        for o in result.outcomes
+        if o.status == "finding"
+    }
+    if config.out_dir:
+        for key in dict.fromkeys(result.provisional_promoted_keys):
+            resolution = (
+                "confirmed" if key in finding_keys else "retracted"
+            )
+            try:
+                append_audit_log(config.out_dir, {
+                    "action": "provisional_promotion_resolved",
+                    "key": key,
+                    "resolution": resolution,
+                    "cost_usd": 0.0,
+                    "duration_s": 0.0,
+                })
+            except Exception:
+                logger.debug(
+                    "provisional resolution log failed for %s",
+                    key, exc_info=True,
+                )
+    return resolved
+
+
 def _run_critique(
     result: OrchestratorResult,
     config: OrchestratorConfig,
     sarif_cache: SarifCache | None = None,
     joern_server=None,
+    reviewed_outcomes: Any = None,
 ) -> None:
     """Periodic tool-grounded re-evaluation of recent findings.
 
@@ -19683,6 +20084,11 @@ def _run_critique(
                 )
                 continue
             tool = "+".join(high_prec)
+            # Mid-loop promotions are provisional: the post-loop
+            # finalization confirms them once every demotion pass has
+            # had its chance (knob-gated so the off position restores
+            # the exact deferred-journal behavior).
+            _incr = bool(getattr(config, "incremental_promotion", True))
             # _run_critique runs from concurrent review workers —
             # mutate outcomes/counters under the result lock (like
             # _tally_outcome) and skip outcomes another worker already
@@ -19692,12 +20098,18 @@ def _run_critique(
                 if outcome not in result.outcomes:
                     continue
                 idx = result.outcomes.index(outcome)
-                result.outcomes[idx] = _promote_outcome(
-                    outcome, f"critique:{tool}",
+                promoted_now = _promote_outcome(
+                    outcome, f"critique:{tool}", provisional=_incr,
                 )
+                result.outcomes[idx] = promoted_now
                 result.sweep_promoted += 1
                 result.suspicious -= 1
                 result.findings += 1
+            _track_promoted(reviewed_outcomes, outcome, promoted_now)
+            if _incr:
+                _journal_provisional_promotion(
+                    result, config, promoted_now,
+                )
             logger.info(
                 "critique: promoted %s:%s via %s",
                 outcome.file,
@@ -19923,7 +20335,17 @@ def _deepen_suspicious(
     suspicious = [
         o
         for o in result.outcomes
-        if o.status == "suspicious"
+        # Provisional (cadence-tick promoted) findings deepen too:
+        # pre-cadence, these items were still suspicious here and got
+        # this enriched-context refutation chance before the sweep
+        # promoted them — the early promotion must not narrow the
+        # retraction funnel. Same spend as the pre-cadence pass; the
+        # deepen verdict supersedes (untally uses the finding status,
+        # the fresh outcome carries no provisional mark).
+        if (
+            o.status == "suspicious"
+            or (o.status == "finding" and getattr(o, "provisional", False))
+        )
         and (o.review_result or {}).get("body")
         and not o.body.startswith("[gate violation:")
     ]
@@ -21030,7 +21452,15 @@ def _untally_outcome(result: OrchestratorResult, outcome: ReviewOutcome) -> None
             result.errors -= 1
             if outcome.error_class and outcome.error_class in result.error_counts:
                 result.error_counts[outcome.error_class] -= 1
-        result.reviewed -= 1
+        if outcome.reused:
+            # Imported prior verdict — tallied into reused_from_prior,
+            # never reviewed (mirror of _tally_outcome's reused
+            # branch): decrementing reviewed here drifted it below
+            # truth (negative on reuse-heavy resume segments) every
+            # time a re-review pass superseded a reused outcome.
+            result.reused_from_prior -= 1
+        else:
+            result.reviewed -= 1
 
 
 _DISMISSIVE_COUNTERS = frozenset(
@@ -21273,6 +21703,43 @@ def _synth_receipt_promotion_block_reason(
 _JOERN_PASS_MAX_WORKERS = 2
 
 
+def _commit_promotion(
+    result: OrchestratorResult,
+    i: int,
+    outcome: ReviewOutcome,
+    promoted: ReviewOutcome,
+    *,
+    aggregated: bool = False,
+) -> bool:
+    """Replace ``outcomes[i]`` with *promoted* iff the slot still holds
+    *outcome*, adjusting the verdict counters under the result lock.
+
+    Identity-checked because the incremental cadence runs promotion
+    while the review loop is still mutating ``result.outcomes``: chain
+    re-reviews REMOVE entries (indices shift) and the critique pass
+    replaces objects. A drifted slot is re-resolved by identity scan;
+    an outcome no longer in the list was superseded, so the promotion
+    is dropped (returns False, counters untouched). Post-loop callers
+    always pass a stable slot and never hit either branch.
+    """
+    with result._lock:
+        if not (0 <= i < len(result.outcomes)) \
+                or result.outcomes[i] is not outcome:
+            i = next(
+                (j for j, o in enumerate(result.outcomes) if o is outcome),
+                -1,
+            )
+            if i < 0:
+                return False
+        result.outcomes[i] = promoted
+        result.sweep_promoted += 1
+        if aggregated:
+            result.aggregation_promoted += 1
+        result.suspicious -= 1
+        result.findings += 1
+    return True
+
+
 def _promote_suspicious_one(
     result: OrchestratorResult,
     config: OrchestratorConfig,
@@ -21284,7 +21751,8 @@ def _promote_suspicious_one(
     joern_server=None,
     mechanical_findings: dict[str, list[dict[str, Any]]] | None = None,
     synthesis_queue: list[tuple[int, ReviewOutcome, str, str, str]] | None = None,
-) -> None:
+    provisional: bool = False,
+) -> ReviewOutcome | None:
     """Sweep one suspicious outcome (see :func:`_promote_suspicious`).
 
     Safe to run concurrently for distinct *i*: the body writes only its
@@ -21294,6 +21762,11 @@ def _promote_suspicious_one(
     ``(i, outcome, hypothesis, cwe, source)`` instead of synthesized
     inline: on-demand synthesis is LLM-backed and capped per run, so
     the cap must be consumed in item order, not completion order.
+
+    ``provisional`` marks any promotion as awaiting finalization (the
+    incremental cadence path). Returns the promoted outcome when a
+    promotion was committed, ``None`` otherwise — so the cadence tick
+    can journal exactly what it promoted.
     """
     if outcome.body.startswith(_GATE_DEMOTION_BODY_PREFIXES):
         logger.debug(
@@ -21301,12 +21774,12 @@ def _promote_suspicious_one(
             outcome.file,
             outcome.function,
         )
-        return
+        return None
 
     review = outcome.review_result or {}
     hypothesis = review.get("hypothesis") or outcome.hypothesis or ""
     if not hypothesis:
-        return
+        return None
 
     refuting_counter = _has_refuting_counter(outcome)
 
@@ -21337,7 +21810,7 @@ def _promote_suspicious_one(
                 outcome.file,
                 outcome.function,
             )
-            return
+            return None
         # Empty-dispatch family: no static channel exists that
         # could adjudicate this hypothesis OR its counter, so the
         # only possible mechanical evidence is a synthesized
@@ -21354,7 +21827,7 @@ def _promote_suspicious_one(
                 cwe, source,
                 joern_server=joern_server,
             )
-        return
+        return None
 
     mech_tool = _correlated_mech_detector_tool(
         outcome, hypothesis, cwe, mechanical_findings,
@@ -21378,18 +21851,18 @@ def _promote_suspicious_one(
                 lane="sweep promotion", tier="primary_sweep",
             )
         else:
-            with result._lock:
-                result.outcomes[i] = _promote_outcome(outcome, mech_tool)
-                result.sweep_promoted += 1
-                result.suspicious -= 1
-                result.findings += 1
+            promoted = _promote_outcome(
+                outcome, mech_tool, provisional=provisional,
+            )
+            if not _commit_promotion(result, i, outcome, promoted):
+                return None
             logger.info(
                 "sweep promoted %s:%s via %s (prep-phase detector hit)",
                 outcome.file,
                 outcome.function,
                 mech_tool,
             )
-            return
+            return promoted
 
     pf = run_prefilter(
         target_path=config.target_path,
@@ -21438,18 +21911,18 @@ def _promote_suspicious_one(
                     lane="sweep promotion", tier="primary_sweep",
                 )
             else:
-                with result._lock:
-                    result.outcomes[i] = _promote_outcome(outcome, tool)
-                    result.sweep_promoted += 1
-                    result.suspicious -= 1
-                    result.findings += 1
+                promoted = _promote_outcome(
+                    outcome, tool, provisional=provisional,
+                )
+                if not _commit_promotion(result, i, outcome, promoted):
+                    return None
                 logger.info(
                     "sweep promoted %s:%s via %s",
                     outcome.file,
                     outcome.function,
                     tool,
                 )
-                return
+                return promoted
         if pf.hits and not correlated:
             _record_uncorrelated_hits(outcome, pf.hits)
             logger.info(
@@ -21477,7 +21950,7 @@ def _promote_suspicious_one(
                 cwe, source,
                 joern_server=joern_server,
             )
-        return
+        return None
     confirmed = _run_tool_chain(
         chain,
         config=config,
@@ -21523,14 +21996,14 @@ def _promote_suspicious_one(
                     result.tier_counters, "adapter_aggregation",
                     "inconclusive",
                 )
-                return
+                return None
         if _premise_blocks_confirm(premise_h, confirmed):
             _note_premise_blocked_validation(
                 outcome, premise_h, list(confirmed),
                 config, result.tier_counters,
                 lane="sweep promotion", tier="primary_sweep",
             )
-            return
+            return None
         high_prec = [
             t for t in confirmed
             if not _is_detection_only(t)
@@ -21547,16 +22020,15 @@ def _promote_suspicious_one(
                     outcome.function, joern_server,
                     result.tier_counters, config=config):
                 tool = "+".join(confirmed)
-                promoted = _promote_outcome(outcome, tool)
+                promoted = _promote_outcome(
+                    outcome, tool, provisional=provisional,
+                )
                 _record_aggregated_promotion(
                     promoted, agg_channels, post_mean, confirmed,
                 )
-                with result._lock:
-                    result.outcomes[i] = promoted
-                    result.sweep_promoted += 1
-                    result.aggregation_promoted += 1
-                    result.suspicious -= 1
-                    result.findings += 1
+                if not _commit_promotion(
+                        result, i, outcome, promoted, aggregated=True):
+                    return None
                 _increment_tier_dict(
                     result.tier_counters, "adapter_aggregation",
                     "confirmed",
@@ -21568,7 +22040,7 @@ def _promote_suspicious_one(
                     "+".join(agg_channels), post_mean,
                     _AGGREGATION_CONFIRM_THRESHOLD,
                 )
-                return
+                return promoted
             _increment_tier_dict(
                 result.tier_counters, "adapter_aggregation",
                 "inconclusive",
@@ -21578,7 +22050,7 @@ def _promote_suspicious_one(
                 "rules (%s)",
                 outcome.file, outcome.function, "+".join(confirmed),
             )
-            return
+            return None
         _gblk = _guard_blocks_promotion(
             outcome.function, joern_server, result.tier_counters,
             config=config)
@@ -21590,19 +22062,19 @@ def _promote_suspicious_one(
                 "+".join(confirmed),
                 _gblk,
             )
-            return
+            return None
         tool = "+".join(high_prec)
-        with result._lock:
-            result.outcomes[i] = _promote_outcome(outcome, tool)
-            result.sweep_promoted += 1
-            result.suspicious -= 1
-            result.findings += 1
+        promoted = _promote_outcome(outcome, tool, provisional=provisional)
+        if not _commit_promotion(result, i, outcome, promoted):
+            return None
         logger.info(
             "sweep promoted %s:%s via %s",
             outcome.file,
             outcome.function,
             tool,
         )
+        return promoted
+    return None
 
 
 # Bodies stamped by an authoritative mechanical gate demotion: the
@@ -24415,8 +24887,17 @@ def _demote_absent_promotions(
     return demoted_count
 
 
-def _promote_outcome(outcome: ReviewOutcome, tool: str) -> ReviewOutcome:
-    """Promote a suspicious item to finding with tool evidence."""
+def _promote_outcome(
+    outcome: ReviewOutcome,
+    tool: str,
+    *,
+    provisional: bool = False,
+) -> ReviewOutcome:
+    """Promote a suspicious item to finding with tool evidence.
+
+    ``provisional`` marks a cadence-tick promotion the post-loop
+    finalization must still confirm or retract.
+    """
     promoted = ReviewOutcome(
         file=outcome.file,
         function=outcome.function,
@@ -24438,6 +24919,7 @@ def _promote_outcome(outcome: ReviewOutcome, tool: str) -> ReviewOutcome:
     promoted.function_qualified = getattr(
         outcome, "function_qualified", "",
     )
+    promoted.provisional = provisional
     if promoted.review_result:
         promoted.review_result["evidence_tool"] = tool
     return promoted
@@ -24858,7 +25340,17 @@ def _rejournal_final_statuses(
             continue
         key = make_function_key(outcome.file, outcome.function)
         prior = entries.get(key)
-        if prior is None or prior.verdict == outcome.status:
+        if prior is None:
+            continue
+        # A latest row still marked provisional needs a confirming
+        # corrective row even when the verdict itself did not drift —
+        # finalization cleared the outcome's mark, and without the
+        # append the durable journal would forever claim the finding
+        # is unsettled (verdict reuse refuses provisional rows).
+        _confirm_provisional = bool(
+            getattr(prior, "provisional", False),
+        ) and not getattr(outcome, "provisional", False)
+        if prior.verdict == outcome.status and not _confirm_provisional:
             continue
         # Carry the corrected entry's span AND strategy record
         # forward. The old minimal gap ({"line_start": line})
@@ -25543,8 +26035,10 @@ def _persist_findings(
     an EXISTING findings.json (to empty); it never creates one.
     """
     findings_dicts = []
+    # Snapshot: the incremental-promotion tick calls this mid-loop
+    # while review workers are still appending outcomes.
     for seq, outcome in enumerate(
-        (o for o in result.outcomes if o.status == "finding"),
+        (o for o in list(result.outcomes) if o.status == "finding"),
         start=1,
     ):
         finding: dict[str, Any] = {
@@ -25561,6 +26055,11 @@ def _persist_findings(
             finding["evidence_tool"] = outcome.evidence_tool
         if outcome.hypothesis:
             finding["hypothesis"] = outcome.hypothesis
+        if getattr(outcome, "provisional", False):
+            # Cadence-tick promotion not yet finalized — present only
+            # in mid-run persists and in runs interrupted before the
+            # post-loop confirmation pass.
+            finding["provisional"] = True
         findings_dicts.append(finding)
 
     if not findings_dicts and not (
