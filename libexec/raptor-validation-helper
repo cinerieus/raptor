@@ -671,6 +671,11 @@ def _build_standalone_pocs(target, build_dir):
         cmd = [compiler] + _POC_GCC_FLAGS + ["-o", str(output), str(source)]
         with contextlib.suppress(Exception):
             if _sandbox_run is not None:
+                # env_caller_filtered: _safe_env comes from
+                # get_safe_env() (or the equivalent inline allowlist
+                # fallback above), so the sandbox's "unfiltered caller
+                # env" warning is contradictory noise — and it fires
+                # once per compile straight into the stage's stderr.
                 result = _sandbox_run(
                     cmd,
                     target=str(target.resolve()),
@@ -678,6 +683,7 @@ def _build_standalone_pocs(target, build_dir):
                     block_network=True,
                     capture_output=True, text=True, timeout=30,
                     env=_safe_env,
+                    env_caller_filtered=True,
                 )
             else:
                 result = _sp.run(cmd, capture_output=True, text=True, timeout=30,

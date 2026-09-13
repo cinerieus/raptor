@@ -958,6 +958,56 @@ def _subid_range(path: str, user: str, numeric_id: str) -> tuple[int, int] | Non
     return None
 
 
+def _drop_host_tmpdir_grants(
+    writable: list[str],
+    target: str | None,
+    output: str | None,
+    rootfs: str | None,
+) -> list[str]:
+    """Filter a host-custom TMPDIR grant out of a mount-tree spawn's
+    writable set.
+
+    The context's writable baseline carries ``tempfile.gettempdir()``.
+    When the host TMPDIR is customised (per-session scratch dirs,
+    build-farm scratch mounts), that path exists only on the HOST
+    filesystem: the mount-tree child pivots onto a fresh tmpfs at
+    /tmp, so the post-pivot Landlock grant-open fails and the child
+    emits ``sandbox: Landlock writable path could not be opened`` on
+    stderr. That line lands in the PAYLOAD's captured stderr, where
+    consumers reading a tool's diagnostics (PoC-compile evidence,
+    build-failure summaries) misattribute it as the tool failing.
+
+    Dropping the entry costs nothing on this lane: the baseline adds
+    ``/tmp`` alongside the custom-tmpdir grant, and the child's temp
+    env is served inside the tmpfs for the shapes that matter —
+    branded TMPDIR values are rewritten out of the target-bound env,
+    unbranded /tmp-rooted ones are re-created inside the private /tmp
+    (mount_ns step 7b). An UNBRANDED TMPDIR outside /tmp passes
+    through to a path that does not exist in the mount view — a
+    pre-existing residual of the temp-env staging, unchanged by this
+    filter. Entries that are also the bind-mounted target/output/
+    rootfs are kept — those exist post-pivot by construction, and
+    removing them would revoke a caller-requested write surface. The
+    LITERAL ``/tmp`` entry is always kept: on hosts where /tmp itself
+    is a symlink, its realpath equals the host-tmpdir realpath, but
+    the entry names the per-sandbox tmpfs and dropping it would
+    revoke the child's /tmp.
+    """
+    import tempfile
+    host_tmp = os.path.realpath(tempfile.gettempdir())
+    if host_tmp == "/tmp":
+        return writable
+    bound = {os.path.abspath(p) for p in (target, output, rootfs) if p}
+
+    def _keep(path: str) -> bool:
+        abspath = os.path.abspath(path)
+        if abspath == "/tmp" or abspath in bound:
+            return True
+        return os.path.realpath(path) != host_tmp
+
+    return [p for p in writable if _keep(p)]
+
+
 def _pid1_split_for_waiter(wstat_w: int | None = None) -> None:
     """Fork so the exec target becomes PID 2 of the pid-ns; PID 1 (this
     process) stays as a minimal in-process init that reaps children and
@@ -1738,6 +1788,13 @@ def run_sandboxed(
                      or (readable_paths and restrict_reads))):
             effective_paths = list(writable_paths) if writable_paths else []
             if (target or output or rootfs) and not skip_mount_ns:
+                # Mount-tree spawns get a fresh tmpfs at /tmp, so the
+                # baseline grant for a host-custom TMPDIR names a path
+                # that cannot exist post-pivot — drop it here rather
+                # than let the child's Landlock grant-open fail into
+                # the payload's stderr stream.
+                effective_paths = _drop_host_tmpdir_grants(
+                    effective_paths, target, output, rootfs)
                 # This spawn builds the mount tree (same predicate as
                 # the step-9 setup_mount_ns call), so /dev/pts is the
                 # FRESH per-sandbox devpts instance

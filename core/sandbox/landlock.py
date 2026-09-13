@@ -808,7 +808,13 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
                         finally:
                             _os_close(dir_fd)
                     except (OSError, ValueError):
-                        _os_write(2, b"sandbox: Landlock writable path could not be opened\n")
+                        # Name the failing path — a bare message is
+                        # unattributable when several grants are in
+                        # play, and the line surfaces in the CHILD's
+                        # stderr where consumers read tool output.
+                        _os_write(2, b"sandbox: Landlock writable path "
+                                     b"could not be opened: "
+                                  + os.fsencode(path) + b"\n")
 
                 # Writable device files — /dev/null is the bit-bucket that
                 # shell scripts universally use (`cmd >/dev/null 2>&1`).
@@ -949,7 +955,9 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
                         except (OSError, ValueError):
                             # Read path may not exist on all hosts (e.g.
                             # /sbin on usrmerge systems) — non-fatal.
-                            _os_write(2, b"sandbox: Landlock readable path could not be opened (skipped)\n")
+                            _os_write(2, b"sandbox: Landlock readable path "
+                                         b"could not be opened (skipped): "
+                                      + os.fsencode(path) + b"\n")
 
                 # Network rules: allow TCP connect to specified ports only (ABI v4+)
                 if ports is not None and _net_access > 0:
