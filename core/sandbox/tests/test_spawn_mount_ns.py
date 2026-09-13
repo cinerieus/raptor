@@ -27,7 +27,11 @@ import sys  # noqa: E402
 import tempfile  # noqa: E402
 import unittest  # noqa: E402
 from pathlib import Path  # noqa: E402
-from core.sandbox.tests.capability import requires_landlock, requires_userns
+from core.sandbox.tests.capability import (
+    requires_landlock,
+    requires_mount,
+    requires_userns,
+)
 
 
 def _mount_ns_usable() -> bool:
@@ -102,6 +106,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_basic_execvp(self):
         """Fork+newuidmap+mount+Landlock+seccomp+exec chain runs. The
         child sees itself as PID 2 (pid-ns — the in-ns init waiter is
@@ -131,6 +137,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_target_visible_at_original_path(self):
         """Caller's target dir is bind-mounted at its original absolute
         path inside the sandbox, so argv referring to the host path
@@ -156,6 +164,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_output_writable_inside_sandbox(self):
         """A file created in output by the child survives the sandbox."""
         from core.sandbox._spawn import run_sandboxed
@@ -180,6 +190,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_tmp_is_fresh_per_sandbox(self):
         """Per-sandbox tmpfs /tmp — content the caller placed in host
         /tmp is NOT visible inside the sandbox (except the bind-mounted
@@ -217,6 +229,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_readable_file_under_target_bind_no_eexist(self):
         """A readable_paths FILE living under the target bind must not
         abort the spawn. The step-8 target bind already populates the
@@ -292,6 +306,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Siblings that pass mountlessly (validation refusals, degraded-posture checks) stay ungated.
+    @requires_mount
     def test_stub_dir_cleaned_up_after_run(self):
         """The parent-created tempfile.mkdtemp stub must be removed
         after the child exits. Without cleanup, /tmp accumulates
@@ -355,6 +371,8 @@ class TestRunSandboxedSmokeTest(unittest.TestCase):
 
 @requires_landlock
 @requires_userns
+# Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Class siblings that validate arguments or parse files stay ungated: they run on any host.
+@requires_mount
 class TestEtcOverlayMissingHostTarget(unittest.TestCase):
     """etc_overlay when the target path doesn't exist on the host.
 
@@ -492,6 +510,8 @@ class TestEtcOverlayMissingHostTarget(unittest.TestCase):
 
 @requires_landlock
 @requires_userns
+# Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP. Class siblings that validate arguments or parse files stay ungated: they run on any host.
+@requires_mount
 class TestEtcOverlayKeyValidation(unittest.TestCase):
     """etc_overlay keys are concatenated onto the staging root; a
     non-normalized key (\"..\") must never drive pre-pivot file

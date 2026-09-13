@@ -317,6 +317,12 @@ class TestExecStatusPipe:
             # mountless posture, not claim bind-tree isolation.
             assert info.get("mount_ns_active") is not True
 
+    # The premise (context enters the spawn path so the faked APPLY
+    # failure can surface) is unbuildable when the namespace backend is
+    # unavailable: the context degrades to Landlock-only up front and
+    # the faked spawn is never reached — the forced mount caches below
+    # cannot override that decision.
+    @requires_userns
     def test_core_layer_apply_failure_fails_loud(self, monkeypatch, tmp_path):
         # If the spawn child reports a Landlock/seccomp/unshare APPLY failure
         # (probe passed but apply failed), context must fail loud, not degrade.

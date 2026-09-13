@@ -26,7 +26,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from core.sandbox.tests.capability import requires_landlock, requires_userns
+from core.sandbox.tests.capability import (
+    requires_landlock,
+    requires_mount,
+    requires_userns,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Linux spawn backend",
@@ -50,6 +54,8 @@ class TestCaptureCeiling(unittest.TestCase):
         if not mount_ns_available():
             self.skipTest("mount-ns not available on this host")
 
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP, not a mid-flight mount failure.
+    @requires_mount
     def test_stdout_flood_is_bounded_and_marked(self):
         from unittest import mock
 

@@ -28,7 +28,11 @@ import unittest
 from pathlib import Path
 
 import pytest
-from core.sandbox.tests.capability import requires_landlock, requires_userns
+from core.sandbox.tests.capability import (
+    requires_landlock,
+    requires_mount,
+    requires_userns,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Linux spawn backend",
@@ -140,6 +144,8 @@ class TestHighFdSweep(unittest.TestCase):
         if not mount_ns_available():
             self.skipTest("mount-ns not available on this host")
 
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP, not a mid-flight mount failure.
+    @requires_mount
     def test_inheritable_fd_above_lowered_limit_is_closed(self):
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -264,6 +270,8 @@ class TestTimeoutZeroMeansImmediateDeadline(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5.0,
                         "timeout=0 must not wait out the child")
 
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP, not a mid-flight mount failure.
+    @requires_mount
     def test_timeout_none_stays_unbounded(self):
         from core.sandbox._spawn import run_sandboxed
         out = tempfile.mkdtemp(prefix="raptor-tnone-")

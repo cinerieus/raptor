@@ -26,7 +26,11 @@ import unittest
 from pathlib import Path
 
 import pytest
-from core.sandbox.tests.capability import requires_landlock, requires_userns
+from core.sandbox.tests.capability import (
+    requires_landlock,
+    requires_mount,
+    requires_userns,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="mount-ns backend is Linux-only",
@@ -55,6 +59,8 @@ class _Base(unittest.TestCase):
         self.out = os.path.realpath(self._out.name)
 
 
+# Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP, not a mid-flight mount failure.
+@requires_mount
 class TestStrictRefusesPerCallDemotion(_Base):
     @requires_landlock
     @requires_userns
@@ -262,6 +268,8 @@ class TestDemotedCallGetsPrivateScratch(_Base):
 
     @requires_landlock
     @requires_userns
+    # Exercises mount-delivered capability; hosts with userns but no mount capability degrade by design -> named SKIP, not a mid-flight mount failure.
+    @requires_mount
     def test_mounted_run_keeps_full_tmp_semantics(self):
         """No demotion → per-sandbox tmpfs /tmp stays writable."""
         from core.sandbox import sandbox
