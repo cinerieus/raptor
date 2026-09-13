@@ -483,12 +483,20 @@ def _infer_from_assertions(
 
 @dataclass
 class PreconditionVerification:
-    """Result of verifying a precondition against all call sites."""
+    """Presence of matching caller-side checks for one precondition.
+
+    Observation grade only: ``verified`` means a lexical check
+    matching the precondition's variable was OBSERVED somewhere in
+    the caller source — it is not bound to the call site (a
+    same-named variable elsewhere in the caller counts), so it can
+    corroborate but never refute a caller-violation hypothesis.
+    There is no ``violated`` lane: the lexical scan can only find
+    presence, never prove absence-at-the-call-site.
+    """
 
     precondition: str
     total_call_sites: int
     verified_sites: int
-    violated_sites: int
     unknown_sites: int
     is_universally_satisfied: bool = False
     evidence: list[dict[str, str]] = field(default_factory=list)
@@ -521,7 +529,6 @@ def _verify_one_precondition(
 ) -> PreconditionVerification:
     """Check one precondition against all known callers."""
     verified = 0
-    violated = 0
     unknown = 0
     evidence: list[dict[str, str]] = []
 
@@ -546,22 +553,21 @@ def _verify_one_precondition(
         )
         caller_id = f"{caller.get('file', '')}:{caller.get('name', caller.get('function', ''))}"
 
+        # _check_precondition_in_source returns True or None only —
+        # a lexical presence scan cannot prove a violation, so there
+        # is no "violated" lane to count.
         if satisfied is True:
             verified += 1
             evidence.append({"caller": caller_id, "status": "verified"})
-        elif satisfied is False:
-            violated += 1
-            evidence.append({"caller": caller_id, "status": "violated"})
         else:
             unknown += 1
             evidence.append({"caller": caller_id, "status": "unknown"})
 
-    total = verified + violated + unknown
+    total = verified + unknown
     return PreconditionVerification(
         precondition=precondition,
         total_call_sites=total,
         verified_sites=verified,
-        violated_sites=violated,
         unknown_sites=unknown,
         is_universally_satisfied=(total > 0 and verified == total),
         evidence=evidence,
@@ -588,12 +594,18 @@ def _check_precondition_in_source(
     caller_source: str,
     file_path: str = "",
 ) -> bool | None:
-    """Check if the caller source satisfies the precondition.
+    """Check if a matching check is OBSERVED in the caller source.
 
-    Scans a comment/string-blanked view of the caller: a "verified"
-    receipt renders as "mechanically refuted" steering in the review
-    prompt, so a comment that merely mentions a guard ("/* if (!p)
-    */") must not mint one.
+    Returns True (check present somewhere in the caller) or None
+    (nothing found / not checkable) — never False: the match is not
+    bound to the call site or even the right variable (a same-named
+    ``ret``/``ptr``/``len`` anywhere in the caller counts, a lock
+    released before the call still matches), so presence is an
+    observation and absence proves nothing. Renderers must keep the
+    wording observation-grade for the same reason.
+
+    Scans a comment/string-blanked view of the caller so a comment
+    that merely mentions a guard ("/* if (!p) */") does not count.
     """
     from .source_view import sanitized_view
 
@@ -646,28 +658,32 @@ def _get_source_from_checklist(
 def format_precondition_verification(
     verifications: list[PreconditionVerification],
 ) -> str:
-    """Render precondition verification as a context section for the LLM."""
+    """Render caller-check observations as a context section for the LLM.
+
+    Observation grade by design: the underlying scan is lexical,
+    position-insensitive and name-collision-prone, so the rendering
+    must never claim a violation hypothesis is refuted — it only
+    reports where matching checks were observed.
+    """
     if not verifications:
         return ""
-    lines = ["### Precondition verification (mechanical)"]
+    lines = ["### Precondition checks observed in callers (lexical)"]
     for v in verifications:
         if v.total_call_sites == 0:
             continue
-        status = "UNIVERSALLY SATISFIED" if v.is_universally_satisfied else (
-            f"{v.verified_sites}/{v.total_call_sites} callers verified "
-            f"({v.violated_sites} violated, {v.unknown_sites} unknown)"
-        )
-        lines.append(f"- `{v.precondition}`: {status}")
         if v.is_universally_satisfied:
-            lines.append(
-                "  A hypothesis that callers violate this precondition "
-                "is mechanically refuted."
+            status = (
+                f"all {v.total_call_sites} caller(s) contain a "
+                "matching check (lexical observation — not bound to "
+                "the call site)"
             )
-        elif v.violated_sites > 0:
-            lines.append(
-                "  At least one caller mechanically violates this "
-                "precondition — chase the violating call site(s) first."
+        else:
+            status = (
+                f"{v.verified_sites}/{v.total_call_sites} caller(s) "
+                f"contain a matching check ({v.unknown_sites} with "
+                "none observed)"
             )
+        lines.append(f"- `{v.precondition}`: {status}")
     return "\n".join(lines)
 
 
