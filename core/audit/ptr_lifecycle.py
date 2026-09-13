@@ -206,12 +206,17 @@ def _event_vocab_source(verb: str, vocab: Any = None) -> str | None:
 
 @lru_cache(maxsize=32)
 def _event_call_re(names: tuple[str, ...]) -> re.Pattern:
+    # Group 2 is the base identifier of the event argument; group 3
+    # captures a trailing member chain (``->scratch`` / ``.scratch``)
+    # so field-expression events bind to the FIELD actually released,
+    # not the whole base object.
     alts = "|".join(
         re.escape(n) for n in sorted(names, key=len, reverse=True)
     )
     return re.compile(
         r"\b(" + alts + r"|\w+_(?:free|destroy|release|put|teardown)\w*"
         r")\s*\(\s*&?\s*([A-Za-z_]\w*)"
+        r"((?:\s*(?:->|\.)\s*[A-Za-z_]\w*)*)"
     )
 
 
@@ -489,6 +494,27 @@ def _alias_edges_for_owner(
     return edges
 
 
+def _edges_for_event(
+    census: FieldCensus,
+    event: dict[str, Any],
+) -> list[_AliasEdge]:
+    """Alias edges staled by *event*, with field-precision binding.
+
+    ``free(conn->scratch)`` releases the referent of ONE field — an
+    alias taken from a DIFFERENT conn field (``p = conn->other``)
+    still points at a live object, and adjudicating it as staled
+    minted confirmed UAF claims on live pointers. When the event
+    argument is a member expression, only edges sourced from that
+    exact field qualify; a whole-object event (``free(conn)``) keeps
+    the every-field binding.
+    """
+    edges = _alias_edges_for_owner(census, event["target"])
+    target_field = event.get("target_field")
+    if target_field:
+        edges = [e for e in edges if e.owner_field == target_field]
+    return edges
+
+
 def _find_events(
     segment_lines: list[str],
     start_line: int,
@@ -509,9 +535,17 @@ def _find_events(
             source = _event_vocab_source(verb, vocab)
             if source is None:
                 continue
+            # A member-expression argument (``free(conn->scratch)``)
+            # releases the FIELD's referent, not the base object:
+            # record which field so edge matching can require it.
+            chain = re.findall(r"[A-Za-z_]\w*", m.group(3) or "")
             events.append({
                 "verb": verb,
                 "target": target,
+                "target_field": chain[-1] if chain else None,
+                "target_expr": re.sub(
+                    r"\s+", "", target + (m.group(3) or ""),
+                ),
                 "line": start_line + offset,
                 "code": text.strip()[:200],
                 "vocab_source": source,
@@ -761,7 +795,8 @@ def _adjudicate_alias(
             f"`{edge.holder + '->' if edge.holder else ''}{edge.name}` "
             f"aliases {edge.owner}->{edge.owner_field} (assigned at "
             f"{edge.file}:{edge.line}); {event['verb']}() releases "
-            f"{event['target']} at {file_path}:{event['line']} with "
+            f"{event.get('target_expr') or event['target']} at "
+            f"{file_path}:{event['line']} with "
             f"the alias live (no invalidating write found), and the "
             f"alias is read at {reads[0].get('file', file_path)}:"
             f"{reads[0]['line']}"
@@ -900,7 +935,7 @@ def run_ptr_lifecycle_check(
     )
     fallbacks: list[AliasEvidence] = []
     for event in ranked:
-        edges = _alias_edges_for_owner(census, event["target"])
+        edges = _edges_for_event(census, event)
         for edge in edges:
             res = _adjudicate_alias(
                 census, source_texts, file_path, span, event, edge,
@@ -1031,9 +1066,7 @@ def run_ptr_lifecycle_prepass(
                     continue
                 candidates += 1
                 for event in events:
-                    for edge in _alias_edges_for_owner(
-                        census, event["target"],
-                    ):
+                    for edge in _edges_for_event(census, event):
                         res = _adjudicate_alias(
                             census, source_texts, file_path, span,
                             event, edge, inventory=inventory,

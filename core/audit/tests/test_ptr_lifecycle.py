@@ -87,6 +87,21 @@ PEELOFF_TWIN = PEELOFF.replace(
     "    obj->tls = tmp->tls;\n    obj->port = tmp->port;\n",
 )
 
+# Field-precision binding: the event argument is a member expression,
+# so only aliases of THAT field are staled by it.
+FIELD_EVENT_SHAPE = """
+int detach(struct ctx *d, struct conn *c) {
+    d->cached = c->other;
+    free(c->scratch);
+    return 0;
+}
+struct buf *get_cached(struct ctx *d) {
+    return d->cached;
+}
+"""
+
+FIELD_EVENT_TWIN = FIELD_EVENT_SHAPE.replace("c->other", "c->scratch")
+
 RCU_SHAPE = """
 void reclaim(struct s *o) {
     struct n *p = rcu_dereference(o->node);
@@ -165,6 +180,25 @@ class TestLegBStaleAlias:
         assert "invalidated" in res.reason
         assert res.to_dict()["invalidation_search"]["kind"] == \
             "null-write"
+
+    def test_field_event_does_not_stale_other_field_aliases(self):
+        # free(c->scratch) releases ONE field's referent; the alias
+        # taken from c->other still points at a live object — a
+        # confirmed verdict here is a false UAF on a live pointer.
+        res = run_ptr_lifecycle_check(
+            Path("/nonexistent"), "src/conn.c", "detach", HYP,
+            source_texts={"src/conn.c": FIELD_EVENT_SHAPE},
+        )
+        assert res.outcome != "confirmed"
+
+    def test_field_event_on_the_aliased_field_still_confirms(self):
+        res = run_ptr_lifecycle_check(
+            Path("/nonexistent"), "src/conn.c", "detach", HYP,
+            source_texts={"src/conn.c": FIELD_EVENT_TWIN},
+        )
+        assert res.outcome == "confirmed"
+        assert "c->scratch" in res.reason
+        assert res.to_dict()["owner"] == {"name": "c", "field": "scratch"}
 
     def test_naming_only_event_verb_is_detection_variant(self):
         # Vocab-policy: with no learned inputs, the target-specific
