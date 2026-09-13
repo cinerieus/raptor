@@ -209,13 +209,11 @@ def _cache_key(binary_path: Path) -> str | None:
 
 
 def _content_sha(binary_path: Path) -> str | None:
+    """Streamed content hash via the repo's single chokepoint
+    (core.hash.sha256_file); unreadable file degrades to None."""
     try:
-        import hashlib
-        h = hashlib.sha256()
-        with binary_path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1 << 16), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        from core.hash import sha256_file
+        return sha256_file(binary_path)
     except OSError:
         return None
 
@@ -310,7 +308,6 @@ def save_cached_cfgs(
     if path is None:
         return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": _CFG_CACHE_VERSION,
             "binary_path": str(binary_path),
@@ -325,9 +322,13 @@ def save_cached_cfgs(
                 for addr, cfg in cfgs.items()
             },
         }
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload))
-        tmp.replace(path)
+        # core.json.save_json owns the atomic tempfile + rename dance
+        # (parent dir creation included). The hand-rolled predecessor
+        # used a CONSTANT `.json.tmp` sidecar per cache key, so two
+        # concurrent saves raced on the same tempfile — save_json's
+        # unique tempfile removes the torn-write window entirely.
+        from core.json import save_json
+        save_json(path, payload)
     except OSError as e:
         logger.debug("function_cfg: cache write failed: %s", e)
 
