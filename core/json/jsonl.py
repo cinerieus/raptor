@@ -109,8 +109,13 @@ def load_jsonl(
     Best-effort: a missing, unreadable, or symlinked file loads as
     ``[]`` (logged at debug); blank and malformed lines are skipped so
     a truncated final line (writer killed mid-append) doesn't lose the
-    well-formed records before it. Callers that only want objects
-    filter with ``isinstance(rec, dict)`` on the result.
+    well-formed records before it. Invalid UTF-8 counts as malformed
+    at LINE granularity: the file is read as bytes and each line is
+    decoded independently, so one corrupt byte (torn write, foreign
+    writer) skips only its own line instead of raising
+    ``UnicodeDecodeError`` out of the strict text-mode read and losing
+    every well-formed record in the trail. Callers that only want
+    objects filter with ``isinstance(rec, dict)`` on the result.
 
     Byte budgets (keyword-only, ``None`` = historical unbounded):
 
@@ -156,7 +161,7 @@ def load_jsonl(
             return []
     records: list[Any] = []
     try:
-        f = os.fdopen(fd, "r", encoding="utf-8")
+        f = os.fdopen(fd, "rb")
     except OSError:
         try:
             os.close(fd)
@@ -167,12 +172,18 @@ def load_jsonl(
     with f:
         try:
             oversize_lines = 0
-            for raw in f:
+            invalid_lines = 0
+            for raw_bytes in f:
                 if (
                     max_line_bytes is not None
-                    and len(raw.encode("utf-8")) > max_line_bytes
+                    and len(raw_bytes) > max_line_bytes
                 ):
                     oversize_lines += 1
+                    continue
+                try:
+                    raw = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    invalid_lines += 1
                     continue
                 line = raw.strip()
                 if not line:
@@ -196,5 +207,10 @@ def load_jsonl(
             logger.warning(
                 "load_jsonl: skipped %d line(s) over max_line_bytes=%d in %s",
                 oversize_lines, max_line_bytes, path,
+            )
+        if invalid_lines:
+            logger.warning(
+                "load_jsonl: skipped %d invalid-UTF-8 line(s) in %s",
+                invalid_lines, path,
             )
     return records

@@ -97,6 +97,28 @@ class TestLoadJsonl:
         p.write_text('{"ok": 1}\n\n{truncated\n{"ok": 2}\n')
         assert load_jsonl(p) == [{"ok": 1}, {"ok": 2}]
 
+    def test_invalid_utf8_line_skipped_not_raised(self, tmp_path: Path):
+        """One corrupt byte (torn write, foreign writer) must skip its
+        own line, never raise UnicodeDecodeError out of the never-raise
+        contract and lose every well-formed record in the trail."""
+        p = tmp_path / "trail.jsonl"
+        p.write_bytes(
+            b'{"ok": 1}\n'
+            b'{"bad": "\xff\xfe"}\n'   # invalid UTF-8 mid-record
+            b'\xc3\n'                  # truncated multi-byte sequence
+            b'{"ok": 2}\n'
+        )
+        assert load_jsonl(p) == [{"ok": 1}, {"ok": 2}]
+
+    def test_invalid_utf8_final_partial_line_keeps_earlier(
+        self, tmp_path: Path,
+    ):
+        """Writer killed mid-append leaving raw bytes: earlier records
+        survive."""
+        p = tmp_path / "trail.jsonl"
+        p.write_bytes(b'{"a": 1}\n{"b": "tru\x80')
+        assert load_jsonl(p) == [{"a": 1}]
+
     def test_non_dict_records_preserved(self, tmp_path: Path):
         p = tmp_path / "trail.jsonl"
         p.write_text('[1, 2]\n"str"\n{"d": true}\n')
