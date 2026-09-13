@@ -12,7 +12,11 @@ if TYPE_CHECKING:
 _PROBE_ORIGINS = [
     "https://evil.example.com",
     "null",
-    "https://attacker.com",
+    # RFC-2606 reserved (base.py PROBE_HOST doctrine): a target that
+    # reflects / link-generates from the probe origin must not be
+    # steered at someone else's real infrastructure — attacker.com is
+    # a registrable third-party domain.
+    "https://evil2.example.com",
 ]
 
 

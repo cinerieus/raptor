@@ -658,10 +658,12 @@ def test_https_downgrade_probe_failure_counts_as_degradation(monkeypatch):
 
     from packages.web.checks.tls import HttpsRedirectCheck
 
-    def _refuse(*args, **kwargs):
+    def _refuse(self, *args, **kwargs):
         raise requests.ConnectionError("refused")
 
-    monkeypatch.setattr(requests, "get", _refuse)
+    # The check probes through its own Session (trust_env control for
+    # loopback targets), so patch the Session method.
+    monkeypatch.setattr(requests.Session, "get", _refuse)
     client = _CountingClient(lambda *a, **k: FakeResponse(200, "ok"))
     assert HttpsRedirectCheck().run(client, "https://t.example") == []
     assert client.transport_errors == 1
@@ -670,14 +672,14 @@ def test_https_downgrade_probe_failure_counts_as_degradation(monkeypatch):
 def test_options_probe_failure_counts_as_degradation(monkeypatch):
     import requests
 
-    from packages.web.checks.information import VerbosHttpMethodsCheck
+    from packages.web.checks.information import VerboseHttpMethodsCheck
 
     def _refuse(*args, **kwargs):
         raise requests.ConnectionError("refused")
 
     monkeypatch.setattr(requests, "options", _refuse)
     client = _CountingClient(lambda *a, **k: FakeResponse(200, "ok"))
-    assert VerbosHttpMethodsCheck().run(client, "https://t.example") == []
+    assert VerboseHttpMethodsCheck().run(client, "https://t.example") == []
     assert client.transport_errors == 1
 
 
@@ -687,8 +689,9 @@ def test_successful_bypass_probes_do_not_count(monkeypatch):
     from packages.web.checks.tls import HttpsRedirectCheck
 
     monkeypatch.setattr(
-        requests, "get",
-        lambda *a, **k: FakeResponse(301, "", headers={"Location": "https://t.example/"}),
+        requests.Session, "get",
+        lambda self, *a, **k: FakeResponse(
+            301, "", headers={"Location": "https://t.example/"}),
     )
     client = _CountingClient(lambda *a, **k: FakeResponse(200, "ok"))
     HttpsRedirectCheck().run(client, "https://t.example")

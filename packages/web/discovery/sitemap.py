@@ -53,6 +53,11 @@ def _process_sitemap(
         resp = client.get(path)
         if resp.status_code != 200:
             return
+        # stdlib ElementTree parses untrusted XML here: entity-expansion
+        # DoS protection rests on the host's expat (modern expat caps
+        # amplification) and the response body is already bounded by the
+        # client's response cap. defusedxml is deliberately not a hard
+        # dependency of the web scanner.
         root = ET.fromstring(resp.text)
     except Exception as e:
         logger.debug("sitemap fetch/parse failed for %s: %s", path, e)
