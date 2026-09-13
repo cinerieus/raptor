@@ -174,7 +174,12 @@ def check_integer_truncation(
 
     search_source = source
     if xref_source:
-        search_source = source + xref_source
+        # Newline sentinel: without it the primary's last line glues
+        # to the xref blob's first and identifiers merge across the
+        # seam — a truncated decompile ending mid-token minted a
+        # cast/alloc/copy chain that exists in neither function
+        # (same seam fixed in proto_length_checker).
+        search_source = source + "\n" + xref_source
 
     narrows: dict[str, dict[str, str]] = {}
 
