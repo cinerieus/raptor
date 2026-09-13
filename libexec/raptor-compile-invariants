@@ -54,8 +54,12 @@ def main() -> int:
                     help="Target codebase to sweep for violations.")
     ap.add_argument("--engine", default=None, choices=["semgrep", "coccinelle"],
                     help="Force engine (default: infer from evidence).")
+    from core.concepts.model import CONFIDENCE_GRADES
     ap.add_argument("--min-confidence", default="traced",
-                    help="Minimum confidence grade (default: traced).")
+                    choices=list(CONFIDENCE_GRADES),
+                    help="Minimum confidence grade (default: traced). "
+                         "A mistyped grade used to silently disable "
+                         "the floor; argparse now rejects it.")
     ap.add_argument("--max", type=int, default=10,
                     help="Maximum invariants to compile (default: 10).")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -77,11 +81,8 @@ def main() -> int:
     from core.concepts.model import DomainModel
     model = DomainModel.load(dm_path)
 
-    from core.concepts.model import CONFIDENCE_GRADES
-    try:
-        floor = CONFIDENCE_GRADES.index(parsed.min_confidence)
-    except ValueError:
-        floor = 0
+    # choices= guarantees membership; a bare index cannot raise.
+    floor = CONFIDENCE_GRADES.index(parsed.min_confidence)
     qualified = [
         inv for inv in model.invariants
         if inv.statement and inv.negation and not inv.mechanical_rule

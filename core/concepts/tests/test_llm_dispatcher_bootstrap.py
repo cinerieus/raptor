@@ -159,3 +159,24 @@ class TestSynthesiseCheckerDispatcherBootstrap:
         configs, label = route_calls[0]
         assert label == "raptor-synthesise-checker"
         assert "primary-cfg" in configs
+
+
+class TestMinConfidenceValidation:
+    """A mistyped --min-confidence must be a usage error — the old
+    `except ValueError: floor = 0` silently disabled the confidence
+    floor and still forwarded the raw invalid string to
+    compile_model."""
+
+    def test_invalid_grade_rejected(self):
+        import os
+        import subprocess
+        env = dict(os.environ, _RAPTOR_TRUSTED="1")
+        res = subprocess.run(
+            [sys.executable,
+             str(RAPTOR_DIR / "libexec" / "raptor-compile-invariants"),
+             "/nonexistent", "--min-confidence", "bogus"],
+            env=env, capture_output=True, text=True, timeout=60,
+            check=False,
+        )
+        assert res.returncode == 2
+        assert "invalid choice" in res.stderr
