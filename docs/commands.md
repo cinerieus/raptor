@@ -613,8 +613,8 @@ coverage data.
 /crash-analysis <bug-tracker-url> <git-repo-url>
 ```
 
-No flags.  The orchestrator spawns specialised agents (crash-analyser,
-function-trace-generator, coverage-analysis-generator) and a checker agent
+No flags.  The orchestrator spawns specialised agents (crash-analyzer,
+function-trace-generator, coverage-analyzer) and a checker agent
 for validation.
 
 Requirements: rr, gcc/clang (with ASAN), gdb, gcov.
@@ -918,7 +918,7 @@ Named workspaces that corral analysis runs into a shared directory.
 | `binary clear` | Clear all persisted binaries |
 | `trust` | List trust assertions (markers + persisted binaries count), or set a marker (`config`/`build`/`dynamic`) |
 | `untrust` | Remove a trust marker |
-| `set` | List settings, or set a registry key (`description`, `notes`, `threat-model`, `target-kind`, `build-command[.<lang>]`) |
+| `set` | List settings, or set a registry key (`description`, `notes`, `threat-model`, `target-kind`, `build-command[.<lang>]`, `sandbox-floor`) |
 | `unset` | Remove a setting |
 | `get` | Print one setting's bare value (exit 1 when unset — script-friendly) |
 
@@ -960,7 +960,11 @@ to the existing project fields; `threat-model` points at an existing
 threat-model JSON (updates `threat_model_path`); `target-kind` is one
 of `library|hybrid|application|auto`; `build-command` stores per-
 language commands (`build-command.<lang>`; the bare key writes the
-`default` slot). `get <key>` prints the bare value and exits 1 when
+`default` slot); `sandbox-floor` is the standing untrusted
+containment-floor consent, one of
+`mount-ns`/`mountless-ns`/`ns-only`/`landlock` (`none` is refused —
+untrusted work never runs bare by consent; a per-run
+`--sandbox-floor` always overrides, see [sandbox](sandbox.md)). `get <key>` prints the bare value and exits 1 when
 unset, for scripting.
 
 ---

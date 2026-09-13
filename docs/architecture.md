@@ -43,7 +43,7 @@ current contents):
 
 ```
 raptor/
-├── bin/               # User-facing launchers (raptor, raptor-sca, cve-diff)
+├── bin/               # User-facing launchers (raptor, raptor-sca, cve-diff, cve-env)
 ├── libexec/           # Internal helper scripts dispatched by commands and skills
 ├── core/              # Shared infrastructure: config, sandbox, inventory,
 │                      #   LLM substrate, audit orchestrator, git, reporting, ...

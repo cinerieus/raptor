@@ -48,7 +48,7 @@ Manage projects — named workspaces that corral analysis runs into one director
 | `import <path> [--force] [--sha256 <hash>]` | Import project from zip |
 | `trust [<marker>] [<name>]` | List trust assertions (markers + binaries count), or set a marker: `config` / `build` / `dynamic` |
 | `untrust <marker> [<name>]` | Remove a trust marker |
-| `set [<key> <value>] [<name>]` | List settings, or set a registry key (`description`, `notes`, `threat-model`, `target-kind`, `build-command[.<lang>]`) |
+| `set [<key> <value>] [<name>]` | List settings, or set a registry key (`description`, `notes`, `threat-model`, `target-kind`, `build-command[.<lang>]`, `sandbox-floor` — containment-floor consent, `none` refused) |
 | `unset <key> [<name>]` | Remove a setting |
 | `get <key> [<name>]` | Print one setting's bare value (exit 1 when unset) |
 
