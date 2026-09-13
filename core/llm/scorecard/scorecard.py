@@ -343,6 +343,29 @@ def _wilson_upper_bound(successes: int, failures: int, *,
     return (centre + spread) / denom
 
 
+def _redact_tree(v: object) -> object:
+    """Secret-redact every string reachable in a sample value.
+
+    Shape-preserving for the JSON-representable types (str redacted;
+    dict/list/tuple descended; int/float/bool/None passed through —
+    they carry no text). Anything else is str-coerced and redacted:
+    an exotic type would fail JSON serialisation anyway, and coercion
+    is the fail-safe direction — a value must never reach disk
+    unredacted just because of its type.
+    """
+    from core.security.redaction import redact_secrets
+
+    if isinstance(v, str):
+        return redact_secrets(v)
+    if isinstance(v, dict):
+        return {k: _redact_tree(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_redact_tree(x) for x in v]
+    if v is None or isinstance(v, (int, float, bool)):
+        return v
+    return redact_secrets(str(v))
+
+
 def _now_iso() -> str:
     """UTC now in ISO 8601, second precision. Used for first/last
     seen timestamps. Stable across timezones — operators inspecting
@@ -600,20 +623,43 @@ class ModelScorecard:
         if (outcome == "incorrect"
                 and self.retain_samples
                 and sample is not None):
-            samples = cell.setdefault("disagreement_samples", [])
-            samples.append({
-                "ts": _now_iso(),
-                "event_type": event_type,
-                **sample,
-            })
-            # Trim to most-recent N. We cap rather than rotate
-            # because operators inspecting samples want the
-            # latest failure modes — older samples may reflect
-            # an earlier model snapshot.
-            if len(samples) > MAX_DISAGREEMENT_SAMPLES:
-                cell["disagreement_samples"] = (
-                    samples[-MAX_DISAGREEMENT_SAMPLES:]
-                )
+            self._append_sample(cell, event_type, sample)
+
+    @staticmethod
+    def _append_sample(
+        cell: dict, event_type: str, sample: dict[str, str],
+    ) -> None:
+        """Append one disagreement sample to a cell — the single sink
+        every producer's sample funnels through.
+
+        Secret redaction happens HERE, not per-producer: models
+        occasionally quote a tool-output snippet carrying an API key,
+        Bearer token, or secrets-stuffed URL, and the sidecar is
+        designed to outlive the run — a producer that forgot its own
+        ``redact_secrets`` call would park the secret on disk
+        indefinitely (that drift had already happened: one of seven
+        producers redacted). Redaction descends the whole value tree
+        (str leaves rewritten inside lists/tuples/dicts too — a
+        str-leaves-only pass let a secret ride to disk inside a list
+        value); numeric/bool/None leaves carry no text and pass
+        through, and any other type is str-coerced THEN redacted, so
+        no value shape ever bypasses the pass. Container shapes are
+        preserved. Caller holds the lock.
+        """
+        samples = cell.setdefault("disagreement_samples", [])
+        samples.append({
+            "ts": _now_iso(),
+            "event_type": event_type,
+            **{k: _redact_tree(v) for k, v in sample.items()},
+        })
+        # Trim to most-recent N. We cap rather than rotate
+        # because operators inspecting samples want the
+        # latest failure modes — older samples may reflect
+        # an earlier model snapshot.
+        if len(samples) > MAX_DISAGREEMENT_SAMPLES:
+            cell["disagreement_samples"] = (
+                samples[-MAX_DISAGREEMENT_SAMPLES:]
+            )
 
     def register_uses(self, uses: list[dict]) -> None:
         """Record per-(model, decision_class) USAGE — a volume/presence signal,
@@ -861,16 +907,7 @@ class ModelScorecard:
             if (outcome == "incorrect"
                     and self.retain_samples
                     and sample is not None):
-                samples = cell.setdefault("disagreement_samples", [])
-                samples.append({
-                    "ts": _now_iso(),
-                    "event_type": EventType.TOOL_EVIDENCE,
-                    **sample,
-                })
-                if len(samples) > MAX_DISAGREEMENT_SAMPLES:
-                    cell["disagreement_samples"] = (
-                        samples[-MAX_DISAGREEMENT_SAMPLES:]
-                    )
+                self._append_sample(cell, EventType.TOOL_EVIDENCE, sample)
             return True
 
     def set_policy_override(

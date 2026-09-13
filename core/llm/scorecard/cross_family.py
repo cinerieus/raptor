@@ -78,7 +78,10 @@ def record_cross_family_outcomes(
         sample = None
         if outcome == "incorrect":
             sample = {
-                "trigger": cf.get("trigger", ""),
+                # str-coerced like every sibling field: an upstream
+                # list/dict in this slot must persist as one flat
+                # string, not smuggle nested values into the sample.
+                "trigger": str(cf.get("trigger") or ""),
                 "checker_ruling": str(
                     cf.get("checker_ruling", "")
                 )[:_MAX_REASONING_CHARS],
