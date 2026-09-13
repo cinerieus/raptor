@@ -50,12 +50,27 @@ import select
 import subprocess
 import sys
 import time
+import warnings
 from collections.abc import Iterable
 from pathlib import Path
 
 from . import evidence as _evidence_mod
 
 logger = logging.getLogger(__name__)
+
+# Python 3.12+ warns on every os.fork() in a multi-threaded process.
+# Both fork sites in this module honour the fork-safety contract (the
+# children only do fd plumbing, bare syscalls and exec — see
+# _spawn.py's module docstring). The filter must live at module
+# level, exactly like _spawn's: per-fork ``warnings.catch_warnings()``
+# blocks mutate the PROCESS-GLOBAL filter list and race when this
+# audit lane forks concurrently with _spawn sandboxes on another
+# thread — one thread's restore re-exposes another thread's fork
+# mid-flight, which is how the warning kept escaping into CI output.
+warnings.filterwarnings(
+    "ignore", category=DeprecationWarning,
+    message=r".*use of fork\(\) may lead to deadlocks in the child.*",
+)
 
 
 # Default tracer-ready timeout. The tracer's PTRACE_SEIZE +
@@ -509,13 +524,8 @@ def run_landlock_audit(
 
     try:
         # ----- Fork the target -----
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", category=DeprecationWarning,
-                message=r".*fork.*may lead to deadlocks.*",
-            )
-            target_pid = os.fork()
+        # (fork-warning suppression is the module-level filter above)
+        target_pid = os.fork()
 
         if target_pid == 0:
             # ============== TARGET CHILD ==============
@@ -650,12 +660,7 @@ def run_landlock_audit(
             err_w = -1
 
         # ----- Fork the tracer -----
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore", category=DeprecationWarning,
-                message=r".*fork.*may lead to deadlocks.*",
-            )
-            tracer_pid = os.fork()
+        tracer_pid = os.fork()
 
         if tracer_pid == 0:
             # ============== TRACER CHILD ==============

@@ -90,10 +90,22 @@ import stat as stat_mod
 import struct
 import threading
 import time
+import warnings
 
 from . import state
 
 logger = logging.getLogger(__name__)
+
+# Python 3.12+ warns on every os.fork() in a multi-threaded process.
+# The probe fork below honours the fork-safety contract (ctypes calls
+# + os.write + _exit only). Module-level filter, same as _spawn's:
+# per-fork ``warnings.catch_warnings()`` mutates the process-global
+# filter list and races with concurrent sandbox spawns on other
+# threads.
+warnings.filterwarnings(
+    "ignore", category=DeprecationWarning,
+    message=r".*use of fork\(\) may lead to deadlocks in the child.*",
+)
 
 # asm-generic syscall numbers (post-2011 table; same gate as landlock.py)
 _ARCH_OK = platform.machine() in (
@@ -325,17 +337,11 @@ def _probe_unix_scope_uncached() -> bool:
     except AttributeError:
         return False
     r, w = os.pipe()
-    # Same suppression as every other production fork site: the probe
-    # child only does ctypes calls + os.write + _exit — no Python
-    # locks, no allocator-heavy work (see the module fork-safety
-    # contract in _spawn.py).
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", category=DeprecationWarning,
-            message=r".*fork.*may lead to deadlocks.*",
-        )
-        pid = os.fork()
+    # The probe child only does ctypes calls + os.write + _exit — no
+    # Python locks, no allocator-heavy work (see the module
+    # fork-safety contract in _spawn.py). Fork-warning suppression is
+    # the module-level filter above.
+    pid = os.fork()
     if pid == 0:  # probe child
         try:
             os.close(r)
