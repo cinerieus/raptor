@@ -19,7 +19,7 @@ Two-phase: Claude runs `/understand --map` (LLM-driven, produces context-map.jso
 ```
 /audit <target_path> [--strategy <name>] [--budget <N>] [--scope <dir>] [--out <dir>]
        [--codeql-db <path>] [--max-cost <USD>] [--deepen-reserve <fraction>] [--max-time <seconds>]
-       [--review-passes <N>] [--subsystem-depth <N>] [--batch-sloc-threshold <N>]
+       [--review-passes <N>] [--max-workers <N>] [--subsystem-depth <N>] [--batch-sloc-threshold <N>]
        [--include-kinds <list>] [--max-propagation-depth <N>] [--adversarial] [--edges]
        [--no-verdict-reuse] [--schedule {cost,priority}] [--prior-journal <run-dir>]
        [--prior-claims <N>]
@@ -41,6 +41,7 @@ Two-phase: Claude runs `/understand --map` (LLM-driven, produces context-map.jso
 - `--deepen-reserve <fraction>` — slice of `--max-cost` held back for the deepen phase so announced re-reviews can execute (default 0.15; 0 disables)
 - `--max-time <seconds>` — stop after this many wall-clock seconds
 - `--review-passes <N>` — independent review passes per function for self-consistency (default: 1)
+- `--max-workers <N>` — concurrent review workers (1-32; values above the cap are clamped). Overrides the transport-derived default — the operator owns the rate-limit consequences (the adaptive throttle still backs off on 429s). Also accepted by `resume` for a single segment
 - `--subsystem-depth <N>` — directory grouping depth for subsystem-ordered review (default: 0)
 - `--batch-sloc-threshold <N>` — functions at or under N SLOC are batched per file into combined reviews (default: 15; 0 disables). Raise on codebases dense with tiny accessors/wrappers to cut per-call overhead
 - `--include-kinds <list>` — comma-separated item kinds beyond functions/methods (default: `top_level`, `macro`, `global`); positive list overrides the defaults, `-kind` opts one out, `none` restricts to functions/methods only
@@ -101,7 +102,7 @@ If the operator passed `--scope`, still map the full target (the map covers the 
 libexec/raptor-audit run "$TARGET_PATH" --out "$OUTPUT_DIR"
 ```
 
-Pass through any operator flags (`--strategy`, `--budget`, `--scope`, `--pin`, `--scope-floor`, `--no-scope-floor`, `--pre-scan`, `--annotations-dir`, `--no-validate`, `--model`, `--adversarial`, `--edges`, `--max-propagation-depth`, `--codeql-db`, `--max-cost`, `--deepen-reserve`, `--max-time`, `--review-passes`, `--subsystem-depth`, `--batch-sloc-threshold`, `--include-kinds`, `--no-verdict-reuse`, `--schedule`, `--prior-journal`, `--prior-claims`, `--dynamic`, `--no-dynamic`, `--binary`, `--binary-auto`, `--no-binary-oracle`, `--no-vendored-triage`).
+Pass through any operator flags (`--strategy`, `--budget`, `--scope`, `--pin`, `--scope-floor`, `--no-scope-floor`, `--pre-scan`, `--annotations-dir`, `--no-validate`, `--model`, `--adversarial`, `--edges`, `--max-propagation-depth`, `--codeql-db`, `--max-cost`, `--deepen-reserve`, `--max-time`, `--review-passes`, `--max-workers`, `--subsystem-depth`, `--batch-sloc-threshold`, `--include-kinds`, `--no-verdict-reuse`, `--schedule`, `--prior-journal`, `--prior-claims`, `--dynamic`, `--no-dynamic`, `--binary`, `--binary-auto`, `--no-binary-oracle`, `--no-vendored-triage`).
 
 The orchestrator handles everything from here: gap computation, context assembly, LLM review, tool chain dispatch, Joern background build, sweep validation, constraint propagation, Mode 2 checker synthesis, /validate post-pass, report generation, and lifecycle completion.
 

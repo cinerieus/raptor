@@ -1706,6 +1706,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             if args.prior_journal else None
         ),
         prior_claims_per_function=args.prior_claims,
+        max_workers=args.max_workers,
     )
 
     # Persist the resolved run configuration BEFORE the pipeline
@@ -2316,6 +2317,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         prior_claims_per_function=int(
             run_cfg.get("prior_claims_per_function", 3)
         ),
+        max_workers=(
+            args.max_workers if args.max_workers is not None
+            else int(run_cfg.get("max_workers") or 0)
+        ),
     )
 
     print(f"\nResuming audit of {target_path}", flush=True)
@@ -2371,6 +2376,21 @@ def _apply_supervisor_bound(
     return bound.bound_s
 
 
+def _max_workers_arg(value: str) -> int:
+    """Parse --max-workers: an int >= 1, clamped to the shared worker
+    cap — the same clamp derive_max_workers applies to the tuning
+    override, so the CLI can never exceed what tuning.json could."""
+    from core.llm.concurrency import MAX_WORKERS_CAP
+    try:
+        workers = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid int value: {value!r}") from exc
+    if workers < 1:
+        raise argparse.ArgumentTypeError("--max-workers must be >= 1")
+    return min(workers, MAX_WORKERS_CAP)
+
+
 def _run_config_from_args(
     args: argparse.Namespace,
     target_path: Path,
@@ -2424,6 +2444,7 @@ def _run_config_from_args(
         "deepen_reserve_fraction": args.deepen_reserve,
         "prior_journal_dirs": args.prior_journal,
         "prior_claims_per_function": args.prior_claims,
+        "max_workers": getattr(args, "max_workers", 0),
         # Informational: the self-bound applied to segment 1 (the
         # operator's explicit max_seconds above stays authoritative
         # for resume; each segment re-derives its own bound).
@@ -2693,6 +2714,15 @@ def main() -> int:
                             "(default 0.15; 0 disables)")
     p_run.add_argument("--max-time", type=float, default=None,
                        help="Maximum wall-clock seconds before stopping")
+    p_run.add_argument("--max-workers", type=_max_workers_arg, default=0,
+                       metavar="N",
+                       help="Concurrent review workers (1-32; values "
+                            "above the cap are clamped). Overrides the "
+                            "transport-derived default — the operator "
+                            "owns the rate-limit consequences (the "
+                            "adaptive throttle still backs off on "
+                            "429s). Default: derive from the primary "
+                            "model's RPM")
     p_run.add_argument("--no-supervisor-bound", action="store_true",
                        help="Do not default a wall budget when running "
                             "under a Claude subagent background shell "
@@ -2832,6 +2862,14 @@ def main() -> int:
         "--max-time", type=float, default=None,
         help="Wall-clock cap for THIS segment (default: the original "
              "run's --max-time)",
+    )
+    p_resume.add_argument(
+        "--max-workers", type=_max_workers_arg, default=None, metavar="N",
+        help="Concurrent review workers for THIS segment (1-32; "
+             "values above the cap are clamped; default: the original "
+             "run's --max-workers, else the transport-derived value). "
+             "Overrides carry the same rate-limit ownership as on "
+             "`run`",
     )
     p_resume.add_argument(
         "--no-supervisor-bound", action="store_true",
