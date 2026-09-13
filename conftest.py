@@ -120,6 +120,73 @@ if _conftest_dir not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# Darwin-emulation standing gate
+# ---------------------------------------------------------------------------
+#
+# ``RAPTOR_TEST_EMULATE_PLATFORM=darwin`` runs the session with
+# ``sys.platform`` patched to "darwin" BEFORE collection, so every
+# platform-dispatching path — production dispatch, module-level skipif
+# conditions, platform-resolved vocabularies — takes its darwin branch
+# on a Linux host. That catches the Linux-authored-assertion class (a
+# test that encodes the Linux answer for a platform-resolved value) in
+# the cheap Linux lane instead of on a macOS runner.
+#
+# Three effects, all scoped to sessions with the env var set:
+#
+#  * ``sys.platform`` is patched in pytest_configure — pre-collection,
+#    so test modules import after the patch and import-time gates see
+#    the emulated platform.
+#  * pytest's basetemp is relocated under a darwin-shaped tmp path
+#    (…/private/var/folders/…): assertions that substring-match the
+#    Linux tmp layout against ``tmp_path``-derived paths fail here
+#    instead of on a real mac, where the per-user temp tree
+#    legitimately contains "/var/folders". An explicit ``--basetemp``
+#    still wins (per-run flags beat the gate). The relocation root
+#    carries the reaper-listed ``raptor-pytest-`` prefix so a killed
+#    session's leak is reclaimed like any other pytest scratch.
+#  * every test marked ``darwin_native`` or ``linux_native``
+#    (pytest.ini) is DESELECTED: the markers declare a binding to the
+#    real kernel, and emulation must never stack on real kernel
+#    behaviour — a monkeypatched darwin shape with the real kernel's
+#    own clamp applying underneath measures neither platform.
+#
+# On native (un-emulated) runs the markers skip honestly instead: an
+# item's native markers name the real platforms it can bind to, and a
+# host outside that set skips it (a test carrying both markers runs on
+# both). Emulation is in-process only — subprocess children observe
+# the real platform — which is one more reason real-child tests carry
+# a native marker.
+
+_EMULATE_PLATFORM_ENV = "RAPTOR_TEST_EMULATE_PLATFORM"
+_EMULATED_PLATFORM = os.environ.get(_EMULATE_PLATFORM_ENV) or None
+_REAL_PLATFORM = sys.platform  # captured before the configure-time patch
+
+_NATIVE_MARKERS = {"darwin_native": "darwin", "linux_native": "linux"}
+
+
+def _apply_platform_emulation(config):
+    if _EMULATED_PLATFORM is None:
+        return
+    if _EMULATED_PLATFORM != "darwin":
+        raise pytest.UsageError(
+            f"{_EMULATE_PLATFORM_ENV}={_EMULATED_PLATFORM!r} is not a "
+            "supported emulation target (only 'darwin' is)"
+        )
+    sys.platform = _EMULATED_PLATFORM
+    if not config.option.basetemp:
+        basetemp = (
+            Path(_tempfile.gettempdir())
+            / f"raptor-pytest-emu-{os.getpid()}"
+            / "private" / "var" / "folders" / "zz" / "raptor-emu" / "T"
+            / "pytest"
+        )
+        # pytest mkdirs only the LEAF of an explicit basetemp — the
+        # darwin-shaped intermediate dirs are ours to create.
+        basetemp.parent.mkdir(parents=True, exist_ok=True)
+        config.option.basetemp = basetemp
+
+
+# ---------------------------------------------------------------------------
 # Git hermeticity — operator config must not steer tests; tests must
 # never touch the operator's config.
 # ---------------------------------------------------------------------------
@@ -482,7 +549,27 @@ def _projects_registry_in_tmp(monkeypatch):
 _RANDOMISE_SEED_RAW = os.environ.get("RAPTOR_RANDOMISE_TESTS")
 
 
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(config, items):
+    # Native-kernel markers: deselect under emulation, honest skip on
+    # native runs (see the darwin-emulation gate block above).
+    if _EMULATED_PLATFORM is not None:
+        kept, deselected = [], []
+        for item in items:
+            if any(item.get_closest_marker(m) for m in _NATIVE_MARKERS):
+                deselected.append(item)
+            else:
+                kept.append(item)
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+            items[:] = kept
+    else:
+        for item in items:
+            allowed = {plat for mark, plat in _NATIVE_MARKERS.items()
+                       if item.get_closest_marker(mark)}
+            if allowed and _REAL_PLATFORM not in allowed:
+                item.add_marker(pytest.mark.skip(
+                    reason="requires the real "
+                           f"{'/'.join(sorted(allowed))} kernel"))
     if _RANDOMISE_SEED_RAW is None:
         return
     import random as _random
@@ -523,9 +610,17 @@ def pytest_collection_modifyitems(items):
 
 
 def pytest_report_header():
-    if _RANDOMISE_SEED_RAW is None:
-        return []
-    return [f"raptor: randomised test order (seed={_RANDOMISE_SEED_RAW})"]
+    lines = []
+    if _EMULATED_PLATFORM is not None:
+        lines.append(
+            f"raptor: emulating sys.platform={_EMULATED_PLATFORM!r} on a "
+            f"real {_REAL_PLATFORM!r} host ({_EMULATE_PLATFORM_ENV}) — "
+            "*_native tests deselected, basetemp darwin-shaped"
+        )
+    if _RANDOMISE_SEED_RAW is not None:
+        lines.append(
+            f"raptor: randomised test order (seed={_RANDOMISE_SEED_RAW})")
+    return lines
 
 
 _MAX_TEST_SECONDS = os.environ.get("RAPTOR_MAX_TEST_SECONDS")
@@ -745,6 +840,7 @@ def pytest_configure(config):
     controller's. The reaper-listed raptor-pytest- prefix covers the
     SIGKILL-leak case (normal exits remove it in sessionfinish).
     """
+    _apply_platform_emulation(config)
     global _egress_leak_dir, _egress_leak_dir_owner
     if getattr(config, "workerinput", None) is not None:
         _egress_leak_dir = os.environ.get(_EGRESS_LEAK_DIR_ENV)
