@@ -134,6 +134,31 @@ def test_dedup_single_run_kept(tmp_path):
     assert dedup_runs([a]) == ([], [])
 
 
+def test_dedup_reads_each_run_from_disk_once(tmp_path, monkeypatch):
+    # The per-victim classification works over precomputed summaries;
+    # the classify_removal-per-victim shape re-parsed every survivor's
+    # records and findings for every victim (quadratic disk loads on
+    # /project clean --keep over a mature project).
+    from core.coverage import clean as clean_mod
+
+    runs = [
+        _run(tmp_path, f"run-{i:02d}", ["a.c"],
+             findings=[{"id": f"F{i}", "file": "a.c", "line": i}])
+        for i in range(1, 6)
+    ]
+    loads: list[str] = []
+    orig = clean_mod._summarise_run
+
+    def _spy(run_dir):
+        loads.append(run_dir.name)
+        return orig(run_dir)
+    monkeypatch.setattr(clean_mod, "_summarise_run", _spy)
+    dedup_runs(runs)
+    assert sorted(loads) == sorted(r.name for r in runs), (
+        "each run must be summarised from disk exactly once"
+    )
+
+
 def test_distinct_findings_same_line_not_collapsed(tmp_path):
     # Two different issues at a.c:42; the survivor holds only one. Without an
     # issue discriminator both key as (a.c, L42), so xss would look "covered"

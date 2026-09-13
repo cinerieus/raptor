@@ -78,6 +78,34 @@ class CleanConsequence:
         return bool(self.findings_lost)
 
 
+def _summarise_run(run_dir: Path) -> tuple[set[str], list[tuple[Any, Any, Any]]]:
+    """One disk read per run: ``(files_examined, finding keys)``."""
+    files = _files_examined(run_dir)
+    keys = [
+        _finding_key(f) for f in load_run_findings(run_dir)
+        if isinstance(f, dict)
+    ]
+    return files, keys
+
+
+def _classify(
+    victim_name: str,
+    victim_files: set[str],
+    victim_keys: list[tuple[Any, Any, Any]],
+    surv_files: set[str],
+    surv_finding_keys: set[tuple[Any, Any, Any]],
+) -> CleanConsequence:
+    """Classification over precomputed summaries (no disk access)."""
+    findings_lost = [k for k in victim_keys if k not in surv_finding_keys]
+    duplicate = victim_files.issubset(surv_files) and not findings_lost
+    return CleanConsequence(
+        run=victim_name,
+        duplicate=duplicate,
+        findings_lost=findings_lost,
+        coverage_files=sorted(victim_files),
+    )
+
+
 def classify_removal(
     victim_run_dir: Path, surviving_run_dirs: Iterable[Path],
 ) -> CleanConsequence:
@@ -85,27 +113,17 @@ def classify_removal(
     surviving runs. Safe to call before the operator confirms (no store
     mutation) — use it to drive the warning."""
     victim = Path(victim_run_dir)
-    survivors = [Path(d) for d in surviving_run_dirs]
 
     surv_files: set[str] = set()
-    surv_finding_keys: set[tuple[Any, Any]] = set()
-    for d in survivors:
-        surv_files |= _files_examined(d)
-        for f in load_run_findings(d):
-            if isinstance(f, dict):
-                surv_finding_keys.add(_finding_key(f))
+    surv_finding_keys: set[tuple[Any, Any, Any]] = set()
+    for d in surviving_run_dirs:
+        files, keys = _summarise_run(Path(d))
+        surv_files |= files
+        surv_finding_keys.update(keys)
 
-    victim_files = _files_examined(victim)
-    findings_lost = [
-        _finding_key(f) for f in load_run_findings(victim)
-        if isinstance(f, dict) and _finding_key(f) not in surv_finding_keys
-    ]
-    duplicate = victim_files.issubset(surv_files) and not findings_lost
-    return CleanConsequence(
-        run=victim.name,
-        duplicate=duplicate,
-        findings_lost=findings_lost,
-        coverage_files=sorted(victim_files),
+    victim_files, victim_keys = _summarise_run(victim)
+    return _classify(
+        victim.name, victim_files, victim_keys, surv_files, surv_finding_keys,
     )
 
 
@@ -127,6 +145,11 @@ def dedup_runs(
     # Oldest-first so the newest run is the representative we keep. Run dir
     # names are timestamped, so name order is chronological.
     survivors = sorted((Path(d) for d in run_dirs), key=lambda p: p.name)
+    # Each run's records/findings are read from disk exactly once; the
+    # per-victim classification then works over the in-memory
+    # summaries (the classify_removal-per-victim shape re-parsed every
+    # survivor's JSON for every victim).
+    summaries = {d: _summarise_run(d) for d in survivors}
     droppable: list[Path] = []
     reasons: list[CleanConsequence] = []
     i = 0
@@ -135,7 +158,17 @@ def dedup_runs(
         others = survivors[:i] + survivors[i + 1:]
         if not others:
             break
-        cons = classify_removal(victim, others)
+        surv_files: set[str] = set()
+        surv_finding_keys: set[tuple[Any, Any, Any]] = set()
+        for d in others:
+            files, keys = summaries[d]
+            surv_files |= files
+            surv_finding_keys.update(keys)
+        victim_files, victim_keys = summaries[victim]
+        cons = _classify(
+            victim.name, victim_files, victim_keys,
+            surv_files, surv_finding_keys,
+        )
         if cons.duplicate:
             droppable.append(victim)
             reasons.append(cons)
