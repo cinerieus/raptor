@@ -1,6 +1,8 @@
 """Tests for condition_adequacy — per-sink-API guard sufficiency specs."""
 
 
+import pytest
+
 import core.audit.condition_adequacy as ca
 from core.audit.condition_adequacy import (
     Adequacy,
@@ -427,3 +429,94 @@ class TestPolarityHonoured:
         res = assess_guard_adequacy("memcpy", [excluded, required])
         assert res.verdict == Adequacy.SUFFICIENT
         assert any("excluded polarity" in n for n in res.notes)
+
+
+class TestNegatedGuardPolarity:
+    """Early-return guards count with their negated sense: the sink
+    runs when the check fails, but there the NEGATED condition
+    protects the taken path — ``if (len > max) return; memcpy(...)``
+    is the dominant C guard idiom and must not read unguarded."""
+
+    def test_early_return_bound_reject_is_sufficient(self):
+        # if (len > max_size) return;  memcpy(dst, src, len);
+        # NOT(len > max_size) == len <= max_size — an upper bound.
+        g = GuardCondition(
+            text="len > max_size", category="bounds",
+            polarity="negated_guard", line=2,
+        )
+        res = assess_guard_adequacy("memcpy", [g])
+        assert res.verdict == Adequacy.SUFFICIENT, res.to_dict()
+
+    def test_early_return_null_reject_counts_category(self):
+        # if (!p) return;  strlen(p);  — the null check protects.
+        g = GuardCondition(
+            text="!p", category="null",
+            polarity="negated_guard", line=2,
+        )
+        res = assess_guard_adequacy("strlen", [g])
+        assert res.verdict != Adequacy.INSUFFICIENT
+        assert "null" in res.present_categories
+
+    def test_negated_lower_bound_reject_is_not_upper_bound(self):
+        # if (0 > len) return;  — rejects len < 0; the taken path has
+        # len >= 0: a LOWER bound. Must not grade SUFFICIENT.
+        g = GuardCondition(
+            text="0 > len", category="bounds",
+            polarity="negated_guard", line=2,
+        )
+        res = assess_guard_adequacy("memcpy", [g])
+        assert res.verdict == Adequacy.PARTIAL, res.to_dict()
+
+    def test_else_branch_still_discarded(self):
+        # Both-direction pin: the else-branch shape keeps its
+        # "excluded" polarity and contributes nothing — only the
+        # early-return shape earned the upgrade.
+        g = GuardCondition(
+            text="len > max_size", category="bounds",
+            polarity="excluded", line=2,
+        )
+        res = assess_guard_adequacy("memcpy", [g])
+        assert res.verdict == Adequacy.INSUFFICIENT
+        assert any("excluded polarity" in n for n in res.notes)
+
+    def test_c_early_return_idiom_end_to_end(self):
+        # Full pipeline: extraction classifies the early-return as
+        # negated_guard AND adequacy counts it — this function graded
+        # "no effective guards present" when both shapes shared the
+        # "excluded" polarity.
+        pytest.importorskip("tree_sitter_c", reason="C extraction")
+        from core.audit.condition_extraction import extract_sink_guards
+
+        source = (
+            "void handle(char *dst, const char *src, size_t len) {\n"
+            "    if (len > BUF_SIZE)\n"
+            "        return;\n"
+            "    memcpy(dst, src, len);\n"
+            "}\n"
+        )
+        sink_guards = extract_sink_guards(
+            source, "h.c", sink_names=frozenset({"memcpy"}),
+        )
+        assert len(sink_guards) == 1
+        res = assess_guard_adequacy("memcpy", sink_guards[0].guards)
+        assert res.verdict == Adequacy.SUFFICIENT, res.to_dict()
+
+    def test_c_else_branch_end_to_end_still_insufficient(self):
+        pytest.importorskip("tree_sitter_c", reason="C extraction")
+        from core.audit.condition_extraction import extract_sink_guards
+
+        source = (
+            "void handle(char *dst, const char *src, size_t len) {\n"
+            "    if (len < BUF_SIZE) {\n"
+            "        small(dst, src, len);\n"
+            "    } else {\n"
+            "        memcpy(dst, src, len);\n"
+            "    }\n"
+            "}\n"
+        )
+        sink_guards = extract_sink_guards(
+            source, "h.c", sink_names=frozenset({"memcpy"}),
+        )
+        assert len(sink_guards) == 1
+        res = assess_guard_adequacy("memcpy", sink_guards[0].guards)
+        assert res.verdict == Adequacy.INSUFFICIENT, res.to_dict()

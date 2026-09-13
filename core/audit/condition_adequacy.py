@@ -297,6 +297,35 @@ def _has_upper_bound_comparison(text: str) -> bool:
     )
 
 
+# Negated-sense mirror for early-return guards ("negated_guard"): the
+# sink runs only when the check FAILS, so rejecting a bound VIOLATION
+# leaves the bound standing on the taken path — ``if (len > max)
+# return;`` is an upper bound (``len <= max`` holds at the sink).
+# Forward form keeps _UPPER_BOUND_FWD_RE's literal discipline (the
+# guarded value on the left must be an identifier / call / index,
+# never a numeric literal: ``0 > len`` rejects ``len < 0``, whose
+# negation is a LOWER bound and must not match). min()/clamp() forms
+# do not transfer — a clamped value inside a reject condition says
+# nothing about the fallthrough path. Identifier-vs-identifier
+# compares are direction-ambiguous lexically; the mirror inherits
+# exactly the ambiguity the required-sense pair already carries
+# (lint-grade signal, co-gated at the consumer).
+_NEG_UPPER_BOUND_FWD_RE = re.compile(
+    r"(?:\b[a-zA-Z_]\w*|[)\]])\s*>=?\s*[a-zA-Z_0-9]"
+)
+_NEG_UPPER_BOUND_REV_RE = re.compile(
+    r"[\w)\]]\s*<=?\s*[a-zA-Z_]"
+)
+
+
+def _has_negated_upper_bound_comparison(text: str) -> bool:
+    """True when NOT(text) implies an upper bound (early-return sense)."""
+    return bool(
+        _NEG_UPPER_BOUND_FWD_RE.search(text)
+        or _NEG_UPPER_BOUND_REV_RE.search(text)
+    )
+
+
 def assess_guard_adequacy(
     sink_api: str,
     guards: list[GuardCondition],
@@ -308,14 +337,27 @@ def assess_guard_adequacy(
 
     Polarity is honoured: a guard whose polarity is ``excluded``
     means the sink executes exactly when the check FAILS (sink in the
-    else-branch, or after a fallthrough) — its category and text say
-    nothing about the protection of the path actually taken, so it
-    contributes nothing to the adequacy computation. ``if (len <
-    sizeof(buf)) { small(); } else { memcpy(buf, src, len); }`` must
-    not read as an adequately-guarded memcpy.
+    else-branch) — its category and text say nothing about the
+    protection of the path actually taken, so it contributes nothing
+    to the adequacy computation. ``if (len < sizeof(buf)) { small(); }
+    else { memcpy(buf, src, len); }`` must not read as an
+    adequately-guarded memcpy.
+
+    An early-return guard clause (``negated_guard``) is the opposite
+    case: the sink also runs when the check fails, but there the
+    NEGATED condition protects the taken path — ``if (len > max)
+    return; memcpy(...)`` is the dominant C guard idiom. Those guards
+    count toward the present categories, and for the upper-bound
+    requirement their text is read in its negated sense (a lower-
+    bound VIOLATION reject is an upper bound).
     """
     excluded = [g for g in guards if g.polarity == "excluded"]
-    guards = [g for g in guards if g.polarity != "excluded"]
+    negated = [g for g in guards if g.polarity == "negated_guard"]
+    guards = [
+        g for g in guards
+        if g.polarity not in ("excluded", "negated_guard")
+    ]
+    effective = guards + negated
     excluded_note = (
         f"{len(excluded)} guard(s) ignored: excluded polarity — the "
         f"sink runs when the check fails, so the check protects a "
@@ -327,7 +369,7 @@ def assess_guard_adequacy(
         # Same semantics as the spec-found path: "unknown" carries no
         # category signal, so it is excluded from reporting here too.
         present = frozenset(
-            g.category for g in guards if g.category != "unknown"
+            g.category for g in effective if g.category != "unknown"
         )
         return AdequacyResult(
             sink_api=sink_api,
@@ -339,7 +381,9 @@ def assess_guard_adequacy(
             + ([excluded_note] if excluded_note else []),
         )
 
-    present_cats = frozenset(g.category for g in guards if g.category != "unknown")
+    present_cats = frozenset(
+        g.category for g in effective if g.category != "unknown"
+    )
     required = spec.required
     missing = required - present_cats
     notes: list[str] = []
@@ -353,7 +397,7 @@ def assess_guard_adequacy(
     text_match = True
     if spec.text_pattern is not None:
         text_match = any(
-            spec.text_pattern.search(g.text) for g in guards
+            spec.text_pattern.search(g.text) for g in effective
         )
         if not text_match:
             notes.append(
@@ -364,13 +408,13 @@ def assess_guard_adequacy(
     # Check if present guards are all irrelevant
     relevant_present = present_cats - spec.irrelevant
     all_irrelevant = (
-        len(guards) > 0
+        len(effective) > 0
         and len(relevant_present) == 0
         and len(present_cats) > 0
     )
 
     # Determine verdict
-    if not guards:
+    if not effective:
         verdict = Adequacy.INSUFFICIENT
         notes.append(
             "no effective guards present" if excluded
@@ -389,10 +433,17 @@ def assess_guard_adequacy(
                 "category/text match alone cannot establish "
                 "sufficiency for this sink class — needs review"
             )
-        elif spec.requires_upper_bound and not any(
-            g.category == "bounds"
-            and _has_upper_bound_comparison(g.text)
-            for g in guards
+        elif spec.requires_upper_bound and not (
+            any(
+                g.category == "bounds"
+                and _has_upper_bound_comparison(g.text)
+                for g in guards
+            )
+            or any(
+                g.category == "bounds"
+                and _has_negated_upper_bound_comparison(g.text)
+                for g in negated
+            )
         ):
             # ``len > 0`` matches the size-token pattern but bounds
             # nothing from above.

@@ -532,15 +532,18 @@ def constraints_for_guard(
 ) -> list[BoundsConstraint] | None:
     """Extract constraints with polarity awareness.
 
-    When polarity is "excluded" (sink is in the else-branch), the
-    guard condition is negated: ``len < 1024`` becomes ``len >= 1024``.
+    When polarity is "excluded" (sink in the else-branch) or
+    "negated_guard" (early-return guard clause), the taken path
+    satisfies the NEGATED condition, so the guard is negated:
+    ``len < 1024`` becomes ``len >= 1024``.
 
     Returns ``None`` when the constraints cannot faithfully represent
     the guard:
 
     * the guard text contains ``||`` / ``!`` / ternary structure the
       flat conjunction cannot model, or
-    * polarity is "excluded" and more than one atom was extracted —
+    * polarity is "excluded"/"negated_guard" and more than one atom
+      was extracted —
       by De Morgan ``NOT (A AND B)`` is ``NOT A OR NOT B``, a
       disjunction; negating the atoms individually would instead
       assert ``NOT A AND NOT B``, which is strictly stronger and
@@ -549,7 +552,9 @@ def constraints_for_guard(
     if not _boolean_structure_tractable(guard.text):
         return None
     raw = extract_bounds_constraints(guard)
-    if not respect_polarity or guard.polarity != "excluded":
+    if not respect_polarity or guard.polarity not in (
+        "excluded", "negated_guard",
+    ):
         return raw
     if len(raw) > 1 or "&&" in guard.text or re.search(
         r"\band\b", guard.text,

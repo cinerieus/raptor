@@ -131,7 +131,7 @@ def run_command(cmd, user):
         sg = guards[0]
         assert len(sg.guards) == 1
         g = sg.guards[0]
-        assert g.polarity == "excluded"
+        assert g.polarity == "negated_guard"
 
     def test_else_branch(self):
         source = """\
@@ -257,7 +257,7 @@ int exec_cmd(const char *cmd, int privileged) {
         assert len(guards) == 1
         sg = guards[0]
         assert len(sg.guards) == 1
-        assert sg.guards[0].polarity == "excluded"
+        assert sg.guards[0].polarity == "negated_guard"
 
     def test_nested_c_guards(self):
         source = """\

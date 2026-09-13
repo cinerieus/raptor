@@ -398,6 +398,28 @@ class TestConstraintsForGuard:
         assert cs[0].operator == ">="
         assert cs[0].bound_value == 256
 
+    def test_negated_guard_polarity_negates(self):
+        # Early-return guard: if (len > 256) return;  — the taken
+        # path satisfies the negation, exactly like the else-branch
+        # case for the SMT encoding.
+        g = GuardCondition(
+            text="len > 256", category="bounds",
+            polarity="negated_guard",
+            line=1, resolvable=True, concrete_values={},
+        )
+        cs = constraints_for_guard(g)
+        assert len(cs) >= 1
+        assert cs[0].operator == "<="
+        assert cs[0].bound_value == 256
+
+    def test_negated_guard_conjunction_returns_none(self):
+        g = GuardCondition(
+            text="len > 256 && flag", category="bounds",
+            polarity="negated_guard",
+            line=1, resolvable=True, concrete_values={},
+        )
+        assert constraints_for_guard(g) is None
+
     def test_excluded_lte_becomes_gt(self):
         g = GuardCondition(
             text="n <= 100", category="bounds", polarity="excluded",

@@ -38,7 +38,16 @@ class GuardCondition:
 
     text: str
     category: str  # auth|bounds|null|config|error|type|resource|unknown
-    polarity: str  # "required" (sink in true-branch) | "excluded" (sink in else-branch)
+    #: "required"      — sink in the true-branch: the check protects it.
+    #: "excluded"      — sink in the else-branch: the sink runs exactly
+    #:                   when the check FAILS; the check protects a
+    #:                   DIFFERENT path and says nothing about this one.
+    #: "negated_guard" — early-return guard clause (exit-only body, sink
+    #:                   after the if): the sink also runs when the check
+    #:                   fails, but here the NEGATED condition genuinely
+    #:                   protects the taken path — the dominant C guard
+    #:                   idiom, counted by adequacy with its negated sense.
+    polarity: str
     line: int
     resolvable: bool = False
     concrete_values: dict[str, str] = field(default_factory=dict)
@@ -385,6 +394,10 @@ def _determine_polarity(
     "excluded" if sink is in the alternative (else block).
     Also detects the early-return-guard pattern:
       if (error) return;  // sink is AFTER — guard by negation
+    which returns "negated_guard": semantically opposite to "excluded"
+    (the negated check DOES protect the taken path), so the two shapes
+    must not share a polarity — adequacy discards "excluded" but counts
+    "negated_guard" with its negated sense.
     """
     # Find consequence and alternative blocks
     consequence = None
@@ -452,7 +465,9 @@ def _determine_polarity(
                 is_exit_only = True
 
         if is_exit_only and sink_row > cond_node.end_point[0]:
-            return "required" if is_unless else "excluded"
+            # unless(cond) exit → sink requires cond TRUE = "required";
+            # if(cond) exit → the NEGATED cond protects the sink.
+            return "required" if is_unless else "negated_guard"
 
     # Sink is after the if-block but not in an early-return pattern,
     # or we can't determine — assume required (conservative)
@@ -569,8 +584,12 @@ def _find_preceding_guard_clauses(
             cond_text = _extract_condition_text(child, lang, source_bytes)
             if cond_text:
                 # unless guard: body fires when condition is FALSE,
-                # so sink after it requires condition TRUE = "required"
-                polarity = "required" if child.type == "unless" else "excluded"
+                # so sink after it requires condition TRUE = "required";
+                # if-guard: the NEGATED condition protects the sink.
+                polarity = (
+                    "required" if child.type == "unless"
+                    else "negated_guard"
+                )
                 results.append((child, cond_text, polarity))
 
     return results
