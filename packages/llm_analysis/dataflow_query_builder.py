@@ -439,9 +439,9 @@ import semmle.code.cpp.security.FlowSources as FS
 // "module DataFlow is ambiguous between: DataFlow::DataFlow,
 // DataFlow::DataFlow". Aliasing FlowSources scopes its DataFlow under
 // FS::DataFlow and leaves the new-style DataFlow as the unique top-level
-// `DataFlow`. Matches the canonical pattern in
-// /home/raptor/.local/codeql-queries/cpp/ql/src/Security/CWE/CWE-120/
-// UnboundedWrite.ql. LLM-generated source/sink bodies that need
+// `DataFlow`. Matches the canonical pattern in the CodeQL standard
+// packs (cpp/ql/src/Security/CWE/CWE-120/UnboundedWrite.ql, resolved
+// from the installed query packs). LLM-generated source/sink bodies that need
 // FlowSources types must use the FS:: prefix (e.g. `n instanceof
 // FS::FlowSource`) — see the prompt instructions in
 // _ask_llm_for_predicates.
