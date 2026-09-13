@@ -893,3 +893,65 @@ def test_runtime_records_never_suppress_gaps():
     }]
     gaps = compute_gaps(_sample_checklist(), records)
     assert "parse_request" in {g["name"] for g in gaps}
+
+
+class TestFindChecklistItem:
+    def _checklist(self, items_key: str = "items"):
+        return {"files": [
+            {"path": "src/a.c", items_key: [
+                {"name": "foo", "line_start": 10, "line_end": 20},
+                {"name": "bar", "line_start": 30, "line_end": 40},
+            ]},
+            {"path": "src/b.c", items_key: [
+                {"name": "baz", "line_start": 1, "line_end": 5},
+            ]},
+        ]}
+
+    def test_finds_item_modern_shape(self):
+        from core.audit.gaps import find_checklist_item
+        item = find_checklist_item(self._checklist(), "src/a.c", "bar")
+        assert item is not None
+        assert item["line_start"] == 30
+
+    def test_finds_item_legacy_functions_shape(self):
+        from core.audit.gaps import find_checklist_item
+        item = find_checklist_item(
+            self._checklist("functions"), "src/a.c", "foo",
+        )
+        assert item is not None
+        assert item["line_end"] == 20
+
+    def test_missing_function_returns_none(self):
+        from core.audit.gaps import find_checklist_item
+        assert find_checklist_item(
+            self._checklist(), "src/a.c", "nope",
+        ) is None
+
+    def test_missing_file_returns_none(self):
+        from core.audit.gaps import find_checklist_item
+        assert find_checklist_item(
+            self._checklist(), "src/z.c", "foo",
+        ) is None
+
+    def test_none_and_empty_checklists(self):
+        from core.audit.gaps import find_checklist_item
+        assert find_checklist_item(None, "src/a.c", "foo") is None
+        assert find_checklist_item({}, "src/a.c", "foo") is None
+
+    def test_first_matching_file_entry_wins(self):
+        # Duplicate path entries: only the first is consulted — the
+        # break-after-match behaviour every hand-rolled copy had.
+        from core.audit.gaps import find_checklist_item
+        cl = {"files": [
+            {"path": "src/a.c", "items": [{"name": "foo", "line_start": 1}]},
+            {"path": "src/a.c", "items": [{"name": "bar", "line_start": 2}]},
+        ]}
+        assert find_checklist_item(cl, "src/a.c", "bar") is None
+
+    def test_tolerates_non_dict_entries(self):
+        from core.audit.gaps import find_checklist_item
+        cl = {"files": ["junk", {"path": "src/a.c", "items": [
+            "junk", {"name": "foo", "line_start": 1},
+        ]}]}
+        item = find_checklist_item(cl, "src/a.c", "foo")
+        assert item is not None

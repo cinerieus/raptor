@@ -225,14 +225,11 @@ def cmd_context(args: argparse.Namespace) -> int:
     line_start = args.line
     line_end = None
     if not line_start and checklist:
-        for fi in checklist.get("files", []):
-            if fi.get("path") == args.file:
-                for item in fi.get("items", fi.get("functions", [])):
-                    if item.get("name") == args.function:
-                        line_start = item.get("line_start", 0)
-                        line_end = item.get("line_end")
-                        break
-                break
+        from core.audit.gaps import find_checklist_item
+        item = find_checklist_item(checklist, args.file, args.function)
+        if item:
+            line_start = item.get("line_start", 0)
+            line_end = item.get("line_end")
 
     ctx = assemble_context(
         target_path=target_path,
@@ -479,7 +476,11 @@ def cmd_record(args: argparse.Namespace) -> int:
     # Must run before G7 so the reachability check gets the correct
     # line_start (callers_of matches by exact InternalFunction equality
     # including line — line=0 silently misses all definitive callers).
-    from core.audit.gaps import load_checklist, load_context_map
+    from core.audit.gaps import (
+        find_checklist_item,
+        load_checklist,
+        load_context_map,
+    )
 
     checklist = load_checklist(out_dir)
     context_map = load_context_map(out_dir)
@@ -487,18 +488,11 @@ def cmd_record(args: argparse.Namespace) -> int:
     line_start = args.line_start or 0
     line_end = args.line_end
     if not line_start:
-        for ck_file in checklist.get("files", []):
-            if ck_file.get("path") == args.file:
-                # Legacy checklists keep per-file entries under
-                # 'functions' rather than 'items' — same fallback the
-                # other checklist readers in this file apply.
-                for item in ck_file.get("items", ck_file.get("functions", [])):
-                    if item.get("name") == args.function:
-                        line_start = item.get("line_start", 0)
-                        if not line_end:
-                            line_end = item.get("line_end")
-                        break
-                break
+        ck_item = find_checklist_item(checklist, args.file, args.function)
+        if ck_item:
+            line_start = ck_item.get("line_start", 0)
+            if not line_end:
+                line_end = ck_item.get("line_end")
 
     # G7: REACHABILITY — findings must be reachable. Two-signal gate:
     #   - Both call graph (zero callers) AND binary oracle (absent, full
@@ -560,28 +554,24 @@ def cmd_record(args: argparse.Namespace) -> int:
 
         if not is_entry and has_callers is not None and not has_callers:
             binary_absent = False
-            for fe in checklist.get("files", []):
-                if fe.get("path") != args.file:
-                    continue
-                # Legacy 'functions' key fallback, as above.
-                for item in fe.get("items", fe.get("functions", [])):
-                    if item.get("name") != args.function:
-                        continue
-                    bo = (item.get("metadata") or {}).get("binary_oracle")
-                    if bo:
-                        # Shared predicate — the hand-copied tier loop
-                        # here had already drifted from the chokepoint
-                        # rule (it ignored suppression_grade).
-                        from core.analysis.binary_oracle import (
-                            absent_earns_suppression,
-                        )
-                        binary_absent = (
-                            bo.get("classification") == "absent"
-                            and absent_earns_suppression(
-                                bo.get("binaries"))
-                        )
-                    break
-                break
+            g7_item = find_checklist_item(
+                checklist, args.file, args.function,
+            )
+            bo = (
+                (g7_item.get("metadata") or {}).get("binary_oracle")
+                if g7_item else None
+            )
+            if bo:
+                # Shared predicate — the hand-copied tier loop
+                # here had already drifted from the chokepoint
+                # rule (it ignored suppression_grade).
+                from core.analysis.binary_oracle import (
+                    absent_earns_suppression,
+                )
+                binary_absent = (
+                    bo.get("classification") == "absent"
+                    and absent_earns_suppression(bo.get("binaries"))
+                )
 
             if binary_absent:
                 print(
@@ -785,17 +775,13 @@ def cmd_sweep(args: argparse.Namespace) -> int:
         fn_line_start = args.line_start
         fn_line_end = args.line_end
         if fn_line_start is None or fn_line_end is None:
-            from core.audit.gaps import load_checklist
-            cl = load_checklist(out_dir)
-            if cl:
-                for fi in cl.get("files", []):
-                    if fi.get("path") == args.file:
-                        for item in fi.get("items", fi.get("functions", [])):
-                            if item.get("name") == args.function:
-                                fn_line_start = fn_line_start or item.get("line_start")
-                                fn_line_end = fn_line_end or item.get("line_end")
-                                break
-                        break
+            from core.audit.gaps import find_checklist_item, load_checklist
+            item = find_checklist_item(
+                load_checklist(out_dir), args.file, args.function,
+            )
+            if item:
+                fn_line_start = fn_line_start or item.get("line_start")
+                fn_line_end = fn_line_end or item.get("line_end")
 
         # Binary items: the "file" is a sentinel, not a path — sweep
         # the decompilation instead (same substitution the

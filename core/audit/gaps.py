@@ -1047,6 +1047,36 @@ def load_checklist(out_dir: Path) -> dict[str, Any]:
     return read_checklist(out_dir)
 
 
+def find_checklist_item(
+    checklist: dict[str, Any] | None,
+    file_path: str,
+    function_name: str,
+) -> dict[str, Any] | None:
+    """Locate one function's checklist item by file path + name.
+
+    The single home for the lookup the CLI surfaces (context / record
+    / sweep line resolution, the G7 oracle read, annotate bounds
+    discovery) each used to hand-copy. Applies the legacy shape
+    fallback — older checklists keep per-file entries under
+    ``functions`` instead of ``items``. Only the first entry matching
+    ``file_path`` is consulted (checklist paths are unique by
+    construction). Returns None when the file or function is absent.
+    """
+    if not checklist:
+        return None
+    for file_entry in checklist.get("files", []):
+        if not isinstance(file_entry, dict):
+            continue
+        if file_entry.get("path") != file_path:
+            continue
+        items = file_entry.get("items", file_entry.get("functions", []))
+        for item in items or []:
+            if isinstance(item, dict) and item.get("name") == function_name:
+                return item
+        return None
+    return None
+
+
 def hydrate_live_gaps_for_detectors(
     gaps: list[dict[str, Any]],
     target_path: Path,

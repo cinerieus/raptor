@@ -192,18 +192,16 @@ def _lookup_bounds_by_name(
     data = load_json(checklist_path, max_bytes=_MAX_CHECKLIST_BYTES)
     if not isinstance(data, dict):
         return None
-    for file_entry in data.get("files", []):
-        if file_entry.get("path") != file_path:
-            continue
-        for item in file_entry.get("items", file_entry.get("functions", [])):
-            if item.get("name") == function:
-                ls = item.get("line_start")
-                le = item.get("line_end")
-                if ls is not None and le is not None:
-                    try:
-                        return int(ls), int(le)
-                    except (TypeError, ValueError):
-                        return None
+    from core.audit.gaps import find_checklist_item
+    item = find_checklist_item(data, file_path, function)
+    if item:
+        ls = item.get("line_start")
+        le = item.get("line_end")
+        if ls is not None and le is not None:
+            try:
+                return int(ls), int(le)
+            except (TypeError, ValueError):
+                return None
     return None
 
 
