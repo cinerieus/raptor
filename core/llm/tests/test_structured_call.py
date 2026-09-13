@@ -56,6 +56,11 @@ class TestClassifier:
         assert classify_error_text("rate_limit_error") == "auth"
         assert classify_error_text("429 RESOURCE_EXHAUSTED") == "auth"
         assert classify_error_text("HTTP 429 Too Many Requests") == "auth"
+        # Wrapper phrasings: "HTTP error 429" and a colon after the
+        # status before the reason phrase.
+        assert classify_error_text(
+            "HTTP error 429: Too Many Requests") == "auth"
+        assert classify_error_text("429: too many requests") == "auth"
 
     def test_unrelated_429_numerics_stay_error(self):
         # Boundary/context anchoring: a stack-trace line number or an
@@ -63,6 +68,7 @@ class TestClassifier:
         assert classify_error_text(
             'File "x.py", line 429, in foo') == "error"
         assert classify_error_text("request id 14290 failed") == "error"
+        assert classify_error_text("HTTP 4290 is not a status") == "error"
 
     def test_precedence_blocked_over_auth_over_timeout(self):
         assert classify_error_text(

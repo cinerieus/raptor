@@ -536,13 +536,6 @@ def _print_scorecard_summary(stats: dict[str, Any]) -> None:
         logger.debug("scorecard summary print failed: %s", exc)
 
 
-_AUTH_ERROR_INDICATORS = frozenset({
-    "401", "403", "authentication", "unauthorized", "invalid api key",
-    "invalid x-api-key", "api key not valid", "incorrect api key",
-    "permission denied", "access denied",
-})
-
-
 def _sanitize_log_message(msg: str) -> str:
     """
     SECURITY: API Key Sanitization for Application Logs
@@ -632,8 +625,12 @@ def _is_auth_error(error: Exception) -> bool:
     """
     Detect authentication/authorization errors from LLM providers.
 
-    Checks both OpenAI and Anthropic SDK exception types, with
-    string-based fallback for edge cases.
+    Checks both OpenAI and Anthropic SDK exception types, with a
+    string-based fallback for edge cases. The fallback uses the
+    boundary/context-anchored ``AUTH_STATUS_RE`` from
+    :mod:`core.llm.structured_call` — a bare ``"401"``/``"403"``
+    substring match classified stack-trace line numbers and
+    model-echoed content as auth failures, mislabelling fatal errors.
 
     Args:
         error: Exception from provider SDK
@@ -655,8 +652,8 @@ def _is_auth_error(error: Exception) -> bool:
         except AttributeError:
             pass
 
-    error_str = str(error).lower()
-    return any(indicator in error_str for indicator in _AUTH_ERROR_INDICATORS)
+    from core.llm.structured_call import is_auth_status_text
+    return is_auth_status_text(str(error))
 
 
 def _is_quota_error(error: Exception) -> bool:
@@ -685,12 +682,17 @@ def _is_quota_error(error: Exception) -> bool:
         except AttributeError:
             pass
 
+    # "429" / "rate limit" via the boundary/context-anchored RE from
+    # core.llm.structured_call — the previous bare '"429" in str'
+    # matched stack-trace line numbers, byte offsets, and model-echoed
+    # content on fatal errors, burning the full retry budget on
+    # hopeless calls and mislabelling telemetry dispositions.
+    from core.llm.structured_call import RATE_LIMIT_KEYWORDS_RE
     error_str = str(error).lower()
     return any((
-        "429" in error_str,
+        bool(RATE_LIMIT_KEYWORDS_RE.search(error_str)),
         "quota exceeded" in error_str,
         "quota" in error_str and "exceeded" in error_str,
-        "rate limit" in error_str,
         "generate_content_free_tier" in error_str,  # Gemini-specific
     ))
 

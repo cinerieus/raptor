@@ -63,6 +63,41 @@ class TestQuotaErrorDetection:
         for error in errors:
             assert _is_quota_error(error) is False, f"Incorrectly detected quota error: {error}"
 
+    def test_bare_429_digits_do_not_false_positive(self):
+        """"429" needs status context — a stack-trace line number,
+        byte offset, or id containing the digits must not classify as
+        quota (retryable), or a fatal error burns the full retry
+        budget and corrupts the telemetry disposition."""
+        errors = [
+            Exception('File "worker.py", line 429, in dispatch'),
+            Exception("HTTP 4290 is not a real status"),
+            Exception("invalid byte at offset 429 in response"),
+            Exception("request id req-429-abc failed schema validation"),
+        ]
+        for error in errors:
+            assert _is_quota_error(error) is False, (
+                f"Incorrectly detected quota error: {error}"
+            )
+
+    def test_context_anchored_429_still_detected(self):
+        """Genuine 429 shapes keep classifying after the anchoring."""
+        errors = [
+            Exception("Error code: 429 - rate limited"),
+            Exception("429 Too Many Requests"),
+            Exception("HTTP error 429: Too Many Requests"),
+            Exception("status 429 returned by upstream"),
+            Exception("rate_limit_error: slow down"),
+            # Provider phrasings the first anchored cut missed.
+            Exception("API Error: 429"),
+            Exception("rate limiting in effect, retry later"),
+            Exception("you have exceeded your rate limits"),
+            Exception("upstream rate-limited the request"),
+        ]
+        for error in errors:
+            assert _is_quota_error(error) is True, (
+                f"Missed quota error: {error}"
+            )
+
 
 class TestQuotaGuidance:
     """Tests for _get_quota_guidance() function."""

@@ -135,6 +135,26 @@ class TestIsAuthError:
         assert _is_auth_error(Exception("Connection timeout")) is False
         assert _is_auth_error(ValueError("bad value")) is False
 
+    def test_bare_401_digits_do_not_false_positive(self):
+        """"401"/"403" need status context — stack-trace line numbers
+        and ids containing the digits must not classify as auth (which
+        feeds phase-abort style consumers and telemetry labels)."""
+        assert _is_auth_error(
+            Exception('File "worker.py", line 401, in call'),
+        ) is False
+        assert _is_auth_error(
+            Exception("request id req-401-abc failed to parse"),
+        ) is False
+        assert _is_auth_error(Exception("read 403 bytes from pipe")) is False
+
+    def test_context_anchored_401_still_detected(self):
+        """Genuine auth shapes keep classifying after the anchoring."""
+        assert _is_auth_error(Exception("Error code: 401 - bad key")) is True
+        assert _is_auth_error(Exception("403 Forbidden")) is True
+        assert _is_auth_error(
+            Exception("api key not valid. Pass a valid key."),
+        ) is True
+
 
 class TestIsQuotaError:
     """Verify _is_quota_error detects rate limit errors from both SDKs."""

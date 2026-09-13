@@ -93,17 +93,21 @@ TIMEOUT_KEYWORDS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Rate-limit shapes AUTH_KEYWORDS_RE misses: the underscored provider
-# error type (``rate_limit_error`` — "rate limit" with a space never
-# matches it) and a 429 status. The 429 arm is boundary-anchored AND
-# context-anchored (status-context word, message-leading position, or
-# the canonical reason phrases) so unrelated numerics like stack-trace
-# "line 429, in foo" don't classify as a limit.
+# Rate-limit shapes AUTH_KEYWORDS_RE misses: the underscored/hyphened
+# provider error type and inflections (``rate_limit_error``,
+# ``rate-limit``, "rate limiting in effect", "exceeded your rate
+# limits" — real provider phrasings), and a 429 status. The 429 arm
+# is boundary-anchored AND context-anchored (status-context word —
+# including the "HTTP error 429" / bare "API Error: 429" phrasings
+# wrappers emit — message-leading position, or the canonical reason
+# phrases, colon-separated or not) so unrelated numerics like
+# stack-trace "line 429, in foo" don't classify as a limit.
 RATE_LIMIT_KEYWORDS_RE = re.compile(
-    r"rate[_ ]limit(?:_error|ed)?\b"
-    r"|\b(?:http|status|code)\s*:?\s*429\b"
+    r"rate[_ -]limit(?:_error|ed|ing|s)?\b"
+    r"|\b(?:http|status|code|api\s+error)\s*:?\s*429\b"
+    r"|\b(?:http|status|code)\s*error\s*:?\s*429\b"
     r"|^\s*429\b"
-    r"|\b429\s+(?:too many requests|resource_exhausted)\b",
+    r"|\b429\s*:?\s+(?:too many requests|resource_exhausted)\b",
     re.IGNORECASE,
 )
 
