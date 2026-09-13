@@ -152,6 +152,10 @@ class SessionsRegistryTest(_RegistryCase):
         # The launcher's bash prune owns v1 cleanup.
         self.assertTrue((self.sessions_dir / str(DEAD_PID)).exists())
 
+    # Positive starttime mismatch is the Linux identity machinery
+    # (/proc/<pid>/stat field 22); off-Linux entries carry sentinel
+    # stamps and are never positively-mismatch pruned.
+    @pytest.mark.linux_native
     def test_stale_v2_prunes_ledger_too(self):
         sessions.record_session("myapp", pid=os.getpid())
         sessions.ledger_record_start(self._tmp.name, pid=os.getpid())

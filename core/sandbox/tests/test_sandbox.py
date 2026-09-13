@@ -28,6 +28,12 @@ from core.sandbox.tests.capability import (
     requires_userns,
 )
 
+# Real spawns against whatever enforcement the REAL kernel provides
+# (namespaces/Landlock on Linux, seatbelt on macOS) — a real-kernel
+# binding on both platforms, so both native markers (pytest.ini): the
+# darwin-emulation gate deselects the file, native lanes are unchanged.
+pytestmark = [pytest.mark.linux_native, pytest.mark.darwin_native]
+
 
 class TestAvailabilityCheck(unittest.TestCase):
 

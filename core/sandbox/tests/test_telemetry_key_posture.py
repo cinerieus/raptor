@@ -320,6 +320,9 @@ class TestMacosSpawnWiring:
         assert posture["mac_key_hidden"] is True
 
 
+# The Linux dispatch layer with a real sandboxed call — a real-Linux
+# binding (requires_landlock already keeps it off real macs).
+@pytest.mark.linux_native
 @requires_landlock
 class TestLinuxContextWiring:
     """The Linux dispatch layer records the per-call posture too —

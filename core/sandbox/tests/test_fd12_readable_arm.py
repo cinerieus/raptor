@@ -76,7 +76,12 @@ class TestFd12ReadableArm(unittest.TestCase):
                     std, 0, os.SEEK_CUR)
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with patch.object(ctx, "run", fake_run):
+        # The darwin arm of run_untrusted's entry gate smoke-tests the
+        # REAL host's sandbox-exec; pretend it holds so the parent-side
+        # fd arm under test is reached on every platform (including
+        # emulated-darwin runs — the gate itself has its own tests).
+        with patch.object(ctx, "check_seatbelt_available", lambda: True), \
+                patch.object(ctx, "run", fake_run):
             ctx.run_untrusted(["true"], target="/tmp")
         return captured
 
@@ -159,7 +164,10 @@ class TestFd12ReadableArm(unittest.TestCase):
         a, b = socket.socketpair()
         self.addCleanup(a.close)
         self.addCleanup(b.close)
-        with _Fd1Swap(a.fileno()), patch.object(ctx, "run", fake_run):
+        # Same entry-gate stub as _run_untrusted_capturing.
+        with _Fd1Swap(a.fileno()), \
+                patch.object(ctx, "check_seatbelt_available", lambda: True), \
+                patch.object(ctx, "run", fake_run):
             ctx.run_untrusted(
                 ["true"], target="/tmp", capture_output=True,
             )

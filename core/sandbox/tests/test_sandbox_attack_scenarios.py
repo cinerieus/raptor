@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import pytest
+
 from core.sandbox import (
     check_landlock_available,
     check_mount_available,
@@ -26,6 +28,11 @@ from core.sandbox import (
     state,
 )
 from core.sandbox.tests.capability import requires_landlock
+
+# Threat-model regression checks run real attacker-shaped children
+# under the REAL kernel's enforcement — real-kernel binding on both
+# platforms (see pytest.ini's native markers).
+pytestmark = [pytest.mark.linux_native, pytest.mark.darwin_native]
 
 
 def _compile(source: str, path: Path, extra_flags=()) -> bool:

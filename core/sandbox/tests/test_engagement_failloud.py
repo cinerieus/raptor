@@ -13,16 +13,16 @@ the error names the explicit operator escape hatch. RAPTOR never silently
 downgrades.
 """
 
-import sys
 
 import pytest
 
 from core.sandbox import SandboxSetupError, check_unshare_engages, sandbox, state
 from core.sandbox.tests.capability import requires_landlock, requires_userns
 
-_linux_only = pytest.mark.skipif(
-    sys.platform != "linux", reason="unshare engagement is Linux-only",
-)
+# unshare engagement is Linux-only
+# Real-Linux-kernel binding: these tests carry the linux_native
+# marker (pytest.ini) instead of an ad hoc skipif — honest skip on
+# other native platforms, deselected under the darwin-emulation gate.
 
 
 def _poison(flags, reason="unshare: Operation not permitted"):
@@ -43,7 +43,7 @@ def _gate_flags(block_network=True):
     return flags
 
 
-@_linux_only
+@pytest.mark.linux_native
 class TestEngagementGateRaises:
     @requires_userns
     def test_block_network_engagement_failure_raises(self):
@@ -358,6 +358,9 @@ class TestExecStatusPipe:
     # the faked spawn is never reached — the forced mount caches below
     # cannot override that decision.
     @requires_userns
+    # Exercises the Linux spawn ladder's 'L' apply-failure arm via the
+    # Linux spawn seam — on any darwin dispatch the seam is inert.
+    @pytest.mark.linux_native
     def test_core_layer_apply_failure_fails_loud(self, monkeypatch, tmp_path):
         # If the spawn child reports a Landlock/seccomp/unshare APPLY failure
         # (probe passed but apply failed), context must fail loud, not degrade.
