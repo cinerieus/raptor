@@ -122,6 +122,28 @@ class TestComputeStats:
         assert by_name["llm"]["mechanical"] is False
         assert by_name["mech"]["mechanical"] is True
 
+    def test_load_review_state_carries_site_span(self, monkeypatch):
+        # The verdict-override join binds a finding's line to the
+        # journal site whose span contains it — the records must
+        # carry both span ends, not just line_start.
+        from types import SimpleNamespace
+
+        from core.audit import journal as journal_mod
+        from core.audit.report import _load_review_state
+
+        entry = SimpleNamespace(
+            file="a.c", function="f1", verdict="clean",
+            source_hash="h", strategies=["taint"], body="deep dive",
+            line_start=40, line_end=60, ts="2026-01-01T00:00:00Z",
+        )
+        monkeypatch.setattr(
+            journal_mod, "load_entries", lambda out_dir: [entry],
+        )
+        state = _load_review_state(Path("/nonexistent"))
+        (rec,) = state["functions_analysed"]
+        assert rec["line_start"] == 40
+        assert rec["line_end"] == 60
+
     def test_functions_analysed_format(self):
         audit_data = {
             "functions_analysed": [

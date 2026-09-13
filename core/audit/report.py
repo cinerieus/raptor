@@ -746,6 +746,9 @@ def _load_review_state(out_dir: Path) -> dict[str, Any]:
             "file": entry.file,
             "function": entry.function,
             "line_start": entry.line_start or 0,
+            # Span end travels with the record so the verdict-override
+            # join can bind a finding's line to its containing site.
+            "line_end": getattr(entry, "line_end", None),
             "status": entry.verdict,
             "hash": entry.source_hash or None,
             # Post-loop mechanical entries (taint-spec / negative-space
@@ -766,6 +769,73 @@ def _load_review_state(out_dir: Path) -> dict[str, Any]:
 _BENIGN_VERDICTS = frozenset({"clean", "dormant"})
 
 
+def _as_line(value: Any) -> int:
+    """``value`` as a non-negative int line number; 0 when unusable."""
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def _site_covers(site: dict[str, Any], line: int) -> bool:
+    """True when the journal site's span contains ``line``.
+
+    A positioned site without a usable ``line_end`` matches only an
+    exact ``line_start`` hit — the span's extent is unknown, so
+    containment cannot be claimed.
+    """
+    start = _as_line(site.get("line_start"))
+    if not start:
+        return False
+    end = _as_line(site.get("line_end"))
+    if end >= start:
+        return start <= line <= end
+    return line == start
+
+
+def _match_journal_site(
+    finding: dict[str, Any],
+    sites: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Pick the journal record for the SITE the finding belongs to.
+
+    Journal review records are kept latest-per-site — (file,
+    function, line_start) — because same-named checklist items
+    (function + prototype, macro redefinitions) are distinct review
+    subjects. Findings carry the vulnerable line, so a lined finding
+    binds only to the site whose span contains that line: a benign
+    verdict on the OTHER same-named site must never override — let
+    alone drop — this one.
+
+    Fallbacks stay in the never-suppress-without-evidence direction:
+
+    - Finding has a line and positioned sites exist, but none covers
+      the line → no match; the finding passes through untouched.
+    - Finding has no line, or every same-name row is span-unknown
+      (``line_start`` 0/absent) → coarse name-level join, preferring
+      a non-benign row over a benign one instead of last-wins, so an
+      unlocatable benign twin never retires a live verdict by mere
+      row order.
+    """
+    if not sites:
+        return None
+    line = _as_line(finding.get("line"))
+    positioned = [s for s in sites if _as_line(s.get("line_start"))]
+    if line and positioned:
+        covering = [s for s in positioned if _site_covers(s, line)]
+        if not covering:
+            return None
+        # Nested spans: the innermost (largest line_start) is the
+        # most specific review subject for this line.
+        return max(covering, key=lambda s: _as_line(s.get("line_start")))
+    non_benign = [
+        s for s in sites if s.get("status") not in _BENIGN_VERDICTS
+    ]
+    pool = non_benign or sites
+    return pool[-1]
+
+
 def _apply_journal_verdict_overrides(
     findings: list[dict[str, Any]],
     audit_data: dict[str, Any],
@@ -776,10 +846,14 @@ def _apply_journal_verdict_overrides(
     Two behaviours:
 
     - **Status override**: when the journal's latest entry for a
-      finding's ``(file, function)`` disagrees with the finding's
-      status, the finding's ``status`` field is overwritten from the
-      journal and ``_verdict_source="journal"`` is stamped for
-      audit-trail visibility.
+      finding's site disagrees with the finding's status, the
+      finding's ``status`` field is overwritten from the journal and
+      ``_verdict_source="journal"`` is stamped for audit-trail
+      visibility. Site resolution is per (file, function,
+      line-span) via :func:`_match_journal_site` — the coarse
+      (file, function) join collapsed same-named sites, letting a
+      clean prototype/macro-twin verdict drop the other site's
+      finding.
     - **Benign drop**: when the journal reports a benign verdict
       (``clean``, ``dormant``) — i.e. Reflexion refuted the finding
       after initial emission — the finding is dropped from the
@@ -787,21 +861,29 @@ def _apply_journal_verdict_overrides(
       the report's Findings section still tally refuted issues,
       defeating the JOIN's whole purpose.
 
+    Mechanical echo rows carry no verdict authority here — they are
+    pattern-scan echoes journalled for cross-layer visibility, not
+    LLM reviews (the same exclusion the reviewed-stats counting
+    applies).
+
     Returns the filtered list (never mutates the input list's
     length in place).
     """
-    by_key: dict[str, str] = {}
+    by_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for func in audit_data.get("functions_analysed", []):
         f = func.get("file", "")
         fn = func.get("function", "")
         status = func.get("status")
-        if f and fn and status:
-            by_key[f"{f}:{fn}"] = status
+        if f and fn and status and not func.get("mechanical"):
+            by_name.setdefault((f, fn), []).append(func)
 
     out: list[dict[str, Any]] = []
     for finding in findings:
-        key = f"{finding.get('file', '')}:{finding.get('function', '')}"
-        journal_verdict = by_key.get(key)
+        sites = by_name.get(
+            (finding.get("file", ""), finding.get("function", "")), [],
+        )
+        site = _match_journal_site(finding, sites)
+        journal_verdict = site.get("status") if site else None
         if journal_verdict and journal_verdict != finding.get("status"):
             finding["status"] = journal_verdict
             finding["_verdict_source"] = "journal"
