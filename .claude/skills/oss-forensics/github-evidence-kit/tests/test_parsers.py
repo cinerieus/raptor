@@ -329,6 +329,26 @@ class TestParseMemberEvent:
         assert event.member.id == 456
         assert event.who.login == "owner"
 
+    def test_parses_member_edited_without_aborting(self):
+        """GitHub emits `member edited` (permission change) events;
+        the schema Literal used to reject them, and collect_events
+        deliberately raises on malformed rows — one real-world edited
+        event aborted a whole day's batch ingest."""
+        row = {
+            "type": "MemberEvent",
+            "created_at": "2025-07-13T20:37:04Z",
+            "actor_login": "owner",
+            "actor_id": 123,
+            "repo_name": "owner/repo",
+            "payload": {
+                "action": "edited",
+                "member": {"login": "existing", "id": 456},
+            },
+        }
+        event = parse_member_event(row)
+        assert event.action == "edited"
+        assert "edited" in event.what
+
     def test_parses_member_removed(self):
         """Parses a member removed event."""
         row = {
