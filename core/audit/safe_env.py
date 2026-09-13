@@ -1,9 +1,11 @@
-"""Safe environment and resource limits for audit tool execution.
+"""Resource-limit and output-cap tables for audit tool execution.
 
-Enforces resource limits, output size caps, filesystem isolation,
-and network denial for every external tool invocation in the audit
-pipeline.  Complements sandbox_policy.py (which maps tools to profiles)
-with the runtime enforcement details.
+The resource-limit half is advisory reference data derived from
+sandbox_policy.py: isolation (namespaces, Landlock, network deny,
+rlimits) is enforced by core.sandbox at the spawn layer, and the
+lookup helpers here are not consulted on that path.  The output-size
+caps (truncate_output) are applied in production: they bound tool
+output before it is fed into prompts.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ _TOOL_LIMITS: dict[str, ResourceLimits] | None = None
 
 
 def get_resource_limits(tool: str) -> ResourceLimits | None:
+    """Advisory limits lookup; enforcement happens in core.sandbox."""
     global _TOOL_LIMITS
     if _TOOL_LIMITS is None:
         _TOOL_LIMITS = _build_limits_from_policy()

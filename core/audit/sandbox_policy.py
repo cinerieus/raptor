@@ -1,18 +1,19 @@
-"""Sandbox policy for /audit external tool invocations.
+"""Sandbox policy reference table for /audit external tools.
 
-Every external tool invocation in the audit pipeline must go through
-the sandbox infrastructure.  This module maps each tool to
-its required sandbox profile and provides a dispatch function that
-enforces the policy.
+Advisory reference data, not an enforcement layer: this module maps
+each external tool the audit pipeline can invoke to its recommended
+sandbox profile and resource limits.  Enforcement happens in
+core.sandbox at the spawn layer — tool runners call core.sandbox.run
+/ run_trusted directly and do not consult this table on that path.
+The require_* helpers below are available as a policy-backed hard
+gate, but no production runner is currently wired through them; the
+one production consumer is validate_all_tools_sandboxed, a post-run
+reporting check fed cost-ledger phase names.
 
 Sandbox profiles (from core/sandbox/):
   - run:         full namespace + Landlock + seccomp + network deny
   - run_trusted: Landlock filesystem isolation + resource limits (no namespace)
   - container:   OCI container isolation (for JVM/heavy tools)
-
-The policy is a data table, not a framework.  Callers use
-get_sandbox_profile() to look up the profile, then call
-core.sandbox.run or core.sandbox.run_trusted directly.
 """
 
 from __future__ import annotations
@@ -142,14 +143,19 @@ _TOOL_POLICIES: dict[str, ToolPolicy] = {
 def get_sandbox_profile(tool: str) -> ToolPolicy | None:
     """Look up the sandbox policy for a tool.
 
-    Returns None for unknown tools — callers should refuse to run
-    unregistered tools without an explicit policy.
+    Returns None for unknown tools.  Advisory lookup only — nothing
+    is refused based on this result; isolation is enforced by
+    core.sandbox at the spawn layer.
     """
     return _TOOL_POLICIES.get(tool.lower())
 
 
 def require_sandbox_profile(tool: str) -> ToolPolicy:
-    """Look up the sandbox policy, raising ValueError for unknown tools."""
+    """Look up the sandbox policy, raising ValueError for unknown tools.
+
+    Available for callers that want a hard policy gate; currently no
+    production runner is wired through it.
+    """
     policy = get_sandbox_profile(tool)
     if policy is None:
         msg = (
