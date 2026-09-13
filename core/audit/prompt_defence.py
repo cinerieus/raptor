@@ -6,7 +6,10 @@ attacker-controlled.  This module sanitises and scans that content
 before it enters the LLM prompt.
 
 Defence layers implemented here:
-- Content sanitisation: length limits, control character removal
+- Content sanitisation: length limits, control character removal,
+  line-splice normalisation (``sanitise_name``/``sanitise_path``/
+  ``sanitise_string_literal``/``sanitise_comment`` output is always
+  a single line — these feed line-shaped trusted prompt regions)
 - Injection pattern detection: flags content that resembles
   prompt injection attempts
 - Structural wrapping: marks target-derived blocks as DATA
@@ -31,6 +34,17 @@ _MAX_STRING_LITERAL = 4096
 _MAX_COMMENT = 2048
 
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# Characters that can splice a rendered prompt line: the sanitise_*
+# family feeds line-shaped trusted regions (headings, labelled list
+# rows), where a surviving line break mints a NEW trusted-shaped line
+# under attacker control.  Beyond \n and \r this includes vertical
+# tab, form feed, the C0 file/group/record separators, and the
+# Unicode line breaks (NEL U+0085, LS U+2028, PS U+2029) that
+# ``str.splitlines`` — and many renderers — treat as line breaks.
+# Tabs are included: they cannot splice a line but can forge list/
+# table alignment inside one.
+_LINE_SPLICE_RE = re.compile(r"[\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
 
 _CONFUSABLE_RANGES = [
     ("Ѐ", "ӿ", "Cyrillic"),
@@ -173,13 +187,13 @@ class ScanResult:
 
 def sanitise_name(name: str, max_length: int = _MAX_FUNCTION_NAME) -> str:
     """Sanitise a function or variable name from the target."""
-    cleaned = _CONTROL_CHAR_RE.sub("", name)
+    cleaned = _CONTROL_CHAR_RE.sub("", _LINE_SPLICE_RE.sub(" ", name))
     if len(cleaned) > max_length:
         cleaned = cleaned[:max_length] + "...[truncated]"
     return cleaned
 
 
-_FLATTEN_RE = re.compile(r"[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")
+_FLATTEN_RE = re.compile(r"[\t\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]+")
 
 
 def defend_prompt_field(value: Any, max_length: int = 200) -> str:
@@ -206,7 +220,7 @@ def defend_prompt_field(value: Any, max_length: int = 200) -> str:
 
 def sanitise_path(path: str) -> str:
     """Sanitise a file path from the target."""
-    cleaned = _CONTROL_CHAR_RE.sub("", path)
+    cleaned = _CONTROL_CHAR_RE.sub("", _LINE_SPLICE_RE.sub(" ", path))
     if len(cleaned) > _MAX_FILE_PATH:
         cleaned = cleaned[:_MAX_FILE_PATH] + "...[truncated]"
     return cleaned
@@ -214,7 +228,7 @@ def sanitise_path(path: str) -> str:
 
 def sanitise_string_literal(text: str) -> str:
     """Sanitise a string literal extracted from the target."""
-    cleaned = _CONTROL_CHAR_RE.sub("", text)
+    cleaned = _CONTROL_CHAR_RE.sub("", _LINE_SPLICE_RE.sub(" ", text))
     if len(cleaned) > _MAX_STRING_LITERAL:
         cleaned = cleaned[:_MAX_STRING_LITERAL] + "...[truncated]"
     return cleaned
@@ -222,7 +236,7 @@ def sanitise_string_literal(text: str) -> str:
 
 def sanitise_comment(text: str) -> str:
     """Sanitise a comment extracted from the target."""
-    cleaned = _CONTROL_CHAR_RE.sub("", text)
+    cleaned = _CONTROL_CHAR_RE.sub("", _LINE_SPLICE_RE.sub(" ", text))
     if len(cleaned) > _MAX_COMMENT:
         cleaned = cleaned[:_MAX_COMMENT] + "...[truncated]"
     return cleaned
