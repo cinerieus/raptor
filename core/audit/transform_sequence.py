@@ -552,15 +552,35 @@ def _extract_sequences_python(
 
 _C_EXTS = frozenset((".c", ".h", ".cc", ".cpp", ".cxx", ".go", ".js", ".ts"))
 
+# A function header needs a POSITIVE signal: at least one leading
+# type/keyword prefix, or a brace-terminated line (below). With every
+# prefix optional (the old shape) any bare call statement
+# (``log_msg(x);``) matched as a header and reset the accumulated
+# variable chains, leaving the fallback near-blind on real C. The
+# cost: headers with the return type on its own line (kernel style)
+# are no longer recognised, so a chain can be attributed to the
+# PREVIOUS function's name — sequence recall is preferred over label
+# precision in this tree-sitter-absent fallback.
 _FUNC_HEADER_RE = re.compile(
     r"^\s*(?:(?:static|inline|void|int|char|unsigned|const|auto|"
     r"func|function|export|async|public|private|protected|"
     r"internal|override|virtual|abstract|final|synchronized|"
-    r"fn|def)\s+)*"
+    r"fn|def)\s+)+"
     r"(?:\([^)]*\)\s+)?"  # Go method receiver: func (s *Server) Handle(
     r"(?:\w+\s+)*"         # return type(s): int, *Item, []byte
     r"(\w+)\s*\(",
     re.MULTILINE,
+)
+
+# Brace-terminated header (``size_t copy_data(char *p) {``) for
+# return types outside the keyword list; the name must not be a
+# control-flow keyword (``if (...) {`` is not a header).
+_FUNC_HEADER_BRACE_RE = re.compile(
+    r"^\s*(?:[\w*\[\]&:<>,]+\s+)*(\w+)\s*\([^;{]*\)\s*\{\s*$",
+)
+
+_CONTROL_FLOW_NAMES = frozenset(
+    {"if", "for", "while", "switch", "catch", "do", "else", "return"}
 )
 
 _CALL_RE = re.compile(
@@ -616,6 +636,10 @@ def _extract_sequences_c_regex(
     for lineno_0, line in enumerate(lines):
         lineno = lineno_0 + 1
         fm = _FUNC_HEADER_RE.match(line)
+        if not fm:
+            bm = _FUNC_HEADER_BRACE_RE.match(line)
+            if bm and bm.group(1) not in _CONTROL_FLOW_NAMES:
+                fm = bm
         if fm:
             for var, steps in var_chains.items():
                 if len(steps) >= 2:

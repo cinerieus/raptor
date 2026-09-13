@@ -391,3 +391,53 @@ class TestMethodChainDeduplication:
         """)
         seqs = extract_transform_sequences({"util.py": src})
         assert len(seqs) == 2
+
+
+class TestCRegexFallback:
+    """The tree-sitter-absent fallback must not treat bare call
+    statements as function headers (that reset discards chains)."""
+
+    def test_bare_call_statement_does_not_reset_chains(self):
+        from core.audit.transform_sequence import _extract_sequences_c_regex
+        src = textwrap.dedent("""\
+            int handle(char *p) {
+                char *x;
+                x = url_decode(p);
+                log_msg(x);
+                x = check_path(x);
+                return 0;
+            }
+        """)
+        seqs = _extract_sequences_c_regex("app.c", src)
+        assert len(seqs) == 1
+        assert seqs[0].function == "handle"
+        assert [s.call_name for s in seqs[0].steps] == [
+            "url_decode", "check_path",
+        ]
+
+    def test_brace_terminated_header_with_custom_type(self):
+        from core.audit.transform_sequence import _extract_sequences_c_regex
+        src = textwrap.dedent("""\
+            size_t copy_data(char *p) {
+                x = url_decode(p);
+                x = check_path(x);
+            }
+        """)
+        seqs = _extract_sequences_c_regex("app.c", src)
+        assert len(seqs) == 1
+        assert seqs[0].function == "copy_data"
+
+    def test_control_flow_brace_is_not_a_header(self):
+        from core.audit.transform_sequence import _extract_sequences_c_regex
+        src = textwrap.dedent("""\
+            int handle(char *p) {
+                x = url_decode(p);
+                if (x != 0) {
+                    log_it();
+                }
+                x = check_path(x);
+            }
+        """)
+        seqs = _extract_sequences_c_regex("app.c", src)
+        assert len(seqs) == 1
+        assert seqs[0].function == "handle"
