@@ -1043,6 +1043,31 @@ class TestPhase2Gates:
         assert result.terminated_by == "environment"
         assert result.environment_fault == guard.conclude_reason
 
+    def test_run_phase2_uses_the_budget_client(self, tmp_path, monkeypatch):
+        """Phase-2/2b spend must ride the run's budget-governed
+        client: a private LLMClient carries its own default cap, so
+        its calls bypass the --max-cost reservation gate and never
+        reach the run's spend ledger."""
+        import core.audit.security_classifier as sc_mod
+
+        seen: dict[str, Any] = {}
+
+        def fake_classify(outcomes, out_dir, client, *, model_name=None,
+                          should_stop=None):
+            seen["client"] = client
+            return {}
+
+        monkeypatch.setattr(
+            sc_mod, "classify_security_impact", fake_classify,
+        )
+        config = _run_config(tmp_path, _StubGuard())
+        budget_client = SimpleNamespace()
+        config.llm_budget_client = budget_client
+        result = OrchestratorResult()
+        _orch._run_phase2(result, config)
+
+        assert seen["client"] is budget_client
+
 
 # ── Run-level gate bindings (full orchestrator, stub review) ─────────
 

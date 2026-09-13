@@ -21418,14 +21418,17 @@ def _find_gap_in_checklist(
 
 def _run_phase2(result, config) -> None:
     """Phase 2 security classification + Phase 2b chaining (bug_first mode)."""
-    from core.llm.client import LLMClient as _P2Client
-
     _p2_model = (
         config.models[0]
         if config.models and config.models[0] != "default"
         else None
     )
-    _p2_client = _P2Client(pinned_model=_p2_model) if _p2_model else _P2Client()
+    # The run's budget-governed client (see _run_llm_client): a private
+    # LLMClient here carried its own default cap, so the whole
+    # Phase-2/2b spend bypassed the --max-cost reservation gate and the
+    # run's spend ledger. Model pinning rides model_name= on each call;
+    # the no-budget-client fallback pins the run's primary model.
+    _p2_client = _run_llm_client(config)
 
     # Environment gate for both phase loops (classification and chain
     # evaluation dispatch one LLM call per item). This phase runs
