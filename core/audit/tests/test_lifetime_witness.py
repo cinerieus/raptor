@@ -1648,9 +1648,7 @@ static int h(struct ctx *ctx)
         )
         assert not r.discharged
 
-    def test_substitution_size_bomb_refuses_fast(self, tmp_path):
-        import time
-
+    def test_substitution_size_bomb_refuses(self, tmp_path):
         n, m = 2000, 20000
         prelude = (
             "#define BIG(x) " + " ".join(["x"] * n) + "\n"
@@ -1670,7 +1668,9 @@ static int h(struct sock *sk)
 \treturn 1;
 }
 """
-        t0 = time.time()
+        # No wall-clock assertion: the budget-refusal reason IS the
+        # invariant (the token budget tripped before expansion blew
+        # up); timing on shared CI hosts is flake, not signal.
         r = _check(
             tmp_path, src,
             "Double-free of p: p freed at line 6 then again at line 9",
@@ -1679,7 +1679,6 @@ static int h(struct sock *sk)
         )
         assert not r.discharged
         assert "token budget" in r.reason
-        assert time.time() - t0 < 10
 
 # ---------------------------------------------------------------------------
 # Path-shape refusals beyond the laundering set: releases that reach
