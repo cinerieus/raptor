@@ -19,8 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -110,9 +108,10 @@ def write_prep_cache(
         # than be stringified and later served back from the cache as
         # a corrupted payload shape.
         blob = json.dumps({"fingerprint": fingerprint, "payload": payload})
-        fd, tmp = tempfile.mkstemp(dir=str(cache_dir), suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(blob)
-        os.replace(tmp, cache_dir / filename)
+        # Shared atomic writer: the hand-rolled mkstemp/replace pair
+        # leaked its .tmp file when the write failed mid-way and never
+        # fsynced before the rename.
+        from core.atomic_fs import write_text_atomically
+        write_text_atomically(cache_dir / filename, blob)
     except Exception:
         logger.debug("%s prep cache write failed", label, exc_info=True)
