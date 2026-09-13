@@ -874,6 +874,22 @@ class TestValidateSpec:
 
 
 class TestExecuteWitness:
+    @pytest.fixture()
+    def real_execution_sandbox(self):
+        """Real execution needs an achievable containment tier — the
+        executors fail closed to verdict="error" without one, which
+        must read as skip, not failure. Same probe as the sandboxed-
+        compile write-grant tests."""
+        if ex._import_sandbox_run() is None:
+            pytest.skip("core.sandbox unavailable")
+        try:
+            from core.sandbox import check_landlock_available
+            from core.sandbox._spawn import mount_ns_available
+        except ImportError:
+            pytest.skip("core.sandbox unavailable")
+        if not (check_landlock_available() or mount_ns_available()):
+            pytest.skip("no sandbox containment tier on this host")
+
     def test_validation_failure_returns_error(self, tmp_path):
         spec = DarkWitnessSpec(
             finding_key="f1", file="missing.py",
@@ -894,7 +910,7 @@ class TestExecuteWitness:
         assert r.verdict == "error"
         assert "unsupported" in r.match_detail
 
-    def test_real_execution_confirms(self, tmp_path):
+    def test_real_execution_confirms(self, tmp_path, real_execution_sandbox):
         mod = tmp_path / "pkg" / "demo.py"
         mod.parent.mkdir(parents=True)
         mod.write_text(textwrap.dedent("""\
@@ -911,7 +927,7 @@ class TestExecuteWitness:
         r = execute_witness(spec, tmp_path)
         assert r.verdict == "confirmed"
 
-    def test_real_execution_refutes(self, tmp_path):
+    def test_real_execution_refutes(self, tmp_path, real_execution_sandbox):
         mod = tmp_path / "pkg" / "demo.py"
         mod.parent.mkdir(parents=True)
         mod.write_text(textwrap.dedent("""\
@@ -929,7 +945,7 @@ class TestExecuteWitness:
         assert r.verdict == "refuted"
         assert "3" in r.actual_return
 
-    def test_language_auto_detected(self, tmp_path):
+    def test_language_auto_detected(self, tmp_path, real_execution_sandbox):
         mod = tmp_path / "lib" / "calc.py"
         mod.parent.mkdir(parents=True)
         mod.write_text("def double(x): return x * 2\n", encoding="utf-8")
