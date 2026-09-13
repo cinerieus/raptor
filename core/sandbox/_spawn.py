@@ -79,6 +79,7 @@ from ._unix_scope import UnixScopeSupervisor as _UnixScopeSupervisor
 from .landlock import _make_landlock_preexec
 from .mount_ns import ExtraRoBindError as _ExtraRoBindError
 from .mount_ns import _ESTALE as _PIN_TAMPER_ERRNO
+from .mount_ns import _is_per_process_procfs
 from .mount_ns import setup_mount_ns
 from .probes import _find_sandbox_binary
 from .seccomp import _make_seccomp_preexec
@@ -891,7 +892,11 @@ def _pin_bind_sources(
     ``readable_paths`` entries that cannot be pinned are SKIPPED, and
     the child then refuses to bind them at all (matching the previous
     "not a dir or file → skip" behaviour, minus the late
-    re-resolution).
+    re-resolution). Entries under a per-process procfs magic link
+    (``/proc/self/*``, ``/proc/thread-self/*``) are never pinned:
+    their identity is per-reader by construction, so a pin taken here
+    could never match any child's walk, and the child serves them
+    through the /proc mount instead of a bind.
 
     Fds carry O_CLOEXEC: they survive every fork in the spawn chain
     but never leak across an exec (newuidmap, tracer, target). The
@@ -915,6 +920,13 @@ def _pin_bind_sources(
                 continue
             key = os.path.abspath(extra)
             if key in fds:
+                continue
+            if _is_per_process_procfs(key):
+                # Per-reader procfs magic-link paths: the child never
+                # binds these (setup_mount_ns skips them — procfs
+                # serves them per-reader already), and a pin taken
+                # here would name THIS process's file, an identity no
+                # other process's walk can reproduce. Nothing to pin.
                 continue
             try:
                 fds[key] = open_pinned(os.path.realpath(key))

@@ -265,6 +265,27 @@ class TestBindPinnedSourceIdentityRefusal(unittest.TestCase):
                                 MS_BIND, pinned_fd=fd)
         self.assertEqual(cm.exception.errno, _ESTALE)
 
+    def test_regular_file_swap_refused_estale(self) -> None:
+        """A regular-FILE source replaced after validation (rename
+        away + new file at the same path) is refused with the tamper
+        signal — the volatile-procfs exemption must not weaken the
+        real-filesystem classes."""
+        from core.sandbox.mount_ns import (
+            _ESTALE,
+            MS_BIND,
+            _bind_pinned_source,
+        )
+        src = self.base / "notes.txt"
+        src.write_text("validated content\n")
+        fd = self._pin(str(src))
+        os.rename(src, self.base / "notes-moved.txt")
+        src.write_text("replacement content\n")
+        with self.assertRaises(OSError) as cm:
+            _bind_pinned_source(str(src), str(self.base / "inside"),
+                                MS_BIND, pinned_fd=fd)
+        self.assertEqual(cm.exception.errno, _ESTALE)
+        self.assertIn("validation-time inode", str(cm.exception))
+
     def test_legacy_no_pin_keeps_original_errno(self) -> None:
         """Without a validation fd (direct/legacy callers) the walk's
         own errno propagates unchanged — no ESTALE masquerade."""
@@ -275,6 +296,118 @@ class TestBindPinnedSourceIdentityRefusal(unittest.TestCase):
             _bind_pinned_source(ghost, str(self.base / "inside"),
                                 MS_BIND, pinned_fd=None)
         self.assertEqual(cm.exception.errno, errno.ENOENT)
+
+
+class TestPerProcessProcfsExemption(unittest.TestCase):
+    """/proc/self/* and /proc/thread-self/* bind sources are volatile
+    by construction: procfs synthesises a different file for every
+    walking process, so a parent-side validation pin can never match
+    the forked mount-ns child's walk — an identity mismatch there
+    carries no tamper signal. The class is exempt from pinning and
+    from the extra_ro bind (procfs serves it per-reader); every
+    real-filesystem class keeps the refusal (see the swap tests
+    above)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        (self.base / "tgt").mkdir()
+
+    def test_classifier_boundaries(self) -> None:
+        from core.sandbox.mount_ns import _is_per_process_procfs
+        for path in ("/proc/self", "/proc/self/cgroup",
+                     "/proc/self/fd/0", "/proc/thread-self",
+                     "/proc/thread-self/stat"):
+            self.assertTrue(_is_per_process_procfs(path), path)
+        # pid-named procfs paths are stable across processes (they
+        # name ONE pid) and real-filesystem paths never qualify —
+        # both keep the pin + tamper refusal.
+        for path in ("/proc", "/proc/selfish", "/proc/1234/cgroup",
+                     "/proc/cpuinfo", "/tmp/proc/self", "/"):
+            self.assertFalse(_is_per_process_procfs(path), path)
+
+    def test_pin_skips_per_process_procfs_readables(self) -> None:
+        """The parent takes no pin for the volatile class — the child
+        then serves the path through the /proc mount instead of a
+        bind, so no identity comparison can misfire."""
+        from core.sandbox._spawn import _pin_bind_sources
+        tgt = str(self.base / "tgt")
+        fds = _pin_bind_sources(
+            tgt, None, None,
+            ["/proc/self/cgroup", "/proc/thread-self/stat", tgt],
+        )
+        self.addCleanup(_close_all, fds)
+        self.assertEqual(set(fds), {tgt})
+
+    def test_identity_change_across_fork_succeeds_via_exemption(self) -> None:
+        """The defect shape, at the pin layer: the same /proc/self
+        path names different inodes for parent and child (fork
+        changes the reader), so any retained pin would ESTALE. The
+        exemption removes the pin, so the child-side lookup misses
+        and the bind is skipped rather than refused."""
+        from core.sandbox._spawn import _pin_bind_sources
+        tgt = str(self.base / "tgt")
+        fds = _pin_bind_sources(tgt, None, None, ["/proc/self/cgroup"])
+        self.addCleanup(_close_all, fds)
+        pid = os.fork()
+        if pid == 0:
+            # Child: mimic the mount-time walk for the volatile path.
+            try:
+                st_child = os.stat(os.path.realpath("/proc/self/cgroup"))
+                st_parent_seen = "/proc/self/cgroup" in fds
+                ok = (not st_parent_seen) and st_child.st_ino != 0
+                os._exit(0 if ok else 1)
+            except OSError:
+                os._exit(2)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), 0)
+
+
+class TestPerProcessProcfsE2E(unittest.TestCase):
+    """End-to-end: a /proc/self/* readable path must not fail the
+    spawn (the pre-fix pin refused it as tampering — errno ESTALE,
+    exec-status 'P'), and the path stays readable inside the sandbox
+    through the /proc mount."""
+
+    def setUp(self) -> None:
+        if not _mount_ns_usable():
+            self.skipTest(
+                "mount-ns unusable here (needs uidmap package + "
+                "kernel.apparmor_restrict_unprivileged_userns=0)"
+            )
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.tgt = self.base / "tgt"
+        self.out = self.base / "out"
+        for d in (self.tgt, self.out):
+            d.mkdir()
+
+    @requires_userns
+    def test_proc_self_readable_path_spawn_succeeds(self) -> None:
+        from core.sandbox._spawn import run_sandboxed
+        r = run_sandboxed(
+            ["cat", "/proc/self/cgroup"],
+            target=str(self.tgt), output=str(self.out),
+            block_network=True, nproc_limit=1024,
+            limits={"memory_mb": 0, "max_file_mb": 10240,
+                    "cpu_seconds": 300},
+            writable_paths=[str(self.out), "/tmp"],
+            readable_paths=["/proc/self/cgroup"],
+            allowed_tcp_ports=None,
+            seccomp_profile=None, seccomp_block_udp=False,
+            env=None, cwd=None, timeout=30,
+            capture_output=True, text=True,
+        )
+        status = getattr(r, "_setup_status", None)
+        self.assertIsNone(
+            status,
+            f"volatile procfs readable path failed setup: {status}",
+        )
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr!r}")
+        self.assertTrue((r.stdout or "").strip(),
+                        "/proc/self/cgroup unreadable inside the sandbox")
 
 
 class TestPinTimeFailureNeverDegrades(unittest.TestCase):

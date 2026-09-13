@@ -305,6 +305,28 @@ def _shadows_per_ns(path: str) -> bool:
     return norm in _SHADOW_PATHS
 
 
+# procfs magic links whose resolution is a property of the WALKING
+# process: /proc/self and /proc/thread-self name a different pid dir
+# for every reader, so no two processes' walks of the same path land
+# on the same inode.
+_PER_PROCESS_PROCFS = ("/proc/self", "/proc/thread-self")
+
+
+def _is_per_process_procfs(path: str) -> bool:
+    """True for paths at or beneath a per-process procfs magic link.
+
+    ``path`` must already be absolute and normalized (both callers
+    ``os.path.abspath`` first). These paths are volatile by
+    construction — the file identity changes across every fork — so
+    the validation-time inode pin can never hold for them and they
+    are excluded from both pinning and the extra_ro bind (procfs
+    already serves them per-reader). Real-filesystem paths are never
+    in this class; the pin's tamper refusal stays intact for them.
+    """
+    return any(path == p or path.startswith(p + "/")
+               for p in _PER_PROCESS_PROCFS)
+
+
 def _refuse_image_symlink_components(root: str, abs_path: str) -> None:
     """Rootfs mode: refuse pre-existing symlink components below the
     image root.
@@ -1341,6 +1363,24 @@ def setup_mount_ns(target: str | None, output: str | None,
                 continue
             _seen_extra_ro.add(path)
             if _shadows_per_ns(path):
+                continue
+            # Per-process procfs magic links (/proc/self/*,
+            # /proc/thread-self/*) resolve to a DIFFERENT file for
+            # every walking process, so a validation-time pin taken
+            # in the parent can never match this child's mount-time
+            # walk — an identity mismatch here is inherent volatility,
+            # never a replaced source, and must not trip the tamper
+            # refusal below. There is also nothing to bind: the /proc
+            # mount already serves these paths per-reader, and
+            # freezing one process's view over the magic link would
+            # hand every sandboxed process the binder's own
+            # per-process files (e.g. a host-layout cgroup path the
+            # fresh cgroup namespace exists to hide). Skip the bind.
+            # Every other source class names one stable filesystem
+            # object, where an identity change can only mean the
+            # object was swapped after validation — the tamper
+            # refusal stays authoritative there.
+            if _is_per_process_procfs(path):
                 continue
             # Paths already served by the step-8 target/output binds
             # keep their step-8 rw/ro semantics. Without this skip, a
