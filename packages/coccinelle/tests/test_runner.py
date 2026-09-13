@@ -1629,7 +1629,10 @@ class TestScriptingGate:
             )
 
         assert result.returncode == 0
-        assert captured["path"] == rule
+        # The rule is materialised into the invocation scratch dir (the
+        # sandbox's writable surface) — the substance of the contract
+        # is the TEXT handed to spatch, byte-for-byte the original.
+        assert captured["path"] != rule
         assert captured["text"] == HOSTILE_SCRIPTED_RULE
 
     def test_plain_rule_still_gets_harness_and_runs(self, tmp_path):
@@ -1964,3 +1967,104 @@ class TestNonzeroExitVisibility:
         assert result.errors == []
         assert result.files_examined  # the target file is listed
         assert result.ok is True
+
+
+class TestDefaultRunnerConfinement:
+    """The default (core.sandbox) runner engages filesystem
+    confinement — ``target=`` the scanned tree, ``output=`` the
+    invocation's scratch dir — instead of the bare-run posture
+    (no target/output: network/seccomp/rlimits only, plus a
+    once-per-process warning attributed to this module)."""
+
+    def _record_sandbox_run(self, monkeypatch):
+        calls: list[tuple[list, dict]] = []
+
+        def _record(cmd, **kwargs):
+            calls.append((list(cmd), kwargs))
+            return _mock_proc()
+
+        import core.sandbox
+        monkeypatch.setattr(core.sandbox, "run", _record)
+        return calls
+
+    def test_run_rule_confines_target_output_and_scratch(
+        self, tmp_path, monkeypatch,
+    ):
+        calls = self._record_sandbox_run(monkeypatch)
+        rule = tmp_path / "r.cocci"
+        rule.write_text(PLAIN_RULE)
+        target = tmp_path / "src"
+        target.mkdir()
+        (target / "x.c").write_text("void f() {}\n")
+        inc = tmp_path / "inc"
+        inc.mkdir()
+
+        with patch(
+            "packages.coccinelle.runner.is_available", return_value=True,
+        ):
+            run_rule(target, rule, include_dirs=[inc])
+
+        assert calls, "default runner never reached core.sandbox.run"
+        cmd, kwargs = calls[0]
+        assert kwargs["target"] == str(target)
+        assert kwargs["cwd"] == str(target)
+        assert kwargs["block_network"] is True
+        assert kwargs["env_caller_filtered"] is True
+        # The rule file is materialised inside the sandbox's writable
+        # output= surface — the only path both sides of the mount view
+        # share for it.
+        scratch = kwargs["output"]
+        assert scratch
+        sp_file = cmd[cmd.index("--sp-file") + 1]
+        assert sp_file.startswith(scratch + os.sep)
+        # Include dirs ride tool_paths so the mount view binds them.
+        assert str(inc) in (kwargs.get("tool_paths") or [])
+
+    def test_run_rules_batched_confines_target_and_output(
+        self, tmp_path, monkeypatch,
+    ):
+        calls = self._record_sandbox_run(monkeypatch)
+        rules = []
+        for name in ("a", "b"):
+            r = tmp_path / f"{name}.cocci"
+            r.write_text(PLAIN_RULE.replace("@r@", f"@{name}@"))
+            rules.append(r)
+        target = tmp_path / "src"
+        target.mkdir()
+        (target / "x.c").write_text("void f() {}\n")
+
+        with patch(
+            "packages.coccinelle.runner.is_available", return_value=True,
+        ):
+            run_rules_batched(target, rules, allow_scripting=True)
+
+        assert calls, "default runner never reached core.sandbox.run"
+        cmd, kwargs = calls[0]
+        assert kwargs["target"] == str(target)
+        assert kwargs["block_network"] is True
+        scratch = kwargs["output"]
+        sp_file = cmd[cmd.index("--sp-file") + 1]
+        assert sp_file.startswith(scratch + os.sep)
+
+    def test_custom_subprocess_runner_keeps_subprocess_signature(
+        self, tmp_path,
+    ):
+        seen = {}
+
+        def _stub(cmd, **kwargs):
+            seen.update(kwargs)
+            return _mock_proc()
+
+        rule = tmp_path / "r.cocci"
+        rule.write_text(PLAIN_RULE)
+        target = tmp_path / "src"
+        target.mkdir()
+        (target / "x.c").write_text("void f() {}\n")
+
+        with patch(
+            "packages.coccinelle.runner.is_available", return_value=True,
+        ):
+            run_rule(target, rule, subprocess_runner=_stub)
+
+        assert "target" not in seen
+        assert "output" not in seen

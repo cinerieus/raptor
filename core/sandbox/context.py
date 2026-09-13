@@ -110,15 +110,24 @@ def _first_external_caller() -> str:
     The bare-run posture advisory fires once per process, so without
     caller identity a legitimately-unconfined network-only invocation
     is indistinguishable from an untrusted-bytes call that forgot its
-    confinement arguments. Best-effort: unattributable frames report
-    a placeholder rather than raising into the warning path.
+    confinement arguments. Frames belonging to the stdlib contextlib
+    machinery are skipped too — the advisory fires inside the
+    ``sandbox()`` generator, so the first frame outside this package
+    is ``contextlib.__enter__``/``enter_context``, which names the
+    plumbing instead of the caller that omitted target=/output=.
+    Best-effort: unattributable frames report a placeholder rather
+    than raising into the warning path.
     """
     try:
+        import contextlib as _contextlib
         pkg_dir = os.path.dirname(os.path.abspath(__file__)) + os.sep
+        ctx_file = os.path.abspath(
+            getattr(_contextlib, "__file__", "") or "")
         frame = sys._getframe(1)
         while frame is not None:
             path = frame.f_code.co_filename
-            if not os.path.abspath(path).startswith(pkg_dir):
+            abspath = os.path.abspath(path)
+            if not abspath.startswith(pkg_dir) and abspath != ctx_file:
                 return f"{path}:{frame.f_lineno}"
             frame = frame.f_back
     except Exception:  # noqa: BLE001 — attribution must never break the warning

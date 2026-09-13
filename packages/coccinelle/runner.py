@@ -15,6 +15,7 @@ they rely on the injected harness instead. The default subprocess runner
 routes spatch through core.sandbox with network blocked.
 """
 
+import functools
 import json
 import logging
 import os
@@ -24,7 +25,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from core.config import RaptorConfig
 from core.run.scratch import scratch_dir
@@ -125,16 +128,23 @@ def _sandboxed_run(cmd, **kwargs):
     inject), so the process gets no network and the standard sandbox
     filesystem posture. ``tool_paths`` exposes the spatch install dir
     so mount-ns mode keeps the binary visible when it is not under
-    /usr/bin. Sandbox layers degrade internally when unavailable;
-    a SandboxSetupError propagates — fail loud, never mask as a
-    benign result. Callers that pass an explicit ``subprocess_runner``
-    bypass this entirely (tests use stubs; adapters bring their own
-    sandbox wrapper).
+    /usr/bin — caller-supplied ``tool_paths`` extras (include dirs
+    that must stay visible inside the mount view) are merged in.
+    The invocation sites pass ``target=``/``output=`` so filesystem
+    confinement actually engages; without them run() is a bare-run
+    (network/seccomp/rlimits only) and warns accordingly. Sandbox
+    layers degrade internally when unavailable; a SandboxSetupError
+    propagates — fail loud, never mask as a benign result. Callers
+    that pass an explicit ``subprocess_runner`` bypass this entirely
+    (tests use stubs; adapters bring their own sandbox wrapper).
     """
     from core.sandbox import run as sandbox_run
 
     sp = _spatch_path()
-    tool_paths = [str(Path(sp).resolve().parent)] if sp else None
+    tool_paths = [str(Path(sp).resolve().parent)] if sp else []
+    for extra in kwargs.pop("tool_paths", None) or []:
+        if str(extra) not in tool_paths:
+            tool_paths.append(str(extra))
     # env_caller_filtered: every caller in this module derives its env
     # from get_safe_env() (plus the private scratch TMPDIR), so the
     # sandbox's "unfiltered caller env" warning does not apply — and
@@ -143,9 +153,38 @@ def _sandboxed_run(cmd, **kwargs):
     return sandbox_run(
         cmd,
         block_network=True,
-        tool_paths=tool_paths,
+        tool_paths=tool_paths or None,
         caller_label="coccinelle-runner",
         **kwargs,
+    )
+
+
+def _confined_default_runner(
+    subprocess_runner: Callable[..., Any] | None,
+    spatch_cwd: Path | None,
+    scratch: Path,
+    include_dirs: list[Path] | None = None,
+) -> Callable[..., Any]:
+    """Resolve the runner for one spatch invocation.
+
+    A caller-supplied ``subprocess_runner`` is returned untouched — it
+    owns its own isolation posture and its signature carries only the
+    subprocess-shaped kwargs. The default runner is bound to this
+    invocation's confinement surfaces so ``core.sandbox.run`` engages
+    filesystem confinement instead of the bare-run posture (network/
+    seccomp/rlimits only, plus its once-per-process warning):
+    ``target=`` the scanned tree (read-only in the mount view),
+    ``output=`` the invocation's scratch dir (rule file + spatch temp
+    copies, the one writable surface), and any ``-I`` include dirs as
+    read-only tool paths so the mount view keeps them visible.
+    """
+    if subprocess_runner is not None:
+        return subprocess_runner
+    return functools.partial(
+        _sandboxed_run,
+        target=str(spatch_cwd) if spatch_cwd is not None else None,
+        output=str(scratch),
+        tool_paths=[str(d) for d in include_dirs or []],
     )
 
 
@@ -347,66 +386,6 @@ def run_rule(
         exec_text = _inject_harness(rule_text, rule_name)
     exec_text = exec_text.replace(RESULT_PREFIX, _nonced_prefix(nonce))
 
-    # Any modified text (harness injection and/or nonce substitution)
-    # has to reach spatch via a real file path. ``--sp-file -``
-    # (stdin) does not work on spatch 1.3 (the build on every host we
-    # ship to) — each spelling errors with either
-    # ``Sys_error("-: No such file or directory")`` or "unexpected
-    # code before the first rule". The only reliable invocation is
-    # a real path. Write the modified text to a tempfile and pass
-    # its path; cleanup in ``finally`` covers timeout / error paths.
-    harnessed_rule_path: Path | None = None
-    if exec_text != rule_text:
-        # Tempfile in the system tempdir — works under the
-        # default sandbox allowlist (``/tmp`` is reachable).
-        # delete=False so we control cleanup; without it the
-        # NamedTemporaryFile context manager would unlink on
-        # exit before spatch could read it through the
-        # subprocess_runner.
-        fd, tmp_name = tempfile.mkstemp(suffix=".cocci", prefix="raptor-cocci-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(exec_text)
-            harnessed_rule_path = Path(tmp_name)
-        except OSError as e:
-            # Fail closed: running the ORIGINAL file would emit
-            # plain (un-nonced) markers that the parser must reject,
-            # so the run could only ever report false silence.
-            # Pre-nonce this fell back to the un-harnessed rule; now
-            # an unwritable tempdir is a structured error instead.
-            try:
-                Path(tmp_name).unlink()
-            except OSError:
-                pass
-            return SpatchResult(
-                rule=rule_name, rule_path=str(rule),
-                errors=[
-                    "failed to materialise nonce-marked rule file: "
-                    f"{e}",
-                ],
-                returncode=-1,
-            )
-
-    sp_file_path = harnessed_rule_path or rule
-    cmd = [_spatch_path() or _SPATCH_BIN, "--sp-file", str(sp_file_path)]
-
-    if target.is_dir():
-        cmd.extend(["--dir", str(target)])
-    else:
-        cmd.append(str(target))
-
-    if no_includes:
-        cmd.append("--no-includes")
-    if include_dirs:
-        for d in include_dirs:
-            cmd.extend(["-I", str(d)])
-
-    cmd.append("--very-quiet")
-
-    if defines:
-        for k, v in defines.items():
-            cmd.extend(["-D", f"{k}={v}"])
-
     run_env = dict(env) if env is not None else RaptorConfig.get_safe_env()
     # Private scratch for spatch's own temp files. spatch materialises
     # per-file working copies (cocci-output-*, cocci_small_output-*)
@@ -415,8 +394,66 @@ def run_rule(
     # interrupted sweep). It honours TMPDIR, so scratch_dir points each
     # invocation at its own dir (TMPDIR exported into run_env) and
     # removes it on exit — including whatever a killed spatch left.
-    with scratch_dir("raptor-cocci-tmp-", env=run_env):
-        runner = subprocess_runner or _sandboxed_run
+    # The scratch dir doubles as the default runner's sandbox
+    # ``output=``, the one writable surface the mount-ns view
+    # bind-mounts — everything spatch must read or write outside the
+    # target tree has to live in it. Accepted residual: the bind
+    # serves the scratch at its ORIGINAL absolute path, so its
+    # framework-named leaf (and, under the launcher, its branded
+    # session ancestors) become visible inside the child's mount view
+    # even though the env scrub keeps the name out of the child env —
+    # a fingerprint tell to a compromised spatch, not a containment
+    # loss. spatch input is operator-trusted rules, and a neutral bind
+    # location would need new mount plumbing.
+    with scratch_dir("raptor-cocci-tmp-", env=run_env) as spatch_scratch:
+        # The (possibly harnessed / nonce-substituted) rule text has
+        # to reach spatch via a real file path. ``--sp-file -``
+        # (stdin) does not work on spatch 1.3 (the build on every
+        # host we ship to) — each spelling errors with either
+        # ``Sys_error("-: No such file or directory")`` or
+        # "unexpected code before the first rule". Always materialise
+        # into the scratch dir: the ORIGINAL rule path (in-repo rules
+        # dir) is not part of the sandbox's mount view, so handing it
+        # to a confined spatch would fail file-not-found.
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                suffix=".cocci", prefix="raptor-cocci-",
+                dir=str(spatch_scratch))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(exec_text)
+        except OSError as e:
+            # Fail closed: running the ORIGINAL file would emit
+            # plain (un-nonced) markers that the parser must reject,
+            # so the run could only ever report false silence.
+            # Pre-nonce this fell back to the un-harnessed rule; now
+            # an unwritable scratch is a structured error instead.
+            return SpatchResult(
+                rule=rule_name, rule_path=str(rule),
+                errors=[
+                    "failed to materialise nonce-marked rule file: "
+                    f"{e}",
+                ],
+                returncode=-1,
+            )
+        sp_file_path = Path(tmp_name)
+        cmd = [_spatch_path() or _SPATCH_BIN, "--sp-file", str(sp_file_path)]
+
+        if target.is_dir():
+            cmd.extend(["--dir", str(target)])
+        else:
+            cmd.append(str(target))
+
+        if no_includes:
+            cmd.append("--no-includes")
+        if include_dirs:
+            for d in include_dirs:
+                cmd.extend(["-I", str(d)])
+
+        cmd.append("--very-quiet")
+
+        if defines:
+            for k, v in defines.items():
+                cmd.extend(["-D", f"{k}={v}"])
 
         start = time.monotonic()
         # `cwd=target.parent if file else target if dir`. spatch
@@ -439,108 +476,99 @@ def run_rule(
             spatch_cwd = target
         else:
             spatch_cwd = None
+        runner = _confined_default_runner(
+            subprocess_runner, spatch_cwd, spatch_scratch, include_dirs)
         try:
-            try:
-                proc = runner(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=run_env,
-                    cwd=str(spatch_cwd) if spatch_cwd is not None else None,
-                )
-            except subprocess.TimeoutExpired as exc:
-                # Capture partial output before giving up. spatch on
-                # large repos sometimes runs past the timeout AFTER
-                # producing partial results — pre-fix we threw away
-                # everything (returned only "Timeout" error). Now we
-                # parse whatever it managed to emit before the timeout
-                # so operators see those matches in the report
-                # alongside the timeout warning.
-                partial_stdout = exc.stdout if isinstance(exc.stdout, str) else (
-                    exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
-                )
-                partial_stderr = exc.stderr if isinstance(exc.stderr, str) else (
-                    exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-                )
-                partial_matches = _dedup_matches(
-                    _parse_results(partial_stdout, rule_name, nonce=nonce)
-                    + _parse_results(partial_stderr, rule_name, nonce=nonce)
-                )
-                return SpatchResult(
-                    rule=rule_name, rule_path=str(rule),
-                    matches=partial_matches,
-                    errors=[f"Timeout after {timeout}s (partial output captured)"],
-                    returncode=-1,
-                    forged_markers=_warn_forged_markers(
-                        partial_stdout, partial_stderr,
-                        nonce=nonce, rule_name=rule_name, target=target,
-                    ),
-                )
-            except OSError as e:
-                return SpatchResult(
-                    rule=rule_name, rule_path=str(rule),
-                    errors=[str(e)],
-                    returncode=-1,
-                )
-            elapsed = int((time.monotonic() - start) * 1000)
-
-            matches = _dedup_matches(
-                _parse_results(proc.stdout, rule_name, nonce=nonce)
-                + _parse_results(proc.stderr, rule_name, nonce=nonce)
+            proc = runner(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=run_env,
+                cwd=str(spatch_cwd) if spatch_cwd is not None else None,
             )
-            errors = _parse_errors(proc.stderr)
-
-            # Engine failure must never read as verified silence: a
-            # nonzero exit whose stderr matches none of the known
-            # error patterns (segfault, OCaml fatal-error variants,
-            # sandbox kill, a parametric rule's "No rules apply")
-            # previously yielded errors=[] and a full files_examined —
-            # coverage and refutation consumers then read the crashed
-            # sweep as examined-clean. Mirror the semgrep runner:
-            # synthesise an error from the returncode + stderr tail so
-            # every caller inherits the error-vs-refuted distinction.
-            if proc.returncode != 0 and not errors:
-                stderr_tail = (proc.stderr or "").strip()[-500:]
-                errors.append(
-                    f"spatch exited with code {proc.returncode}"
-                    + (f": {stderr_tail}" if stderr_tail else "")
-                )
-
-            # files_examined claims verified silence for every listed
-            # file; on a nonzero exit spatch may have died mid-tree, so
-            # nothing beyond the actual matches is verified. Partial
-            # matches are kept (same stance as the timeout path).
-            if proc.returncode == 0:
-                files_examined = _collect_files_examined(
-                    target, {m.file for m in matches}, tree_files=tree_files,
-                )
-            else:
-                files_examined = sorted({m.file for m in matches})
-
+        except subprocess.TimeoutExpired as exc:
+            # Capture partial output before giving up. spatch on
+            # large repos sometimes runs past the timeout AFTER
+            # producing partial results — pre-fix we threw away
+            # everything (returned only "Timeout" error). Now we
+            # parse whatever it managed to emit before the timeout
+            # so operators see those matches in the report
+            # alongside the timeout warning.
+            partial_stdout = exc.stdout if isinstance(exc.stdout, str) else (
+                exc.stdout.decode("utf-8", errors="replace") if exc.stdout else ""
+            )
+            partial_stderr = exc.stderr if isinstance(exc.stderr, str) else (
+                exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            )
+            partial_matches = _dedup_matches(
+                _parse_results(partial_stdout, rule_name, nonce=nonce)
+                + _parse_results(partial_stderr, rule_name, nonce=nonce)
+            )
             return SpatchResult(
-                rule=rule_name,
-                rule_path=str(rule),
-                matches=matches,
-                files_examined=files_examined,
-                errors=errors,
-                elapsed_ms=elapsed,
-                returncode=proc.returncode,
+                rule=rule_name, rule_path=str(rule),
+                matches=partial_matches,
+                errors=[f"Timeout after {timeout}s (partial output captured)"],
+                returncode=-1,
                 forged_markers=_warn_forged_markers(
-                    proc.stdout, proc.stderr,
+                    partial_stdout, partial_stderr,
                     nonce=nonce, rule_name=rule_name, target=target,
                 ),
             )
-        finally:
-            # Clean up the harnessed-rule tempfile. Covers timeout
-            # (early return), OSError (early return), and normal-exit
-            # paths uniformly. Best-effort; an already-unlinked file
-            # or permission flake doesn't affect the result.
-            if harnessed_rule_path is not None:
-                try:
-                    harnessed_rule_path.unlink()
-                except OSError:
-                    pass
+        except OSError as e:
+            return SpatchResult(
+                rule=rule_name, rule_path=str(rule),
+                errors=[str(e)],
+                returncode=-1,
+            )
+        elapsed = int((time.monotonic() - start) * 1000)
+
+        matches = _dedup_matches(
+            _parse_results(proc.stdout, rule_name, nonce=nonce)
+            + _parse_results(proc.stderr, rule_name, nonce=nonce)
+        )
+        errors = _parse_errors(proc.stderr)
+
+        # Engine failure must never read as verified silence: a
+        # nonzero exit whose stderr matches none of the known
+        # error patterns (segfault, OCaml fatal-error variants,
+        # sandbox kill, a parametric rule's "No rules apply")
+        # previously yielded errors=[] and a full files_examined —
+        # coverage and refutation consumers then read the crashed
+        # sweep as examined-clean. Mirror the semgrep runner:
+        # synthesise an error from the returncode + stderr tail so
+        # every caller inherits the error-vs-refuted distinction.
+        if proc.returncode != 0 and not errors:
+            stderr_tail = (proc.stderr or "").strip()[-500:]
+            errors.append(
+                f"spatch exited with code {proc.returncode}"
+                + (f": {stderr_tail}" if stderr_tail else "")
+            )
+
+        # files_examined claims verified silence for every listed
+        # file; on a nonzero exit spatch may have died mid-tree, so
+        # nothing beyond the actual matches is verified. Partial
+        # matches are kept (same stance as the timeout path).
+        if proc.returncode == 0:
+            files_examined = _collect_files_examined(
+                target, {m.file for m in matches}, tree_files=tree_files,
+            )
+        else:
+            files_examined = sorted({m.file for m in matches})
+
+        return SpatchResult(
+            rule=rule_name,
+            rule_path=str(rule),
+            matches=matches,
+            files_examined=files_examined,
+            errors=errors,
+            elapsed_ms=elapsed,
+            returncode=proc.returncode,
+            forged_markers=_warn_forged_markers(
+                proc.stdout, proc.stderr,
+                nonce=nonce, rule_name=rule_name, target=target,
+            ),
+        )
 
 
 def run_rules(
@@ -706,40 +734,39 @@ def run_rules_batched(
     nonce = _make_nonce()
     combined = "\n".join(parts).replace(RESULT_PREFIX, _nonced_prefix(nonce))
 
-    fd, tmp_name = tempfile.mkstemp(
-        suffix=".cocci", prefix="raptor-cocci-batch-",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(combined)
-        tmp_path = Path(tmp_name)
-    except OSError:
-        try:
-            Path(tmp_name).unlink()
-        except OSError:
-            pass
-        out = {
-            s: SpatchResult(
-                rule=s, errors=["failed to write batch file"],
-                returncode=-1,
-            )
-            for s in rule_stems
-        }
-        out.update(refused)
-        return out
-
     target = Path(target)
-    cmd = [_spatch_path() or _SPATCH_BIN, "--sp-file", str(tmp_path)]
-    if target.is_dir():
-        cmd.extend(["--dir", str(target)])
-    else:
-        cmd.append(str(target))
-    cmd.append("--very-quiet")
-
     run_env = dict(env) if env is not None else RaptorConfig.get_safe_env()
     # Same private-TMPDIR scratch as run_rule — see the comment there.
-    with scratch_dir("raptor-cocci-tmp-", env=run_env):
-        runner = subprocess_runner or _sandboxed_run
+    # The batch rule file is materialised inside it for the same
+    # reason as run_rule's: the scratch dir is the sandbox's writable
+    # ``output=`` surface, the one place the confined spatch can read
+    # it from.
+    with scratch_dir("raptor-cocci-tmp-", env=run_env) as spatch_scratch:
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                suffix=".cocci", prefix="raptor-cocci-batch-",
+                dir=str(spatch_scratch),
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(combined)
+            tmp_path = Path(tmp_name)
+        except OSError:
+            out = {
+                s: SpatchResult(
+                    rule=s, errors=["failed to write batch file"],
+                    returncode=-1,
+                )
+                for s in rule_stems
+            }
+            out.update(refused)
+            return out
+
+        cmd = [_spatch_path() or _SPATCH_BIN, "--sp-file", str(tmp_path)]
+        if target.is_dir():
+            cmd.extend(["--dir", str(target)])
+        else:
+            cmd.append(str(target))
+        cmd.append("--very-quiet")
 
         if target.is_file():
             spatch_cwd = target.parent
@@ -747,101 +774,97 @@ def run_rules_batched(
             spatch_cwd = target
         else:
             spatch_cwd = None
+        runner = _confined_default_runner(
+            subprocess_runner, spatch_cwd, spatch_scratch)
 
         start = time.monotonic()
         try:
-            try:
-                proc = runner(
-                    cmd, capture_output=True, text=True,
-                    timeout=timeout, env=run_env,
-                    cwd=str(spatch_cwd) if spatch_cwd else None,
-                )
-            except subprocess.TimeoutExpired as exc:
-                partial_stdout = exc.stdout if isinstance(
-                    exc.stdout, str,
-                ) else (
-                    exc.stdout.decode("utf-8", errors="replace")
-                    if exc.stdout else ""
-                )
-                partial_stderr = exc.stderr if isinstance(
-                    exc.stderr, str,
-                ) else (
-                    exc.stderr.decode("utf-8", errors="replace")
-                    if exc.stderr else ""
-                )
-                all_matches = _dedup_matches(
-                    _parse_results(partial_stdout, "batch", nonce=nonce)
-                    + _parse_results(partial_stderr, "batch", nonce=nonce),
-                )
-                forged = _warn_forged_markers(
-                    partial_stdout, partial_stderr,
-                    nonce=nonce, rule_name="batch", target=target,
-                )
-                by_rule = _demux_batch_matches(
-                    all_matches, rule_stems, alias_of,
-                )
-                out = {
-                    s: SpatchResult(
-                        rule=s, matches=by_rule.get(s, []),
-                        errors=[f"Batch timeout after {timeout}s"],
-                        returncode=-1,
-                        forged_markers=forged,
-                    )
-                    for s in rule_stems
-                }
-                out.update(refused)
-                return out
-            except OSError as e:
-                out = {
-                    s: SpatchResult(
-                        rule=s, errors=[str(e)], returncode=-1,
-                    )
-                    for s in rule_stems
-                }
-                out.update(refused)
-                return out
-
-            elapsed = int((time.monotonic() - start) * 1000)
-            all_matches = _dedup_matches(
-                _parse_results(proc.stdout, "batch", nonce=nonce)
-                + _parse_results(proc.stderr, "batch", nonce=nonce),
+            proc = runner(
+                cmd, capture_output=True, text=True,
+                timeout=timeout, env=run_env,
+                cwd=str(spatch_cwd) if spatch_cwd else None,
             )
-            errors = _parse_errors(proc.stderr)
+        except subprocess.TimeoutExpired as exc:
+            partial_stdout = exc.stdout if isinstance(
+                exc.stdout, str,
+            ) else (
+                exc.stdout.decode("utf-8", errors="replace")
+                if exc.stdout else ""
+            )
+            partial_stderr = exc.stderr if isinstance(
+                exc.stderr, str,
+            ) else (
+                exc.stderr.decode("utf-8", errors="replace")
+                if exc.stderr else ""
+            )
+            all_matches = _dedup_matches(
+                _parse_results(partial_stdout, "batch", nonce=nonce)
+                + _parse_results(partial_stderr, "batch", nonce=nonce),
+            )
             forged = _warn_forged_markers(
-                proc.stdout, proc.stderr,
+                partial_stdout, partial_stderr,
                 nonce=nonce, rule_name="batch", target=target,
             )
-
-            by_rule = _demux_batch_matches(all_matches, rule_stems, alias_of)
-
-            # Match run_rule's result contract: files_examined is
-            # populated (one shared tree walk for the whole batch —
-            # coverage consumers previously read zero files from the
-            # batch path), and every SpatchResult gets its OWN errors
-            # list — passing one shared list object meant a consumer
-            # mutating one result's errors silently edited all of them.
-            batch_examined = _collect_files_examined(
-                target, {m.file for m in all_matches},
+            by_rule = _demux_batch_matches(
+                all_matches, rule_stems, alias_of,
             )
             out = {
                 s: SpatchResult(
-                    rule=s, rule_path=str(r),
-                    matches=by_rule.get(s, []),
-                    files_examined=list(batch_examined),
-                    errors=list(errors),
-                    elapsed_ms=elapsed,
-                    returncode=proc.returncode,
+                    rule=s, matches=by_rule.get(s, []),
+                    errors=[f"Batch timeout after {timeout}s"],
+                    returncode=-1,
                     forged_markers=forged,
                 )
-                for s, r in zip(rule_stems, batched_rules)
+                for s in rule_stems
             }
             out.update(refused)
             return out
-        finally:
-            try:
-                Path(tmp_name).unlink()
-            except OSError:
-                pass
+        except OSError as e:
+            out = {
+                s: SpatchResult(
+                    rule=s, errors=[str(e)], returncode=-1,
+                )
+                for s in rule_stems
+            }
+            out.update(refused)
+            return out
+
+        elapsed = int((time.monotonic() - start) * 1000)
+        all_matches = _dedup_matches(
+            _parse_results(proc.stdout, "batch", nonce=nonce)
+            + _parse_results(proc.stderr, "batch", nonce=nonce),
+        )
+        errors = _parse_errors(proc.stderr)
+        forged = _warn_forged_markers(
+            proc.stdout, proc.stderr,
+            nonce=nonce, rule_name="batch", target=target,
+        )
+
+        by_rule = _demux_batch_matches(all_matches, rule_stems, alias_of)
+
+        # Match run_rule's result contract: files_examined is
+        # populated (one shared tree walk for the whole batch —
+        # coverage consumers previously read zero files from the
+        # batch path), and every SpatchResult gets its OWN errors
+        # list — passing one shared list object meant a consumer
+        # mutating one result's errors silently edited all of them.
+        batch_examined = _collect_files_examined(
+            target, {m.file for m in all_matches},
+        )
+        out = {
+            s: SpatchResult(
+                rule=s, rule_path=str(r),
+                matches=by_rule.get(s, []),
+                files_examined=list(batch_examined),
+                errors=list(errors),
+                elapsed_ms=elapsed,
+                returncode=proc.returncode,
+                forged_markers=forged,
+            )
+            for s, r in zip(rule_stems, batched_rules)
+        }
+        out.update(refused)
+        return out
 
 
 # Emitted-rule-id extraction for the batch demux. Matches the JSON /
