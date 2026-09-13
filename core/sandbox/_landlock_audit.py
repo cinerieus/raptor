@@ -46,6 +46,7 @@ import contextlib
 import json
 import logging
 import os
+import resource
 import select
 import subprocess
 import sys
@@ -623,8 +624,7 @@ def run_landlock_audit(
                 # capability (same shape _spawn's grandchild sweep
                 # closes). Fall back to the bounded range only when
                 # /proc isn't listable.
-                import resource as _resource
-                _soft, _ = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+                _soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
                 try:
                     _open_fds = [int(_n)
                                  for _n in os.listdir("/proc/self/fd")]
@@ -676,8 +676,7 @@ def run_landlock_audit(
             # ============== TRACER CHILD ==============
             # Close every inherited fd except stdio + t_ready_w.
             try:
-                import resource as _resource
-                soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+                soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                 upper = min(soft, 65536)
                 # Keep the sync write end, the anonymous config fd,
                 # and the held evidence fd; closerange over the gaps.

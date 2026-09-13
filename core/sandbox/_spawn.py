@@ -61,6 +61,7 @@ import errno
 import logging
 import os
 import platform
+import resource
 import signal
 import socket as _socket_mod
 import subprocess
@@ -523,8 +524,6 @@ def _set_rlimits(limits: dict, status_fd: "int | None" = None) -> None:
     "target execed" in the parent), warns, and os._exit(99)s rather
     than continuing (see the inline rationale).
     """
-    import resource
-
     from .preexec import _DEFAULT_LIMITS
     mem = limits.get("memory_mb", _DEFAULT_LIMITS["memory_mb"])
     file_mb = limits.get("max_file_mb", _DEFAULT_LIMITS["max_file_mb"])
@@ -2841,15 +2840,13 @@ def run_sandboxed(
                     exec_env = RaptorConfig.get_safe_env()
                 # bounded fork count via RLIMIT_NPROC (prlimit).
                 if nproc_limit and nproc_limit > 0:
-                    import resource
                     try:
                         resource.setrlimit(resource.RLIMIT_NPROC,
                                            (nproc_limit, nproc_limit))
                     except (ValueError, OSError):
                         warn_post_fork(b"sandbox: _spawn grandchild RLIMIT_NPROC setrlimit failed -- fork-bomb bound not applied\n")
-                import resource as _resource
                 try:
-                    _soft_nofile = _resource.getrlimit(_resource.RLIMIT_NOFILE)[0]
+                    _soft_nofile = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
                 except (ValueError, OSError):
                     _soft_nofile = 1024
                 _keep_fds = {status_w}
@@ -3342,8 +3339,11 @@ def run_sandboxed(
             # fd and its sync write would silently fail.
             #
             # Suppress Python 3.12+ multi-threaded-fork DeprecationWarning.
-            # Tracer subprocess does only fd-close + execvpe in the
-            # child path — no Python objects, no GIL. Same fork-safety
+            # Tracer child path: fd sweep + argv/env prep + execvpe
+            # using PRE-IMPORTED modules only — post-fork imports are
+            # banned here (the import machinery's locks can be held
+            # by another thread at fork; `resource` is imported at
+            # module level for exactly this branch). Same fork-safety
             # contract as the main child fork above.
             tracer_pid = os.fork()
             if tracer_pid == 0:
@@ -3387,9 +3387,8 @@ def run_sandboxed(
                 # range on Linux (close_range(2) on 5.9+) instead
                 # of per-fd python-level close+EBADF-handling. ~1ms
                 # → ~10us per tracer fork.
-                import resource as _resource
-                soft, _hard = _resource.getrlimit(
-                    _resource.RLIMIT_NOFILE)
+                soft, _hard = resource.getrlimit(
+                    resource.RLIMIT_NOFILE)
                 upper = min(soft, 65536)
                 # fds the tracer legitimately needs across its exec:
                 # the sync write end, the audit-config anonymous fd,
