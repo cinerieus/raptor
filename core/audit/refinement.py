@@ -477,7 +477,7 @@ def _dispatch_smt(
             target_path=str(target) if target else None,
         )
         if result:
-            status = "confirmed" if result.outcome == "confirmed" else result.outcome
+            status = result.outcome
             return {
                 "tool": f"smt:{smt_verb}",
                 "result": f"{status}: {result.raw_output[:200] if result.raw_output else 'no detail'}",
