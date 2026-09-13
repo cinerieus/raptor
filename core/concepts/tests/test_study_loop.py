@@ -81,110 +81,6 @@ class TestStudyLoopConvergence:
         assert "no study items" in result.stderr.lower() or result.returncode == 0
 
 
-class TestReadingListDrain:
-    """Test reading-list integration in the loop."""
-
-    def test_reading_list_items_extracted(self, monkeypatch):
-        """Verify the helper that extracts identifiers from reading list."""
-        import importlib.util
-
-        # Scoped mutation only: a bare os.environ write leaked
-        # _RAPTOR_TRUSTED=1 into every later test in the process,
-        # masking trust-gated refusal assertions (order dependence);
-        # the bare sys.path.insert accumulated per run.
-        monkeypatch.setenv("_RAPTOR_TRUSTED", "1")
-        monkeypatch.syspath_prepend(str(RAPTOR_DIR))
-
-        spec = importlib.util.spec_from_file_location(
-            "study_loop", STUDY_LOOP,
-            submodule_search_locations=[],
-        )
-        if spec is None or spec.loader is None:
-            # Fallback: exec the file directly and grab the function
-            import types
-            mod = types.ModuleType("study_loop")
-            mod.__file__ = STUDY_LOOP
-            exec(  # noqa: S102 - loads the libexec script under test
-                compile(
-                    Path(STUDY_LOOP).read_text(encoding="utf-8"),
-                    STUDY_LOOP, "exec",
-                ),
-                mod.__dict__,
-            )
-        else:
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-
-        pending = [
-            {"question": "struct page ownership", "resolution": "identifier",
-             "context": "Need to understand `page` lifecycle"},
-            {"question": "memory aliasing semantics", "resolution": "concept",
-             "context": ""},
-        ]
-        idents, concepts = mod._extract_rl_identifiers(pending)
-        assert "page" in idents
-        assert "memory aliasing semantics" in concepts
-
-
-class TestMarkItemsResolved:
-    def _write_rl(self, out_dir, items):
-        rl_path = out_dir / "reading-list.json"
-        rl_path.write_text(json.dumps({"items": items}), encoding="utf-8")
-
-    def test_marks_backtick_ident_in_question(self, tmp_path):
-        self._write_rl(tmp_path, [
-            {"question": "What is `crypto_type`?", "resolved": False},
-            {"question": "What is `crypto_alg`?", "resolved": False},
-        ])
-        count = _loop._mark_items_resolved(
-            tmp_path, ["crypto_type"], [])
-        assert count == 1
-        data = json.loads((tmp_path / "reading-list.json").read_text())
-        assert data["items"][0]["resolved"] is True
-        assert data["items"][0]["resolved_concept_id"] == "studied"
-        assert not data["items"][1].get("resolved")
-
-    def test_marks_backtick_ident_in_context(self, tmp_path):
-        self._write_rl(tmp_path, [
-            {"question": "What role does this play?",
-             "context": "See `crypto_chain` in algapi.c",
-             "resolved": False},
-        ])
-        count = _loop._mark_items_resolved(
-            tmp_path, ["crypto_chain"], [])
-        assert count == 1
-
-    def test_marks_struct_pattern(self, tmp_path):
-        self._write_rl(tmp_path, [
-            {"question": "What is struct crypto_type?", "resolved": False},
-        ])
-        count = _loop._mark_items_resolved(
-            tmp_path, ["struct crypto_type"], [])
-        assert count == 1
-
-    def test_marks_concept_by_question_text(self, tmp_path):
-        self._write_rl(tmp_path, [
-            {"question": "How does algorithm chaining work?",
-             "resolution": "concept", "resolved": False},
-        ])
-        count = _loop._mark_items_resolved(
-            tmp_path, [], ["How does algorithm chaining work?"])
-        assert count == 1
-
-    def test_skips_already_resolved(self, tmp_path):
-        self._write_rl(tmp_path, [
-            {"question": "What is `crypto_type`?", "resolved": True},
-        ])
-        count = _loop._mark_items_resolved(
-            tmp_path, ["crypto_type"], [])
-        assert count == 0
-
-    def test_no_file_returns_zero(self, tmp_path):
-        count = _loop._mark_items_resolved(
-            tmp_path, ["crypto_type"], [])
-        assert count == 0
-
-
 class TestDetectConceptsDir:
     def test_existing_concepts_dir(self, tmp_path):
         project_root = tmp_path / "projects" / "myproj"
@@ -432,18 +328,6 @@ class TestUnresolvableExcludedFromDrain:
         pending = _loop._load_pending_reading_list(tmp_path)
         assert [i["id"] for i in pending] == ["rl-1"]
 
-    def test_mark_resolved_skips_unresolvable(self, tmp_path):
-        self._write_rl(tmp_path)
-        n = _loop._mark_items_resolved(
-            tmp_path, ["alive_fn", "dead_fn"], [],
-        )
-        assert n == 1
-        data = json.loads((tmp_path / "reading-list.json").read_text())
-        by_id = {i["id"]: i for i in data["items"]}
-        assert by_id["rl-1"]["resolved"]
-        assert not by_id["rl-2"].get("resolved")
-        assert by_id["rl-2"]["unresolvable"]
-
 
 class TestCompileInvariantsExitCode:
     """A compile-invariants failure must propagate into the loop's exit
@@ -538,3 +422,50 @@ class TestFailedRunDoesNotPromote:
         assert rc == 0
         assert self._promote_called
         assert self._sage_called
+
+
+class TestPriorKnowledgeAtomicity:
+    def test_prior_copy_routes_through_atomic_writer(self, tmp_path,
+                                                     monkeypatch):
+        """A torn prior copy (crash mid-write) leaves a malformed
+        reading-list that silently de-scopes the next prep to a
+        full-tree scan — the copy must go through the shared atomic
+        writer."""
+        import core.atomic_fs as atomic_fs
+        calls = []
+        real = atomic_fs.write_text_atomically
+
+        def recording(path, content, **kw):
+            calls.append(Path(path))
+            return real(path, content, **kw)
+
+        monkeypatch.setattr(atomic_fs, "write_text_atomically", recording)
+        concepts = tmp_path / "concepts"
+        concepts.mkdir()
+        (concepts / "reading-list.json").write_text(
+            json.dumps({"items": []}), encoding="utf-8")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _loop._load_prior_knowledge(run_dir, concepts)
+        assert run_dir / "reading-list.json" in calls
+        assert json.loads(
+            (run_dir / "reading-list.json").read_text()) == {"items": []}
+
+
+class TestOverviewSymlinkExclusion:
+    def test_symlinked_sources_not_inventoried(self, tmp_path):
+        """A hostile tree's out-pointing symlink must not feed host
+        file content into the overview prompt (the prep scan already
+        excludes symlinks)."""
+        outside = tmp_path / "outside.c"
+        outside.write_text("int secret(void){return 0;}\n",
+                           encoding="utf-8")
+        target = tmp_path / "tree"
+        target.mkdir()
+        (target / "linked.c").symlink_to(outside)
+        idents, concepts, summary, title = (
+            _loop._overview_from_directory(target)
+        )
+        # Only a symlink in the tree → nothing inventoried, no LLM
+        # call attempted.
+        assert (idents, concepts, summary, title) == ([], [], "", "")

@@ -86,85 +86,6 @@ def _load_pending_reading_list(output_dir: Path) -> list[dict]:
     ]
 
 
-def _extract_rl_identifiers(pending: list[dict]) -> tuple[list[str], list[str]]:
-    """Partition pending reading-list items into identifiers and concepts."""
-    identifiers: list[str] = []
-    concepts: list[str] = []
-    seen: set[str] = set()
-    for item in pending:
-        resolution = item.get("resolution", "identifier")
-        q = item.get("question", "").strip()
-        if not q or q in seen:
-            continue
-        seen.add(q)
-        if resolution == "concept":
-            concepts.append(q)
-            continue
-        ctx = item.get("context", "")
-        m = re.search(r"`([A-Za-z_]\w*)`", ctx)
-        if m:
-            identifiers.append(m.group(1))
-            continue
-        m = re.search(r"`([A-Za-z_]\w*)`", q)
-        if m:
-            identifiers.append(m.group(1))
-            continue
-        m = re.search(r"\b(struct\s+\w+|[A-Za-z_]\w{3,}_[A-Za-z_]\w*)\b", q)
-        if m:
-            identifiers.append(m.group(1))
-            continue
-        concepts.append(q)
-    return identifiers, concepts
-
-
-def _mark_items_resolved(output_dir: Path, idents: list[str],
-                         concepts: list[str]) -> int:
-    """Mark reading-list items as resolved after studying them."""
-    rl_path = output_dir / "reading-list.json"
-    if not rl_path.is_file():
-        return 0
-    rl_data = load_json(rl_path, max_bytes=_MAX_STUDY_ARTIFACT_BYTES)
-    if not isinstance(rl_data, dict):
-        return 0
-
-    ident_set = {i.lower() for i in idents}
-    concept_set = {c.strip().lower() for c in concepts}
-    resolved_count = 0
-
-    for item in rl_data.get("items", []):
-        if item.get("resolved") or item.get("unresolvable"):
-            continue
-        q = item.get("question", "").strip()
-        if not q:
-            continue
-
-        matched = False
-        for text in (item.get("context", ""), q):
-            m = re.search(r"`([A-Za-z_]\w*)`", text)
-            if m and m.group(1).lower() in ident_set:
-                matched = True
-                break
-        if not matched:
-            m = re.search(
-                r"\b(struct\s+\w+|[A-Za-z_]\w{3,}_[A-Za-z_]\w*)\b", q)
-            if m and m.group(1).lower() in ident_set:
-                matched = True
-        if not matched and q.lower() in concept_set:
-            matched = True
-
-        if matched:
-            item["resolved"] = True
-            item["resolved_concept_id"] = "studied"
-            resolved_count += 1
-
-    if resolved_count:
-        save_json(rl_path, rl_data)
-        print(f"study-loop: resolved {resolved_count} reading-list items",
-              file=sys.stderr)
-
-    return resolved_count
-
-
 # ------------------------------------------------------------------
 # Project persistence
 # ------------------------------------------------------------------
@@ -192,8 +113,13 @@ def _load_prior_knowledge(output_dir: Path, concepts_dir: Path | None) -> None:
         target = output_dir / name
         if prior.is_file() and not target.is_file():
             try:
-                import shutil
-                shutil.copy2(str(prior), str(target))
+                # Atomic: a torn copy (crash mid-write) leaves e.g. a
+                # malformed reading-list.json that load_json reads as
+                # None → [] pending → the next prep silently de-scopes
+                # to a full-tree scan.
+                from core.atomic_fs import write_text_atomically
+                write_text_atomically(
+                    target, prior.read_text(encoding="utf-8"))
                 print(f"study-loop: loaded prior {name} from {concepts_dir}",
                       file=sys.stderr)
             except OSError as exc:
@@ -351,9 +277,12 @@ def _overview_from_directory(
         )
         listing_base = target.parent
     else:
+        # Skip symlinks like the prep scan does — a hostile tree's
+        # out-pointing link must not feed host file content into the
+        # overview prompt.
         c_files = sorted(
             f for f in target.rglob("*")
-            if f.suffix in _OVERVIEW_EXTENSIONS
+            if f.suffix in _OVERVIEW_EXTENSIONS and not f.is_symlink()
         )
         listing_base = target
     if not c_files:
@@ -364,9 +293,19 @@ def _overview_from_directory(
     )
 
     struct_names: list[str] = []
+    # Cap full-text header reads: the prompt keeps at most 200 struct
+    # names, so reading EVERY header in a huge tree is pure I/O cost;
+    # too low a cap and a deep tree's core types (sorted order ≈
+    # path order) can miss the overview. 500 comfortably covers the
+    # 200-name budget while bounding the walk.
+    _HEADER_READ_CAP = 500
+    headers_read = 0
     for h in c_files:
         if h.suffix not in _OVERVIEW_HEADER_EXTENSIONS:
             continue
+        if headers_read >= _HEADER_READ_CAP:
+            break
+        headers_read += 1
         try:
             text = h.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -380,7 +319,7 @@ def _overview_from_directory(
     intent_lines: list[str] = []
     for name in ("Kconfig", "Makefile", "README", "README.md"):
         p = target / name
-        if p.is_file():
+        if p.is_file() and not p.is_symlink():
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
                 intent_lines.append(f"--- {name} (first 40 lines) ---")
