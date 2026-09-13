@@ -329,7 +329,7 @@ class TestContextManager(unittest.TestCase):
 
     @patch.object(lifecycle, "_start_fresh", return_value=None)
     def test_session_yields_none_on_failure(self, _sf):
-        with lifecycle.joern_session() as srv:
+        with lifecycle.shared_joern_session() as srv:
             self.assertIsNone(srv)
 
     @patch.object(lifecycle, "_kill_server")
@@ -338,7 +338,7 @@ class TestContextManager(unittest.TestCase):
         srv = _mock_server()
         mock_start.return_value = srv
 
-        with lifecycle.joern_session() as s:
+        with lifecycle.shared_joern_session() as s:
             self.assertIs(s, srv)
             with lifecycle._locked() as fd:
                 state = lifecycle._read_state(fd)
@@ -354,7 +354,7 @@ class TestContextManager(unittest.TestCase):
         srv = _mock_server()
         mock_start.return_value = srv
 
-        with self.assertRaises(ValueError), lifecycle.joern_session():
+        with self.assertRaises(ValueError), lifecycle.shared_joern_session():
             raise ValueError("boom")
 
         mock_kill.assert_called_once()
@@ -617,3 +617,18 @@ class TestAuthCredentialPersistence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSessionNames(unittest.TestCase):
+    def test_alias_and_distinct_package_root_manager(self):
+        """lifecycle.shared_joern_session is the shared refcounted
+        manager; the legacy lifecycle.joern_session name stays as an
+        alias, and the package-root joern_session (private per-call
+        server) is a DIFFERENT function — the identical names once
+        made an import-path switch silently change server lifetime."""
+        import packages.joern as joern_pkg
+
+        self.assertIs(lifecycle.joern_session,
+                      lifecycle.shared_joern_session)
+        self.assertIsNot(joern_pkg.joern_session,
+                         lifecycle.shared_joern_session)

@@ -370,14 +370,28 @@ def joern_cleanup() -> None:
 
 
 @contextlib.contextmanager
-def joern_session(tunables: JoernTunables | None = None):
-    """Context manager wrapping acquire/release."""
+def shared_joern_session(tunables: JoernTunables | None = None):
+    """Context manager wrapping acquire/release of the SHARED server.
+
+    Distinct name on purpose: ``packages.joern.joern_session`` boots a
+    PRIVATE server (plus CPG build/import) and stops it on exit, while
+    this one joins the refcounted singleton and only decrements on
+    exit. The two used to share the name ``joern_session``, so a
+    caller switching import paths silently swapped server lifetime
+    semantics (per-call JVM boot vs shared reuse).
+    """
     srv = joern_acquire(tunables)
     try:
         yield srv
     finally:
         if srv is not None:
             joern_release()
+
+
+#: Compatibility alias for the pre-rename import path — prefer
+#: :func:`shared_joern_session` (see its docstring for why the name
+#: collision with the package-root ``joern_session`` was a trap).
+joern_session = shared_joern_session
 
 
 def _start_fresh(tunables: JoernTunables) -> JoernServer | None:
