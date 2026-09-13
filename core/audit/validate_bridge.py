@@ -829,6 +829,13 @@ def import_audit_evidence(
         search_dirs.extend(candidate for candidate in sorted(out_dir.iterdir(), reverse=True) if candidate.is_dir() and candidate.name.startswith("audit_"))
 
     for candidate in search_dirs:
+        # A neighbour session's still-running audit sibling has a
+        # PARTIAL findings.json / layer0-findings.json that must never
+        # be imported as evidence (same guard as the validate
+        # direction). The co-located dir is exempt: a shared --out
+        # handoff carries THIS run's own status=running manifest.
+        if candidate != validate_output_dir and _run_in_flight(candidate):
+            continue
         if not _check_target_match(candidate, target_path):
             continue
 
