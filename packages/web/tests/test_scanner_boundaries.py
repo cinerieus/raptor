@@ -396,6 +396,187 @@ class TestCrawlerWorkQueue(unittest.TestCase):
         self.assertEqual(fetches.count("http://t.example/page"), 1)
 
 
+class TestCrawlerFormDedup(unittest.TestCase):
+    """A site-wide repeated form is ONE fuzz target; distinct forms
+    (different action, method, or field set) all survive."""
+
+    NAV_FORM = (
+        '<form action="/search" method="get">'
+        '<input name="q" type="text"/></form>'
+    )
+
+    def _crawler(self):
+        from packages.web.crawler import WebCrawler
+
+        client = MagicMock()
+        client.reveal_secrets = False
+        client.base_url = "http://t.example"
+        client._is_in_scope.return_value = True
+        return WebCrawler(client, max_depth=2, max_pages=10), client
+
+    def _serve(self, client, pages):
+        def get(url, **kw):
+            body = pages.get(url, "<html></html>")
+            return SimpleNamespace(
+                status_code=200, headers={"Content-Type": "text/html"},
+                content=body.encode(), text=body,
+            )
+
+        client.get.side_effect = get
+
+    def test_repeated_nav_form_is_recorded_once(self):
+        crawler, client = self._crawler()
+        login = (
+            '<form action="/login" method="post">'
+            '<input name="user"/><input name="pass" type="password"/></form>'
+        )
+        self._serve(client, {
+            "http://t.example/": (
+                f'<html><a href="/a">a</a><a href="/b">b</a>'
+                f"{self.NAV_FORM}</html>"
+            ),
+            "http://t.example/a": f"<html>{self.NAV_FORM}</html>",
+            "http://t.example/b": f"<html>{self.NAV_FORM}{login}</html>",
+        })
+        crawler.crawl("http://t.example/")
+        actions = [f["action"] for f in crawler.discovered_forms]
+        self.assertEqual(actions.count("http://t.example/search"), 1)
+        self.assertIn("http://t.example/login", actions)
+        self.assertEqual(len(crawler.discovered_forms), 2)
+        # Duplicate copies still contribute their parameter names.
+        self.assertIn("q", crawler.discovered_parameters)
+
+    def test_hidden_value_discriminants_survive_as_distinct_forms(self):
+        """Two forms whose ONLY difference is a hidden routing value
+        (mode=delete vs mode=upload) reach different handlers — both
+        must be fuzzed."""
+        crawler, client = self._crawler()
+
+        def op_form(mode):
+            return (
+                '<form action="/op" method="post">'
+                f'<input type="hidden" name="mode" value="{mode}"/>'
+                '<input name="target"/></form>'
+            )
+
+        self._serve(client, {
+            "http://t.example/": (
+                f'<html><a href="/a">a</a>{op_form("delete")}</html>'
+            ),
+            "http://t.example/a": f"<html>{op_form('upload')}</html>",
+        })
+        crawler.crawl("http://t.example/")
+        modes = sorted(
+            f["inputs"]["mode"]["value"] for f in crawler.discovered_forms
+        )
+        self.assertEqual(modes, ["delete", "upload"])
+
+    def test_twenty_identical_nav_forms_still_collapse_to_one(self):
+        from packages.web.crawler import WebCrawler
+
+        client = MagicMock()
+        client.reveal_secrets = False
+        client.base_url = "http://t.example"
+        client._is_in_scope.return_value = True
+        crawler = WebCrawler(client, max_depth=2, max_pages=30)
+        links = "".join(f'<a href="/p{i}">p</a>' for i in range(20))
+        pages = {
+            f"http://t.example/p{i}": f"<html>{self.NAV_FORM}</html>"
+            for i in range(20)
+        }
+        pages["http://t.example/"] = f"<html>{links}{self.NAV_FORM}</html>"
+        self._serve(client, pages)
+        crawler.crawl("http://t.example/")
+        self.assertEqual(len(crawler.discovered_forms), 1)
+
+    def test_rotating_csrf_hidden_value_does_not_defeat_dedup(self):
+        """Anti-forgery hidden values rotate per page; keying on them
+        would reopen the budget exhaustion on the exact site-wide
+        CSRF-protected form the dedup exists for."""
+        crawler, client = self._crawler()
+
+        def csrf_form(token):
+            return (
+                '<form action="/search" method="post">'
+                f'<input type="hidden" name="csrf" value="{token}"/>'
+                '<input name="q"/></form>'
+            )
+
+        self._serve(client, {
+            "http://t.example/": (
+                f'<html><a href="/a">a</a>{csrf_form("tok-page-1")}</html>'
+            ),
+            "http://t.example/a": f"<html>{csrf_form('tok-page-2')}</html>",
+        })
+        crawler.crawl("http://t.example/")
+        self.assertEqual(len(crawler.discovered_forms), 1)
+
+    def test_same_action_different_shape_is_not_collapsed(self):
+        crawler, client = self._crawler()
+        self._serve(client, {
+            "http://t.example/": (
+                '<html><a href="/a">a</a>'
+                '<form action="/api" method="get">'
+                '<input name="q"/></form></html>'
+            ),
+            "http://t.example/a": (
+                '<html><form action="/api" method="post">'
+                '<input name="q"/></form>'
+                '<form action="/api" method="get">'
+                '<input name="filter"/></form></html>'
+            ),
+        })
+        crawler.crawl("http://t.example/")
+        self.assertEqual(len(crawler.discovered_forms), 3)
+
+
+class TestFormBudgetAppliesToDistinctForms(unittest.TestCase):
+    """Both directions of the Phase 6 form budget: it still caps the
+    number of DISTINCT forms fuzzed, and (with crawler dedup) a distinct
+    form is never displaced by duplicates of another."""
+
+    @staticmethod
+    def _form(i):
+        return {
+            "action": f"http://example.com/f{i}", "method": "POST",
+            "inputs": {"q": {"type": "text", "value": "x"}},
+            "page_url": "http://example.com/",
+        }
+
+    def _fuzzed_form_endpoints(self, forms):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            scanner.execution_policy = MagicMock()
+            scanner.fuzzer = MagicMock()
+            scanner.fuzzer.fuzz_parameter.return_value = []
+            scanner.fuzzer.payload_cache_stats = (0, 0)
+            crawl_data = {
+                "discovered_urls": [], "visited_urls": [],
+                "discovered_parameters": [], "discovered_forms": forms,
+            }
+            scanner._phase_injection(crawl_data)
+            return {
+                c.args[0]
+                for c in scanner.fuzzer.fuzz_parameter.call_args_list
+                if c.args[0].startswith("http://example.com/f")
+            }
+
+    def test_budget_caps_distinct_forms(self):
+        endpoints = self._fuzzed_form_endpoints(
+            [self._form(i) for i in range(7)],
+        )
+        self.assertEqual(len(endpoints), 5)
+
+    def test_all_distinct_forms_within_budget_are_fuzzed(self):
+        endpoints = self._fuzzed_form_endpoints(
+            [self._form(i) for i in range(3)],
+        )
+        self.assertEqual(
+            endpoints,
+            {f"http://example.com/f{i}" for i in range(3)},
+        )
+
+
 class TestFuzzerRequestShapes(unittest.TestCase):
     def test_post_fuzz_carries_sibling_form_fields(self):
         from packages.web.client import WebClient

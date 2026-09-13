@@ -1157,6 +1157,14 @@ class WebScanner:
                     seen_cells.add(cell)
                     cells.append(cell)
 
+        # Form budget trade-off (default 5) — applies to DISTINCT forms:
+        # the crawler dedupes by (action, method, field names), so a
+        # site-wide nav/search form repeated on every page consumes ONE
+        # slot, not all of them. Raising the cap fuzzes more distinct
+        # forms per run but each form costs fields x vuln-classes x
+        # payloads in live requests; lowering it starves multi-form
+        # sites — silent false negatives, the direction that pre-dedup
+        # duplicate exhaustion already demonstrated.
         forms = crawl_data.get("discovered_forms", [])[:self.max_fuzz_forms]
         logger.info(
             "Phase 6 budget: fuzzing %d URL(s), %d cell(s), %d form(s)",

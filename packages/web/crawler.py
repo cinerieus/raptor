@@ -44,6 +44,12 @@ class WebCrawler:
         self.visited_urls: set[str] = set()
         self.discovered_urls: set[str] = set()
         self.discovered_forms: list[dict] = []
+        # Shape keys of already-recorded forms. A site-wide nav/search/
+        # login form repeats on every crawled page; without dedup those
+        # byte-identical duplicates fill the scanner's fixed Phase 6
+        # form budget and every OTHER form on the site is silently
+        # never fuzzed.
+        self._seen_form_keys: set[tuple] = set()
         self.discovered_apis: list[dict] = []
         self.discovered_parameters: set[str] = set()
         # param name -> set of (unredacted) URLs whose query string
@@ -368,11 +374,28 @@ class WebCrawler:
                     if _queue is not None and absolute_url not in self.visited_urls:
                         _queue.append((absolute_url, depth + 1))
 
-            # Discover forms
+            # Discover forms — dedup by (action, method, field names,
+            # hidden-value fingerprint): the same form rendered on many
+            # pages is ONE fuzz target, but two forms distinguished only
+            # by hidden VALUES (mode=delete vs mode=upload) are distinct
+            # handlers and must both survive. Visible-field values stay
+            # out of the key (user-fillable variance must not defeat the
+            # dedup), and so do anti-forgery hidden values (csrf/nonce/
+            # state and secret-named fields rotate per page — keying on
+            # them would reopen the budget exhaustion on exactly the
+            # site-wide CSRF-protected form the dedup exists for).
             for form in soup.find_all("form"):
                 form_data = self._parse_form(form, url)
                 if form_data:
-                    self.discovered_forms.append(form_data)
+                    key = (
+                        form_data["action"],
+                        form_data["method"],
+                        tuple(sorted(form_data["inputs"])),
+                        self._hidden_value_fingerprint(form_data["inputs"]),
+                    )
+                    if key not in self._seen_form_keys:
+                        self._seen_form_keys.add(key)
+                        self.discovered_forms.append(form_data)
                     self.discovered_parameters.update(form_data["inputs"].keys())
 
             # Discover API endpoints from JavaScript
@@ -406,6 +429,28 @@ class WebCrawler:
                 "Error parsing JSON from %s: %s",
                 self._crawl_log_label(url), type(e).__name__
             )
+
+    def _hidden_value_fingerprint(
+        self, inputs: dict,
+    ) -> tuple[tuple[str, str], ...]:
+        """Sorted (name, value) pairs of the DISCRIMINATING hidden inputs.
+
+        Hidden values are the only place two same-shaped forms can
+        differ in what handler they reach (mode=delete vs mode=upload),
+        so they join the dedup key — except anti-forgery material
+        (csrf/nonce/state and secret-named fields, via the same
+        classifier the artifact redaction uses): those rotate per page
+        and would make every copy of a CSRF-protected form look unique.
+        """
+        pairs = []
+        for name, metadata in inputs.items():
+            meta = metadata if isinstance(metadata, dict) else {}
+            if str(meta.get("type", "")).strip().lower() != "hidden":
+                continue
+            if self._is_sensitive_form_input(name, meta):
+                continue
+            pairs.append((str(name), str(meta.get("value", ""))))
+        return tuple(sorted(pairs))
 
     def _parse_form(self, form_element, page_url: str) -> dict | None:
         """Parse HTML form to extract inputs and action."""
