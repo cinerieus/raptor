@@ -491,9 +491,32 @@ def run_rule(
             )
             errors = _parse_errors(proc.stderr)
 
-            files_examined = _collect_files_examined(
-                target, {m.file for m in matches}, tree_files=tree_files,
-            )
+            # Engine failure must never read as verified silence: a
+            # nonzero exit whose stderr matches none of the known
+            # error patterns (segfault, OCaml fatal-error variants,
+            # sandbox kill, a parametric rule's "No rules apply")
+            # previously yielded errors=[] and a full files_examined —
+            # coverage and refutation consumers then read the crashed
+            # sweep as examined-clean. Mirror the semgrep runner:
+            # synthesise an error from the returncode + stderr tail so
+            # every caller inherits the error-vs-refuted distinction.
+            if proc.returncode != 0 and not errors:
+                stderr_tail = (proc.stderr or "").strip()[-500:]
+                errors.append(
+                    f"spatch exited with code {proc.returncode}"
+                    + (f": {stderr_tail}" if stderr_tail else "")
+                )
+
+            # files_examined claims verified silence for every listed
+            # file; on a nonzero exit spatch may have died mid-tree, so
+            # nothing beyond the actual matches is verified. Partial
+            # matches are kept (same stance as the timeout path).
+            if proc.returncode == 0:
+                files_examined = _collect_files_examined(
+                    target, {m.file for m in matches}, tree_files=tree_files,
+                )
+            else:
+                files_examined = sorted({m.file for m in matches})
 
             return SpatchResult(
                 rule=rule_name,

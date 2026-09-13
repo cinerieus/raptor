@@ -1903,3 +1903,64 @@ class TestSpatchPathRealpath:
         # Cache invalidation hygiene for later tests.
         monkeypatch.setattr(runner_mod, "_spatch_resolved", False)
         monkeypatch.setattr(runner_mod, "_resolved_spatch", None)
+
+
+class TestNonzeroExitVisibility:
+    """Engine failure must never read as verified silence: a nonzero
+    spatch exit with unrecognised (or empty) stderr previously yielded
+    errors=[] and a full files_examined — coverage / refutation
+    consumers read the crashed sweep as examined-clean."""
+
+    def _run(self, tmp_path, *, returncode, stderr="", stdout=""):
+        rule = tmp_path / "test.cocci"
+        rule.write_text("@r@\nposition p;\n@@\nmalloc@p(...)\n")
+        target = tmp_path / "test.c"
+        target.write_text("void f() { void *p = malloc(10); }\n")
+
+        def mock_run(cmd, **kwargs):
+            proc = MagicMock()
+            proc.stdout = stdout
+            proc.stderr = stderr
+            proc.returncode = returncode
+            return proc
+
+        with patch("packages.coccinelle.runner.is_available",
+                   return_value=True), \
+             patch("packages.coccinelle.runner._sandboxed_run",
+                   side_effect=mock_run):
+            return run_rule(target, rule, env=dict(os.environ))
+
+    def test_nonzero_rc_with_quiet_stderr_synthesizes_error(self, tmp_path):
+        result = self._run(tmp_path, returncode=-11)
+        assert result.errors == ["spatch exited with code -11"]
+        assert result.ok is False
+
+    def test_nonzero_rc_stderr_tail_included(self, tmp_path):
+        result = self._run(
+            tmp_path, returncode=1, stderr="No rules apply.",
+        )
+        assert result.errors == [
+            "spatch exited with code 1: No rules apply.",
+        ]
+
+    def test_nonzero_rc_does_not_claim_files_examined(self, tmp_path):
+        # A crashed sweep verified nothing — the whole-tree
+        # files_examined claim must not survive a nonzero exit.
+        result = self._run(tmp_path, returncode=-9)
+        assert result.files_examined == []
+
+    def test_nonzero_rc_with_recognized_error_not_duplicated(self, tmp_path):
+        result = self._run(
+            tmp_path, returncode=2,
+            stderr="parse error: line 3 of the semantic patch",
+        )
+        assert len(result.errors) == 1
+        assert "parse error" in result.errors[0]
+        assert result.files_examined == []
+
+    def test_zero_rc_keeps_full_files_examined(self, tmp_path):
+        # Two-direction: a clean exit keeps the whole-tree claim.
+        result = self._run(tmp_path, returncode=0)
+        assert result.errors == []
+        assert result.files_examined  # the target file is listed
+        assert result.ok is True
