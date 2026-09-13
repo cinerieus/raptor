@@ -10,18 +10,23 @@ from core.analysis.guard_bypass import check_guard_coverage, query
 from core.analysis.cfg_conditions import extract_conditions_from_cfg
 from core.analysis.cfg_builder import build_python_cfg
 
-_ts_available = build_python_cfg("def f(): pass", "__probe__.py") is not None
-pytestmark = pytest.mark.skipif(not _ts_available, reason="tree-sitter-python not installed")
+# build_python_cfg(source, function_name) is stdlib-ast based; the
+# probe builds a trivial function BY NAME. (A previous probe passed a
+# filename as the function name, so it always returned None and this
+# whole module skipped forever under a wrong reason.)
+_cfg_available = build_python_cfg("def f(): pass", "f") is not None
+pytestmark = pytest.mark.skipif(
+    not _cfg_available, reason="Python CFG builder unavailable",
+)
 
 
 def _build(source: str, func_name: str = "f"):
-    """Build a PythonCFG from inline source."""
+    """Build a PythonCFG for one function from inline source."""
     source = textwrap.dedent(source).strip()
-    cfgs = build_python_cfg(source, "test.py")
-    for cfg in cfgs:
-        if cfg.function_name == func_name:
-            return cfg
-    raise ValueError(f"function {func_name!r} not found in {[c.function_name for c in cfgs]}")
+    cfg = build_python_cfg(source, func_name)
+    if cfg is None:
+        raise ValueError(f"function {func_name!r} not found in source")
+    return cfg
 
 
 class TestExtractConditionsFromRealCFG:
