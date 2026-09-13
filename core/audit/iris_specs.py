@@ -321,8 +321,13 @@ def _escape_scala(name: str) -> str:
 
     The result is embedded in a Scala double-quoted string literal,
     so we must escape both regex metacharacters AND Scala string
-    characters (backslash and double-quote).
+    characters (backslash and double-quote). Control characters are
+    stripped first (mirroring _escape_codeql): re.escape keeps a raw
+    newline as-is, which would break the single-line Scala literal —
+    one malformed LLM-derived spec name then kills the whole generated
+    Joern config compile.
     """
+    name = name.replace("\n", "").replace("\r", "").replace("\0", "")
     escaped = re.escape(name)
     return escaped.replace("\\", "\\\\").replace('"', '\\"')
 

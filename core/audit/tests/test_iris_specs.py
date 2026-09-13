@@ -282,3 +282,21 @@ class TestSpecsFromJsonShape:
         assert len(specs) == 1
         assert specs[0].function == "f"
         assert specs[0].return_tainted is True
+
+
+class TestEscapeScalaControlChars:
+    def test_control_chars_stripped(self):
+        out = _escape_scala("bad\nname\r\0")
+        assert "\n" not in out
+        assert "\r" not in out
+        assert "\0" not in out
+        assert out == "badname"
+
+    def test_newline_name_keeps_config_single_line_literals(self):
+        spec = TaintSpec(
+            function="evil\nname", file="io.c", role="source",
+        )
+        config = compile_joern_config([spec])
+        for line in config.splitlines():
+            if "projectSources" in line:
+                assert line.count('"') % 2 == 0
