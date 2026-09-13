@@ -210,7 +210,12 @@ def merge_assumptions(
 ) -> list[SafetyAssumption]:
     """Merge new assumptions into existing, dedup by key.
 
-    Higher evidence tier wins.  If equal, new wins (fresher).
+    Higher evidence tier wins.  If equal, new wins (fresher) — unless
+    the existing assumption is operator-confirmed
+    (``source == "operator_confirmed"``), which stays sticky on
+    equal-tier merges. Same tie-break as ``store.merge_specs``: a
+    fresh same-tier LLM row must not silently replace an operator-era
+    one and launder away its ``source`` provenance.
     """
     from core.evidence import stronger
 
@@ -225,7 +230,10 @@ def merge_assumptions(
             by_key[key] = a
         else:
             winner_tier = stronger(old.evidence_tier, a.evidence_tier)
-            if winner_tier != old.evidence_tier or winner_tier == a.evidence_tier:
+            if winner_tier != old.evidence_tier or (
+                winner_tier == a.evidence_tier
+                and old.source != "operator_confirmed"
+            ):
                 by_key[key] = a
     return list(by_key.values())
 

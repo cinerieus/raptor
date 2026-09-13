@@ -176,6 +176,28 @@ class TestMergeAssumptions:
         assert len(merged) == 1
         assert merged[0].confidence == 0.9
 
+    def test_equal_tier_operator_confirmed_sticky(self):
+        """Same tie-break as merge_specs: a fresh same-tier LLM row
+        must not replace an operator-era assumption and launder away
+        its source provenance."""
+        old = _make_assumption(confidence=0.3)
+        old.source = "operator_confirmed"
+        new = _make_assumption(confidence=0.9)
+        merged = merge_assumptions([old], [new])
+        assert len(merged) == 1
+        assert merged[0].source == "operator_confirmed"
+        assert merged[0].confidence == 0.3
+
+    def test_stronger_tier_replaces_operator_confirmed(self):
+        """Stickiness is a tie-break only — a strictly stronger tier
+        still wins (mirrors merge_specs)."""
+        old = _make_assumption(evidence_tier=EvidenceTier.HEURISTIC)
+        old.source = "operator_confirmed"
+        new = _make_assumption(evidence_tier=EvidenceTier.XREF_BACKED)
+        merged = merge_assumptions([old], [new])
+        assert len(merged) == 1
+        assert merged[0].evidence_tier == EvidenceTier.XREF_BACKED
+
 
 class TestEvictStale:
     def test_keeps_current_files(self):
