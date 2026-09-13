@@ -741,11 +741,20 @@ class ModelScorecard:
         """
         with self._with_lock(write=False) as data:
             cell = self._read_cell(data, model, decision_class)
+            # Capture the integrity verdict INSIDE the lock scope:
+            # ``_last_read_trusted`` is instance state overwritten by
+            # every read's ``_check_integrity``, so another thread's
+            # read landing between our lock release and the check
+            # below could flip it in either direction — granting
+            # trust from an unverifiable read, or clamping a
+            # verifiable one. The flock serialises reads, so inside
+            # the scope the flag is exactly THIS read's verdict.
+            trusted = self._last_read_trusted
         if cell is None:
             return Policy.LEARNING
 
         override = cell.get("policy_override", "auto")
-        if not self._last_read_trusted:
+        if not trusted:
             # Key-unusable clamp (see integrity module): the sidecar
             # can't be verified, so nothing in it may grant trust. A
             # force_fall_through pin is still honoured — more

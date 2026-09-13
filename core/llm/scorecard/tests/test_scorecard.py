@@ -1270,3 +1270,44 @@ def test_reset_full_still_removes_timestampless_cells(tmp_path):
 
     assert sc.reset(all_=True) == 1
     assert sc.get_stats() == []
+
+
+def test_short_circuit_uses_own_reads_trust_verdict(tmp_path, monkeypatch):
+    """The key-unusable clamp must act on THIS read's integrity
+    verdict. ``_last_read_trusted`` is instance state overwritten by
+    every read, so a concurrent thread's read landing between the lock
+    release and the policy check could flip it — pre-fix, a
+    force_short_circuit pin on an unverifiable sidecar could win.
+    Simulate the interleaving by flipping the flag right after the
+    lock scope exits; the captured in-lock verdict must still clamp."""
+    import contextlib
+    import os
+
+    sc_path = tmp_path / "sc.json"
+    sc = ModelScorecard(sc_path)
+    sc.record_event("dc", "m1", "cheap_short_circuit", "correct")
+    sc.set_policy_override("dc", "m1", "force_short_circuit")
+
+    # Make the key unusable (symlinked key files are refused), so the
+    # next read keeps the content but cannot verify it.
+    from core.llm.scorecard import integrity
+    key_path = integrity._key_path()
+    real = tmp_path / "elsewhere.key"
+    real.write_bytes(key_path.read_bytes())
+    os.unlink(key_path)
+    key_path.symlink_to(real)
+    assert not integrity.key_usable()
+
+    reader = ModelScorecard(sc_path)
+    orig_with_lock = reader._with_lock
+
+    @contextlib.contextmanager
+    def racing_with_lock(**kwargs):
+        with orig_with_lock(**kwargs) as data:
+            yield data
+        # Another thread's trusted read lands immediately after our
+        # lock release, overwriting the shared instance flag.
+        reader._last_read_trusted = True
+
+    monkeypatch.setattr(reader, "_with_lock", racing_with_lock)
+    assert reader.should_short_circuit("dc", "m1") == Policy.LEARNING
