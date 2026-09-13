@@ -810,6 +810,23 @@ class ProjectManager:
             )
             raise ValueError(msg)
 
+    def _output_dir_claim_lock(self, output_dir: str | Path):
+        """Cross-NAME serialisation of an output-dir claim.
+
+        Keyed by the RESOLVED output dir (hashed into a dot-file in the
+        registry dir, invisible to the ``*.json`` listing glob), so two
+        creates of different names contending for one directory
+        serialise regardless of which registry files they hold. Same
+        flock idiom and fail direction as :func:`project_file_lock`.
+        """
+        import hashlib
+        try:
+            key = str(Path(output_dir).resolve())
+        except OSError:
+            key = str(output_dir)
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        return project_file_lock(self.projects_dir / f".outdir-{digest}")
+
     def _output_dir_owner(self, output_dir: str | Path,
                           exclude: str | None = None) -> str | None:
         """Name of the registered project already claiming *output_dir*
@@ -856,29 +873,35 @@ class ProjectManager:
         """
         self._validate_name(name)
         project_file = self.projects_dir / f"{name}.json"
+        # Registry-file serialisation for the exists-check + save
+        # window (every other registry mutator holds this lock): the
+        # CLI op lock keys on the OUTPUT dir, so two creates with
+        # different --output-dir (or a create racing import_project's
+        # mgr.create) don't serialise there — both passed the exists
+        # check, both reported success, and the loser's target/
+        # description was silently last-writer-overwritten while its
+        # output dir was left orphaned. create is registry-keyed, so
+        # lock the registry file.
+        with project_file_lock(project_file):
+            return self._create_locked(
+                name=name, project_file=project_file, target=target,
+                description=description, output_dir=output_dir,
+                resolve_target=resolve_target, created=created,
+                binaries=binaries,
+            )
+
+    def _create_locked(self, *, name: str, project_file: Path,
+                       target: str, description: str,
+                       output_dir: str | None, resolve_target: bool,
+                       created: str | None,
+                       binaries: list[str] | None) -> Project:
+        """Body of :meth:`create`; caller holds the registry-file lock."""
         if project_file.exists():
             msg = f"Project '{name}' already exists"
             raise ValueError(msg)
 
         if not output_dir:
             output_dir = str((DEFAULT_OUTPUT_BASE / name).resolve())
-
-        # Two projects must never share one output dir: status/findings
-        # would interleave, and `/project clean` or `delete --purge` on
-        # one would destroy the other's runs (the purge containment
-        # check passes — the dir is under the base). Reachable via
-        # explicit --output-dir, and historically via rename A→B then
-        # create A (both defaulted to <base>/A). Fail closed.
-        owner = self._output_dir_owner(output_dir)
-        if owner:
-            msg = (
-                f"Output directory {output_dir} already belongs to "
-                f"project '{owner}' — two projects must never share an "
-                f"output directory (clean/purge on one would delete the "
-                f"other's runs). Pass --output-dir to pick a different "
-                f"directory."
-            )
-            raise ValueError(msg)
 
         resolved_binaries: list[str] = []
         for b in (binaries or []):
@@ -905,8 +928,33 @@ class ProjectManager:
             binaries=resolved_binaries,
         )
 
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        save_json(project_file, project.to_dict())
+        # Two projects must never share one output dir: status/findings
+        # would interleave, and `/project clean` or `delete --purge` on
+        # one would destroy the other's runs (the purge containment
+        # check passes — the dir is under the base). Reachable via
+        # explicit --output-dir, and historically via rename A→B then
+        # create A (both defaulted to <base>/A). Fail closed.
+        #
+        # The claim check + save hold a lock keyed by the RESOLVED
+        # output dir: the registry-file lock the caller holds is
+        # per-NAME, so two concurrent creates of DIFFERENT names with
+        # the same --output-dir would both pass an unlocked owner scan
+        # and mint exactly the forbidden shared-dir state. Lock order
+        # is always name lock (caller) then dir claim — no inversion.
+        with self._output_dir_claim_lock(output_dir):
+            owner = self._output_dir_owner(output_dir)
+            if owner:
+                msg = (
+                    f"Output directory {output_dir} already belongs to "
+                    f"project '{owner}' — two projects must never share "
+                    f"an output directory (clean/purge on one would "
+                    f"delete the other's runs). Pass --output-dir to "
+                    f"pick a different directory."
+                )
+                raise ValueError(msg)
+
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            save_json(project_file, project.to_dict())
         logger.info("Created project '%s' → %s", name, output_dir)
         return project
 

@@ -412,11 +412,106 @@ class TestProjectManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mgr.create("old", self.target_other)
 
+    def test_create_holds_registry_lock_across_exists_check(self):
+        """create() serialises on the registry file: a competing
+        create that wins the lock first must make ours fail the
+        exists check (no silent last-writer-wins)."""
+        import contextlib as _ctx
+        from unittest.mock import patch as _patch
+
+        from core.project import project as project_mod
+
+        real_lock = project_mod.project_file_lock
+
+        @_ctx.contextmanager
+        def racing_lock(project_file):
+            with real_lock(project_file):
+                # Simulate the competing create committing while we
+                # hold (i.e. before we re-check existence).
+                if not project_file.exists():
+                    project_file.write_text("{}")
+                yield
+
+        with _patch.object(project_mod, "project_file_lock",
+                           racing_lock), \
+                self.assertRaises(ValueError):
+            self.mgr.create("raced", self.target_code)
+
     def test_create_refuses_claimed_output_dir(self):
         shared = str(Path(self.tmpdir.name) / "shared-out")
         self.mgr.create("a", self.target_a, output_dir=shared)
         with self.assertRaises(ValueError):
             self.mgr.create("b", self.target_b, output_dir=shared)
+
+    def test_create_owner_scan_runs_inside_the_dir_claim(self):
+        """The shared-dir owner scan must run INSIDE the output-dir
+        claim lock: the name lock is per-NAME, so a competing create of
+        a DIFFERENT name with the same dir that wins the claim first
+        must be visible to our re-scan."""
+        import contextlib as _ctx
+        from unittest.mock import patch as _patch
+
+        from core.json import save_json
+
+        shared = str(Path(self.tmpdir.name) / "shared-race")
+        real_claim = self.mgr._output_dir_claim_lock
+
+        @_ctx.contextmanager
+        def racing_claim(output_dir):
+            with real_claim(output_dir):
+                # Simulate the competing create (different name, same
+                # dir) having committed while holding the claim.
+                winner = self.mgr.projects_dir / "winner.json"
+                if not winner.exists():
+                    save_json(winner, {
+                        "name": "winner", "target": self.target_a,
+                        "output_dir": str(Path(shared).resolve()),
+                        "created": "2026-01-01T00:00:00+00:00",
+                    })
+                yield
+
+        with _patch.object(self.mgr, "_output_dir_claim_lock",
+                           racing_claim), \
+                self.assertRaises(ValueError):
+            self.mgr.create("loser", self.target_b, output_dir=shared)
+
+    def test_concurrent_creates_different_names_never_share_a_dir(self):
+        """Reviewer repro: two concurrent creates of DIFFERENT names
+        with the same --output-dir must never both succeed (the
+        per-name registry lock alone does not serialise them)."""
+        import threading
+
+        for round_no in range(10):
+            shared = str(Path(self.tmpdir.name) / f"race-{round_no}")
+            barrier = threading.Barrier(2)
+            results: dict[str, str] = {}
+
+            def worker(name: str, shared=shared, barrier=barrier,
+                       results=results) -> None:
+                barrier.wait()
+                try:
+                    self.mgr.create(name, self.target_a,
+                                    output_dir=shared)
+                    results[name] = "ok"
+                except ValueError:
+                    results[name] = "refused"
+
+            names = (f"racer-a-{round_no}", f"racer-b-{round_no}")
+            threads = [threading.Thread(target=worker, args=(n,))
+                       for n in names]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            oks = [n for n in names if results.get(n) == "ok"]
+            self.assertEqual(
+                len(oks), 1,
+                f"round {round_no}: exactly one create may win a "
+                f"shared dir, got {results}")
+            owners = [p.name for p in self.mgr.list_projects()
+                      if str(Path(p.output_dir).resolve())
+                      == str(Path(shared).resolve())]
+            self.assertEqual(owners, oks)
 
     def test_delete_clears_active_symlink(self):
         self.mgr.create("myapp", self.target_code)
