@@ -30,6 +30,7 @@ from packages.llm_analysis.orchestrator import (  # noqa: E402
     _cc_fallback_role_resolution,
     _classify_absent_consensus,
     _merge_results,
+    _panel_summary_parts,
 )
 from packages.llm_analysis.tasks import AnalysisTask  # noqa: E402
 
@@ -159,3 +160,19 @@ class TestCapFindings:
         findings = [{"finding_id": "f0"}]
         assert _cap_findings(findings, 0) is findings
         assert "status" not in findings[0]
+
+
+class TestPanelSummaryParts:
+    """The agreed/disputed counts must partition panels that ran —
+    all-abstain panels resolve to "no-verdict" and the printed line
+    silently undercounted them."""
+
+    def test_no_verdict_panels_are_counted(self):
+        assert _panel_summary_parts(2, 1, 3) == [
+            "2 agreed", "1 disputed", "3 no-verdict",
+        ]
+
+    def test_zero_counts_are_omitted(self):
+        assert _panel_summary_parts(2, 0, 0) == ["2 agreed"]
+        assert _panel_summary_parts(0, 0, 1) == ["1 no-verdict"]
+        assert _panel_summary_parts(0, 0, 0) == []

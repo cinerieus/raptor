@@ -236,6 +236,24 @@ def _classify_absent_consensus(
     return True, False
 
 
+def _panel_summary_parts(
+    agreed: int, disputed: int, no_verdict: int,
+) -> list[str]:
+    """Human-readable parts for a review-panel (consensus / judge)
+    summary line. The three counts partition panels that RAN: an
+    all-abstain panel resolves to "no-verdict" — neither agreed nor
+    disputed — and omitting it made the printed line silently
+    undercount panels that ran. Zero counts stay off the line."""
+    parts: list[str] = []
+    if agreed:
+        parts.append(f"{agreed} agreed")
+    if disputed:
+        parts.append(f"{disputed} disputed")
+    if no_verdict:
+        parts.append(f"{no_verdict} no-verdict")
+    return parts
+
+
 def _cap_findings(findings: list, max_findings: int) -> list:
     """Apply the max_findings cap, stamping the dropped tail with
     ``skipped_over_budget`` at skip time. The dicts are the prep
@@ -1723,10 +1741,14 @@ def orchestrate(
                            if r.get("consensus") == "agreed")
     consensus_disputes = sum(1 for r in per_finding_results
                              if r.get("consensus") == "disputed")
+    consensus_no_verdict = sum(1 for r in per_finding_results
+                               if r.get("consensus") == "no-verdict")
     judge_agreed = sum(1 for r in per_finding_results
                        if r.get("judge") == "agreed")
     judge_disputes = sum(1 for r in per_finding_results
                          if r.get("judge") == "disputed")
+    judge_no_verdict = sum(1 for r in per_finding_results
+                           if r.get("judge") == "no-verdict")
     cross_family_checked = sum(1 for r in per_finding_results
                                if r.get("cross_family_check"))
     cross_family_disputes = sum(1 for r in per_finding_results
@@ -1748,6 +1770,7 @@ def orchestrate(
         "consensus_models": [m.model_name for m in consensus_models],
         "consensus_agreed": consensus_agreed,
         "consensus_disputes": consensus_disputes,
+        "consensus_no_verdict": consensus_no_verdict,
         "consensus_budget_skipped": consensus_budget_skipped,
         # New: distinguish "budget capped before any LLM calls"
         # from "calls made but all errored". Operators reading the
@@ -1757,6 +1780,7 @@ def orchestrate(
         "judge_models": [m.model_name for m in judge_models],
         "judge_agreed": judge_agreed,
         "judge_disputes": judge_disputes,
+        "judge_no_verdict": judge_no_verdict,
         "aggregate_models": [m.model_name for m in aggregate_models],
         "aggregated": aggregation is not None,
         "calibrated_aggregation": calibrated_summary,
@@ -1835,21 +1859,15 @@ def orchestrate(
     thinking = cost_summary.get("thinking_tokens", 0)
     if thinking > 0:
         print(f"  Thinking tokens: {thinking:,}")
-    if consensus_agreed or consensus_disputes:
-        cn_parts = []
-        if consensus_agreed:
-            cn_parts.append(f"{consensus_agreed} agreed")
-        if consensus_disputes:
-            cn_parts.append(f"{consensus_disputes} disputed")
+    cn_parts = _panel_summary_parts(
+        consensus_agreed, consensus_disputes, consensus_no_verdict)
+    if cn_parts:
         print(f"  Consensus: {', '.join(cn_parts)}")
     elif consensus_budget_skipped:
         print(f"  Consensus: skipped (budget > {int(ConsensusTask.budget_cutoff * 100)}%)")
-    if judge_agreed or judge_disputes:
-        jg_parts = []
-        if judge_agreed:
-            jg_parts.append(f"{judge_agreed} agreed")
-        if judge_disputes:
-            jg_parts.append(f"{judge_disputes} disputed")
+    jg_parts = _panel_summary_parts(
+        judge_agreed, judge_disputes, judge_no_verdict)
+    if jg_parts:
         print(f"  Judge: {', '.join(jg_parts)}")
     if aggregation:
         aggregate_by = aggregation.get("analysed_by")
