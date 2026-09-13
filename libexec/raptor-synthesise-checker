@@ -151,22 +151,17 @@ def main() -> int:
     client = LLMClient()
 
     # Self-serve the in-process LLM dispatcher for dispatcher-only
-    # providers (Bedrock) — same gate as raptor-compile-invariants /
-    # raptor-study-run / raptor-llm-ask. Without a route every LLM
-    # call fails, and llm_callable's broad except would silently turn
-    # that transport misconfiguration into "no rule passed positive
-    # control". No-op when a route exists or none is needed.
+    # providers (Bedrock) — the shared gate never raises. Without a
+    # route every LLM call fails, and llm_callable's broad except
+    # would silently turn that transport misconfiguration into "no
+    # rule passed positive control". No-op when a route exists or
+    # none is needed.
     try:
-        from core.llm.dispatcher.lifecycle import (
-            ensure_route_for_model_configs,
-        )
-        configs = [getattr(client.config, "primary_model", None)]
-        configs += list(getattr(client.config, "fallback_models", []) or [])
-        ensure_route_for_model_configs(
-            configs, label="raptor-synthesise-checker",
-        )
-    except Exception:  # noqa: BLE001 — provider errors surface at call time
+        from core.llm.dispatcher.lifecycle import ensure_route_for_client
+    except ImportError:  # no dispatcher machinery, no route to serve
         pass
+    else:
+        ensure_route_for_client(client, "raptor-synthesise-checker")
 
     def llm_callable(prompt, schema, system_prompt):
         try:

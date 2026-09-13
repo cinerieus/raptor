@@ -23,7 +23,7 @@ from core.run.tmp_ownership import sweep_dead_owner_dirs
 
 from .auth import CredentialStore, seed_from_config
 from .server import LLMDispatcher
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -222,3 +222,28 @@ def ensure_route_for_model_configs(
     ):
         return None
     return ensure_inprocess_dispatcher_env(label=label, run_dir=run_dir)
+
+
+def ensure_route_for_client(client: Any, label: str) -> None:
+    """Self-serve the in-process dispatcher for a client's resolved
+    models (primary + fallbacks), by *label*.
+
+    The one implementation of the bootstrap every standalone
+    LLM-calling CLI used to open-code: pipeline runs inherit a
+    dispatcher from their parent, but a standalone CLI is its own
+    parent — without this every Bedrock-routed call dies with
+    "requires the RAPTOR LLM dispatcher". No-op when a route exists
+    or none is needed (same gates as
+    :func:`ensure_route_for_model_configs`).
+
+    Never raises: callers treat bring-up as fire-and-forget —
+    provider/transport errors surface at call time on the LLM call
+    itself, and an oddly-shaped client config must not abort a CLI
+    that may never route a dispatcher-only model.
+    """
+    try:
+        configs = [getattr(client.config, "primary_model", None)]
+        configs += list(getattr(client.config, "fallback_models", []) or [])
+        ensure_route_for_model_configs(configs, label=label)
+    except Exception:  # noqa: BLE001 — provider errors surface at call time
+        pass
