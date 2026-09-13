@@ -516,7 +516,7 @@ def walk(
     db_path: Path, results_db: Path, *,
     cwes: Sequence[str] = INJECTION_CWES,
     languages=("Python", "JavaScript", "TypeScript"),
-    work_dir: Path = Path("/data/corpus/clones/walk"),
+    work_dir: Path,
     codeql_bin: str = DEFAULT_CODEQL_BIN,
     limit: int | None = None,
     fetch_timeout: int = 150,
@@ -584,7 +584,7 @@ def walk(
 
 def promote_misses(
     results_db: Path, *,
-    work_dir: Path = Path("/data/corpus/clones/promote"),
+    work_dir: Path,
     codeql_bin: str = DEFAULT_CODEQL_BIN,
     promote_languages: Sequence[str] = ("Java",),
     build_timeout: int = 600,
@@ -647,9 +647,12 @@ def main(argv=None) -> None:
     import argparse
 
     ap = argparse.ArgumentParser(description="Walk CVEfixes pairs through CodeQL, harvest yielders.")
-    ap.add_argument("--db", type=Path, default=Path("/data/corpus/cvefixes-meta.db"))
-    ap.add_argument("--results", type=Path, default=Path("/data/corpus/walk-results.db"))
-    ap.add_argument("--work-dir", type=Path, default=Path("/data/corpus/clones/walk"))
+    # Required: these used to default to one specific corpus host's
+    # /data/corpus layout — a machine detail that doesn't belong in the
+    # repo and misdirected every other host.
+    ap.add_argument("--db", type=Path, required=True)
+    ap.add_argument("--results", type=Path, required=True)
+    ap.add_argument("--work-dir", type=Path, required=True)
     ap.add_argument("--languages", nargs="+", default=["Python", "JavaScript", "TypeScript"])
     ap.add_argument("--cwes", nargs="+", default=list(INJECTION_CWES))
     ap.add_argument("--codeql-bin", default=DEFAULT_CODEQL_BIN)

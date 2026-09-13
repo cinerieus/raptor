@@ -701,3 +701,29 @@ def test_fetch_pair_functional_outputs_unchanged(monkeypatch, tmp_path: Path):
     assert (dest / "a.py").read_text() == "x = 1\n"
     assert cvefix_walk._run_git(["-C", str(dest), "checkout", "-q", fix], 30)
     assert (dest / "a.py").read_text() == "x = 2\n"
+
+
+class TestNoMachineSpecificDefaults:
+    """The corpus CLIs must not carry one host's /data/corpus layout
+    as repo defaults — paths are required, refused loudly if absent."""
+
+    def test_walk_cli_requires_paths(self, capsys):
+        import pytest as _pytest
+
+        from core.dataflow import cvefix_walk
+
+        with _pytest.raises(SystemExit) as exc:
+            cvefix_walk.main([])
+        assert exc.value.code == 2
+        assert "required" in capsys.readouterr().err
+
+    def test_no_data_corpus_literals(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("cvefix_walk.py", "cvefix_bridge.py",
+                     "trust_corpus_report.py"):
+            src = (root / name).read_text(encoding="utf-8")
+            for line in src.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                assert "/data/corpus" not in line, (name, line)

@@ -592,8 +592,8 @@ def _aggregate(syn: sqlite3.Connection) -> tuple[CorpusSynthReport, dict]:
 
 def synthesize_from_results(
     results_db: Path, *,
-    synth_db: Path = Path("/data/corpus/synth-results.db"),
-    work_dir: Path = Path("/data/corpus/clones/bridge"),
+    synth_db: Path,
+    work_dir: Path,
     proposer=None,
     model: str | None = None,
     tier1b_model: str | None = None,
@@ -683,9 +683,12 @@ def main(argv=None) -> None:
 
 
     ap = argparse.ArgumentParser(description="Synthesize barriers over walker FP-candidates.")
-    ap.add_argument("--results", type=Path, default=Path("/data/corpus/walk-results.db"))
-    ap.add_argument("--synth-db", type=Path, default=Path("/data/corpus/synth-results.db"))
-    ap.add_argument("--work-dir", type=Path, default=Path("/data/corpus/clones/bridge"))
+    # Required: these used to default to one specific corpus host's
+    # /data/corpus layout — a machine detail that doesn't belong in the
+    # repo and misdirected every other host.
+    ap.add_argument("--results", type=Path, required=True)
+    ap.add_argument("--synth-db", type=Path, required=True)
+    ap.add_argument("--work-dir", type=Path, required=True)
     ap.add_argument("--search-path", default=None,
                     help="codeql query-pack search path (default: ~/.local/codeql-queries)")
     ap.add_argument("--model", default=None,
