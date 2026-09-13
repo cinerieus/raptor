@@ -89,10 +89,12 @@ def hash_file(path: str | Path | None) -> str | None:
     if not path:
         return None
     try:
-        data = Path(path).read_bytes()
+        # Streaming hash — never buffers the whole file (memoised
+        # inputs can be large expanded-TU artifacts).
+        from core.hash import sha256_file
+        return sha256_file(Path(path))
     except OSError:
         return None
-    return hashlib.sha256(data).hexdigest()
 
 
 class SweepMemo:
