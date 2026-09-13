@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from core.audit.evidence_grade import (
@@ -215,7 +216,11 @@ class TestGradeReviewResult:
         })
         assert any(e.source == EvidenceSource.LLM_SPEC for e in items)
 
-    def test_typestate_confirmed(self):
+    def test_typestate_confirmed_without_context_is_llm_inferred(self):
+        # ``typestate_violation`` is parsed model JSON. Without the
+        # pipeline confirming typestate context was injected for this
+        # function, a fabricated ``confirmed: true`` must not mint a
+        # ``mechanical:`` namespace item nor HIGH confidence.
         items = grade_review_result({
             "typestate_violation": {
                 "confirmed": True,
@@ -223,9 +228,50 @@ class TestGradeReviewResult:
                 "type_name": "malloc/free",
             },
         })
-        ts = [e for e in items if e.source == EvidenceSource.TYPESTATE]
+        assert not any(e.source == EvidenceSource.TYPESTATE for e in items)
+        assert not any(e.confidence == Confidence.HIGH for e in items)
+        ts = [e for e in items if "double_free" in e.description]
         assert len(ts) == 1
-        assert ts[0].confidence == Confidence.HIGH
+        assert ts[0].source == EvidenceSource.LLM_INFERRED
+
+    def test_typestate_confirmed_with_matching_context_corroborated(self):
+        ctx = [SimpleNamespace(
+            type_name="malloc/free", violation_kind="double_free",
+        )]
+        items = grade_review_result(
+            {
+                "typestate_violation": {
+                    "confirmed": True,
+                    "violation_kind": "double_free",
+                    "type_name": "malloc/free",
+                },
+            },
+            typestate_context=ctx,
+        )
+        ts = [e for e in items if "double_free" in e.description]
+        assert len(ts) == 1
+        assert ts[0].source == EvidenceSource.LLM_CORROBORATED
+        assert ts[0].confidence == Confidence.MEDIUM
+
+    def test_typestate_confirmed_type_mismatch_not_corroborated(self):
+        # Context was injected, but for a DIFFERENT resource type than
+        # the model's claim names — no corroboration.
+        ctx = [SimpleNamespace(
+            type_name="fopen/fclose", violation_kind="missing_cleanup",
+        )]
+        items = grade_review_result(
+            {
+                "typestate_violation": {
+                    "confirmed": True,
+                    "violation_kind": "double_free",
+                    "type_name": "malloc/free",
+                },
+            },
+            typestate_context=ctx,
+        )
+        ts = [e for e in items if "double_free" in e.description]
+        assert len(ts) == 1
+        assert ts[0].source == EvidenceSource.LLM_INFERRED
 
     def test_typestate_unconfirmed_skipped(self):
         items = grade_review_result({

@@ -2610,6 +2610,17 @@ def review_one_function(
             )
             if ts_violations:
                 ctx["typestate_violations"] = ts_violations
+                # Mirror the negative_space recording above: the
+                # export layer grades the model's typestate_violation
+                # claim as corroborated only when the pipeline can
+                # attest typestate context was injected for this
+                # function.
+                _ts_key = f"{gap.get('file', '')}:{gap.get('name', '')}"
+                if _ts_key in evidence_index:
+                    with shared._evidence_lock:
+                        evidence_index[_ts_key].typestate_violations = (
+                            ts_violations
+                        )
         except Exception:
             logger.debug(
                 "typestate check failed for %s:%s",

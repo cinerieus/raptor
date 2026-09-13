@@ -41,6 +41,7 @@ class FakeEvidenceRecord:
     semgrep_hits: list[Any] = field(default_factory=list)
     negative_space: list[Any] = field(default_factory=list)
     binary_sink_edges: list[Any] = field(default_factory=list)
+    typestate_violations: list[Any] = field(default_factory=list)
 
 
 class TestBuildGradedFinding:
@@ -162,6 +163,55 @@ class TestBuildGradedFinding:
         )
         finding = build_graded_finding(outcome)
         assert finding["typestate_violation"]["violation_kind"] == "double_free"
+
+    def test_fabricated_typestate_claim_not_high_confidence(self):
+        """A model-authored ``typestate_violation.confirmed`` with no
+        pipeline-injected typestate context must not export
+        confidence=high on an llm_only finding, and must not earn a
+        ``mechanical:`` namespace item at HIGH."""
+        outcome = FakeOutcome(
+            review_result={
+                "hypothesis": "double free of conn",
+                "typestate_violation": {
+                    "violation_kind": "double_free",
+                    "type_name": "malloc/free",
+                    "confirmed": True,
+                },
+            },
+        )
+        finding = build_graded_finding(outcome)
+        assert finding["confidence"] != "high"
+        for e in finding["evidence_chain"]:
+            assert not (
+                e["source"].startswith("mechanical:")
+                and e["confidence"] == "high"
+            )
+
+    def test_typestate_claim_with_injected_context_caps_at_medium(self):
+        """With genuine pipeline typestate context for the function,
+        the model's confirmation grades LLM-corroborated (medium) —
+        never the mechanical HIGH tier."""
+        from types import SimpleNamespace
+
+        outcome = FakeOutcome(
+            review_result={
+                "hypothesis": "double free of conn",
+                "typestate_violation": {
+                    "violation_kind": "double_free",
+                    "type_name": "malloc/free",
+                    "confirmed": True,
+                },
+            },
+        )
+        ev = FakeEvidenceRecord(
+            typestate_violations=[SimpleNamespace(
+                type_name="malloc/free", violation_kind="double_free",
+            )],
+        )
+        finding = build_graded_finding(outcome, ev)
+        assert finding["confidence"] == "medium"
+        sources = {e["source"] for e in finding["evidence_chain"]}
+        assert "llm:corroborated" in sources
 
     def test_dynamic_evidence_tool(self):
         outcome = FakeOutcome(

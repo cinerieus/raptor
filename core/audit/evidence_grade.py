@@ -865,11 +865,26 @@ def grade_evidence_record(record: Any) -> list[GradedEvidence]:
     return items
 
 
+def _typestate_type_name(violation: Any) -> str:
+    """``type_name`` of a pipeline typestate violation (object or
+    journaled dict form), stripped; empty when absent."""
+    if isinstance(violation, dict):
+        return str(violation.get("type_name") or "").strip()
+    return str(getattr(violation, "type_name", "") or "").strip()
+
+
 def grade_review_result(
     review_result: dict[str, Any] | None,
     evidence_tool: str = "",
+    typestate_context: list[Any] | None = None,
 ) -> list[GradedEvidence]:
-    """Extract graded evidence from an LLM review result."""
+    """Extract graded evidence from an LLM review result.
+
+    ``typestate_context`` is the pipeline's own record of the
+    typestate violations it injected into the review prompt for this
+    function (``ctx["typestate_violations"]``) — the corroboration
+    gate for the model's ``typestate_violation`` claim below.
+    """
     items: list[GradedEvidence] = []
 
     rr = review_result or {}
@@ -890,10 +905,30 @@ def grade_review_result(
 
     ts_viol = rr.get("typestate_violation")
     if ts_viol and ts_viol.get("confirmed"):
+        # ``typestate_violation`` is parsed model JSON — a claim, not
+        # the mechanical typestate checker's output. Grading it
+        # ``mechanical:typestate`` at HIGH let a fabricated
+        # ``{"confirmed": true}`` mint mechanical-tier evidence the
+        # export firewall trusts (same class as the context-map-sink
+        # demotion in ``grade_evidence_record``). LLM tier: LOW alone;
+        # MEDIUM (corroborated) only when the pipeline actually
+        # injected typestate context for this function and the claimed
+        # type matches an injected violation's type (a claim naming a
+        # type the checker never flagged is uncorroborated).
+        claimed_type = str(ts_viol.get("type_name") or "").strip()
+        context_types = {
+            t for t in (
+                _typestate_type_name(v) for v in (typestate_context or [])
+            ) if t
+        }
+        corroborated = bool(typestate_context) and (
+            not claimed_type or claimed_type in context_types
+        )
         items.append(grade_evidence(
-            EvidenceSource.TYPESTATE,
-            f"{ts_viol.get('violation_kind', 'violation')} on {ts_viol.get('type_name', '?')}",
-            confidence_override=Confidence.HIGH,
+            EvidenceSource.LLM_CORROBORATED if corroborated
+            else EvidenceSource.LLM_INFERRED,
+            f"{ts_viol.get('violation_kind', 'violation')} on "
+            f"{ts_viol.get('type_name', '?')} (LLM-confirmed typestate)",
         ))
 
     if evidence_tool and is_tool_evidence(evidence_tool):

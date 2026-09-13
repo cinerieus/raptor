@@ -175,7 +175,16 @@ def build_graded_finding(
 
     review_result = getattr(outcome, "review_result", None) or {}
     evidence_tool = getattr(outcome, "evidence_tool", "")
-    review_items = grade_review_result(review_result, evidence_tool)
+    # Pipeline-recorded typestate context for this function — the
+    # corroboration gate for the model's typestate_violation claim
+    # (absent record / absent field → the claim grades LLM-only).
+    ts_context = (
+        getattr(evidence_record, "typestate_violations", None)
+        if evidence_record is not None else None
+    )
+    review_items = grade_review_result(
+        review_result, evidence_tool, typestate_context=ts_context,
+    )
     chain.extend(review_items)
 
     if is_tool_evidence(evidence_tool):

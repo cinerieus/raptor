@@ -269,6 +269,15 @@ class EvidenceRecord:
 
     binary_layer0_findings: list[Any] = field(default_factory=list)
 
+    # Typestate violations the mechanical checker found for this
+    # function (populated at review-context build time, like
+    # negative_space). Pipeline-authored — the export layer uses it to
+    # decide whether a model's typestate_violation claim was
+    # corroborated by actually-injected context. Deliberately NOT part
+    # of has_any_evidence(): it is computed mid-loop, after the
+    # evidence-driven prioritisation has already run.
+    typestate_violations: list[Any] = field(default_factory=list)
+
     def has_any_evidence(self) -> bool:
         return bool(
             self.taint_approx
