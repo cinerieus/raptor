@@ -2899,13 +2899,17 @@ def _flag_value(args, flag):
     n = len(args)
     for i, a in enumerate(args):
         if a == flag:
-            if i + 1 >= n or args[i + 1].startswith("-"):
+            # Bare "-" is a legal value ("explicitly projectless" for
+            # --project, per core/run/pin.py); only flag-SHAPED tokens
+            # (-x, --xyz) are rejected as a missing value.
+            if i + 1 >= n or (args[i + 1].startswith("-")
+                              and args[i + 1] != "-"):
                 print(f"ERROR: {flag} requires a value", file=sys.stderr)
                 sys.exit(1)
             value = args[i + 1]
         elif a.startswith(flag + "="):
             value = a[len(flag) + 1:]
-            if not value or value.startswith("-"):
+            if not value or (value.startswith("-") and value != "-"):
                 print(f"ERROR: {flag} requires a value", file=sys.stderr)
                 sys.exit(1)
     return value
