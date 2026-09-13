@@ -682,17 +682,18 @@ def build_cc_command(
 # effective), so staging a fresh per-call tempfile wrote thousands of
 # identical files to TMPDIR over a long run — and a full tempdir then
 # fails every subsequent dispatch identically. Instead: one private
-# 0700 directory per process (``mkdtemp``), holding one file per
-# distinct prompt CONTENT, named by content hash, written once and
-# reused by every later call with the same content, removed at
-# process exit. Bounded without eviction machinery — the set of
-# distinct prompt contents a process produces is the set of its
-# dispatch modes, a handful per run.
+# 0700 directory per process (``core.run.scratch.scratch_dir`` in its
+# ``keep=True`` ownership-transfer shape, keepalive-paired per the
+# substrate contract), holding one file per distinct prompt CONTENT,
+# named by content hash, written once and reused by every later call
+# with the same content, removed at process exit. Bounded without
+# eviction machinery — the set of distinct prompt contents a process
+# produces is the set of its dispatch modes, a handful per run.
 #
 # Concurrency contract:
 # * threads — creation is serialised by ``_sysprompt_lock``.
 # * independent processes sharing TMPDIR — each process writes only
-#   inside its own unpredictably-named 0700 mkdtemp directory, so
+#   inside its own unpredictably-named 0700 scratch directory, so
 #   processes can never share, pre-create (squat), or unlink each
 #   other's files. A flat predictable name in a shared TMPDIR would
 #   let any local user pre-create a directory at the final path,
@@ -730,14 +731,39 @@ def _sysprompt_cache_dir() -> Path:
         or _sysprompt_owner_pid != pid
         or not _sysprompt_dir.is_dir()
     ):
+        from core.run.scratch import (
+            keepalive_register,
+            keepalive_unregister,
+            scratch_dir,
+        )
+
         _sysprompt_cache.clear()
-        d = Path(tempfile.mkdtemp(prefix="cc-sysprompt-"))
-        # 0700 is guaranteed by the mkdtemp contract; assert anyway —
-        # same fail-loud posture as the 0600 file assert below.
+        if _sysprompt_dir is not None and _sysprompt_owner_pid == pid:
+            # Externally-swept dir: stop refreshing the vanished path.
+            # A forked child (pid mismatch) never touches the
+            # inherited registration — it is the PARENT's (and the
+            # scratch substrate's at-fork hook already dropped the
+            # child's copy).
+            keepalive_unregister(_sysprompt_dir)
+        # Ownership-transfer shape (``keep=True``): the substrate
+        # creates the directory and lists the prefix for the stale-tmp
+        # sweep; deletion is ours, at the pid-guarded atexit cleanup
+        # below. A lexically-held context would be wrong here — the
+        # directory must outlive every dispatch in the process.
+        with scratch_dir("cc-sysprompt-", keep=True) as d:
+            pass
+        # 0700 is guaranteed by scratch_dir's mkdtemp contract; assert
+        # anyway — same fail-loud posture as the 0600 file assert
+        # below.
         mode = stat.S_IMODE(d.stat().st_mode)
         if mode != 0o700:
-            msg = f"mkdtemp returned mode {mode:04o}, expected 0700"
+            msg = f"scratch dir has mode {mode:04o}, expected 0700"
             raise AssertionError(msg)
+        # Non-context-manager owner of a reaper-listed prefix: keep
+        # the live dir's mtime fresh so a long-quiet session is never
+        # false-reaped; unregistered at the cleanup site (the scratch
+        # substrate's own registration ended with the block above).
+        keepalive_register(d)
         _sysprompt_dir = d
         _sysprompt_owner_pid = pid
     return _sysprompt_dir
@@ -760,6 +786,10 @@ def _cleanup_sysprompt_cache() -> None:
         cache_dir = _sysprompt_dir
         _sysprompt_dir = None
         _sysprompt_owner_pid = None
+    if cache_dir is not None:
+        from core.run.scratch import keepalive_unregister
+
+        keepalive_unregister(cache_dir)
     for path in paths:
         with contextlib.suppress(OSError):
             os.unlink(path)
@@ -853,8 +883,10 @@ def system_prompt_file_for(config: CCDispatchConfig) -> Iterator[Path | None]:
     Residual: a SIGKILL before the atexit cleanup leaves the private
     0700 directory behind in TMPDIR — at most one 0600 file per
     distinct prompt content, owner-readable only (never in argv, so
-    never in /proc/<pid>/cmdline), and pytest runs are contained by
-    the session scratch redirect.
+    never in /proc/<pid>/cmdline), pytest runs are contained by the
+    session scratch redirect, and the scratch substrate's per-process
+    reaper registration lets a later run in the same long-lived
+    process family reclaim the stray past the age floor.
     """
     if config.system_prompt is None or not config.system_prompt.strip():
         yield None
