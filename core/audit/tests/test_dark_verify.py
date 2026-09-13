@@ -692,6 +692,27 @@ class TestValidateSpec:
         )
         assert validate_spec(spec) is not None
 
+    def test_trailing_newline_rejected(self):
+        """`$` matches before a trailing newline; the validation
+        allowlists must anchor with \\Z so a name/path carrying a
+        trailing newline never reaches harness generation."""
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.py", function="check\n",
+            language="python",
+        )
+        err = validate_spec(spec)
+        assert err is not None
+        assert "invalid function name" in err
+
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="a.rb", function="check",
+            language="ruby",
+            lang_config={"require_path": "lib/auth\n"},
+        )
+        err = validate_spec(spec)
+        assert err is not None
+        assert "invalid require_path" in err
+
     def test_dangerous_builtin_ruby(self):
         spec = DarkWitnessSpec(
             finding_key="f1", file="a.rb", function="system",

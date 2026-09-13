@@ -38,7 +38,7 @@ _CALL_MARKER_PREFIX = "__raptor_witness_start__:"
 # in the executors; validate the shape anyway so a caller-supplied
 # token can never break out of the string/JSON contexts the harness
 # templates embed it in.
-_TOKEN_RE = re.compile(r"^[a-f0-9]*$")
+_TOKEN_RE = re.compile(r"^[a-f0-9]*\Z")
 
 
 def _checked_token(witness_token: str) -> str:
@@ -666,7 +666,7 @@ def generate_rust_harness(
 # to survive the ';' strip and inject top-level Java code).
 _JAVA_IMPORT_SAFE_RE = re.compile(
     r"^(?:static\s+)?[A-Za-z_$][A-Za-z0-9_$]*"
-    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\.\*)?$"
+    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\.\*)?\Z"
 )
 
 

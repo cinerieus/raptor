@@ -73,8 +73,8 @@ _AUDIT_RUN_DIR: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
-_QUALIFIED_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.:/]*$")
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*\Z")
+_QUALIFIED_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.:/]*\Z")
 
 _DANGEROUS_INTERP_FUNCS = frozenset({
     "system", "exec", "eval", "open", "spawn",
@@ -88,7 +88,7 @@ _DANGEROUS_INTERP_FUNCS = frozenset({
 })
 
 _TYPE_RE = re.compile(
-    r"^[a-zA-Z_][a-zA-Z0-9_*&\[\]<>, .:]*$"
+    r"^[a-zA-Z_][a-zA-Z0-9_*&\[\]<>, .:]*\Z"
 )
 
 # require_path is pasted into JS/TS require(), Ruby require, PHP
@@ -96,7 +96,7 @@ _TYPE_RE = re.compile(
 # Keep it to plain path characters: anything outside this set (quotes,
 # backslashes, $, #, backticks, whitespace) has no business in a module
 # path and only shows up in injection attempts.
-_REQUIRE_PATH_RE = re.compile(r"^[a-zA-Z0-9_@./-]+$")
+_REQUIRE_PATH_RE = re.compile(r"^[a-zA-Z0-9_@./-]+\Z")
 
 
 def _module_ref_error(
@@ -139,7 +139,7 @@ def _module_ref_error(
 # Everything else — general calls, subscripts, lambdas, f-strings,
 # statement separators (fail the parse), comments, newlines — is a
 # validation error.
-_SUFFIXED_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?[a-zA-Z_][a-zA-Z0-9_]*$")
+_SUFFIXED_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?[a-zA-Z_][a-zA-Z0-9_]*\Z")
 
 # Return-value comparison is exact EXCEPT for cross-language boolean/nil
 # spellings (Python "True" vs Go/Ruby "true", "None" vs "nil"/"null"),
@@ -246,7 +246,7 @@ _C_DECL_LHS_RE = re.compile(
 # initializer after string/char literals were replaced by the inert
 # token `_S_`: numbers (incl. hex/suffixed), identifiers (NULL, other
 # setup vars), brace init-lists, commas, unary +/-, address-of.
-_C_INIT_RHS_RE = re.compile(r"^[A-Za-z0-9_+\-&,.{}\s]*$")
+_C_INIT_RHS_RE = re.compile(r"^[A-Za-z0-9_+\-&,.{}\s]*\Z")
 
 
 def _c_setup_line_error(line: str) -> str | None:
@@ -304,7 +304,7 @@ _RUST_LET_RE = re.compile(
 # captures, struct-init escape), `|` (closures), `=` `<` `>` (no
 # turbofish, no comparisons), `*` `/` `%` (no arithmetic-deref
 # smuggling), `#` (attributes), `?` (early return), `\\`.
-_RUST_EXPR_CHARSET_RE = re.compile(r"^[A-Za-z0-9_:.,&!;()\[\]\s+-]*$")
+_RUST_EXPR_CHARSET_RE = re.compile(r"^[A-Za-z0-9_:.,&!;()\[\]\s+-]*\Z")
 
 _RUST_MACRO_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*!")
 
@@ -320,7 +320,7 @@ _RUST_FORBIDDEN_TOKENS = ("unsafe", "process")
 # literal receiver is capability-free: no path to fs / io / env, so it
 # cannot reach the harness source or the process image.
 _RUST_LITERAL_METHOD_RE = re.compile(
-    r"^&?\s*b?_S_(?:\.[A-Za-z_][A-Za-z0-9_]*\(\))+$"
+    r"^&?\s*b?_S_(?:\.[A-Za-z_][A-Za-z0-9_]*\(\))+\Z"
 )
 
 
@@ -412,7 +412,7 @@ _SETUP_VALIDATORS = {
 # identifier path with an optional `static` prefix and `.*` suffix.
 _JAVA_IMPORT_RE = re.compile(
     r"^(?:static\s+)?[A-Za-z_$][A-Za-z0-9_$]*"
-    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\.\*)?$"
+    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\.\*)?\Z"
 )
 
 
@@ -547,7 +547,7 @@ def validate_spec(
 
     ip = lc.get("import_path", "")
     if ip:
-        if not re.match(r"^[a-zA-Z0-9_./-]+$", ip):
+        if not re.match(r"^[a-zA-Z0-9_./-]+\Z", ip):
             return f"invalid import_path: {ip!r}"
         err = _module_ref_error("import_path", ip, target_root)
         if err:
