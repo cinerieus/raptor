@@ -7,6 +7,11 @@ from typing import Any
 
 from ..schema.common import EvidenceSource
 
+# Per-request timeout. Without one, requests waits forever and a stalled
+# connection hangs the collector (the retry adapter never engages because
+# the first attempt never returns). Matches the verifier's URL-fetch posture.
+_TIMEOUT_S = 30
+
 
 class GitHubClient:
     """Client for GitHub REST API (unauthenticated OSINT).
@@ -50,7 +55,7 @@ class GitHubClient:
         """Fetch commit from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/commits/{sha}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -58,7 +63,7 @@ class GitHubClient:
         """Fetch issue from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{number}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -66,7 +71,7 @@ class GitHubClient:
         """Fetch PR from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{number}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -75,7 +80,7 @@ class GitHubClient:
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/contents/{path}"
         params = {"ref": ref}
-        resp = session.get(url, params=params)
+        resp = session.get(url, params=params, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -83,7 +88,7 @@ class GitHubClient:
         """Fetch branch from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/branches/{branch}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -91,7 +96,7 @@ class GitHubClient:
         """Fetch tag from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/git/refs/tags/{tag}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -99,7 +104,7 @@ class GitHubClient:
         """Fetch release by tag from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/releases/tags/{tag}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -108,7 +113,7 @@ class GitHubClient:
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/forks"
         params = {"per_page": per_page}
-        resp = session.get(url, params=params)
+        resp = session.get(url, params=params, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
 
@@ -116,6 +121,6 @@ class GitHubClient:
         """Fetch repository info from GitHub API."""
         session = self._get_session()
         url = f"{self.BASE_URL}/repos/{owner}/{repo}"
-        resp = session.get(url)
+        resp = session.get(url, timeout=_TIMEOUT_S)
         resp.raise_for_status()
         return resp.json()
