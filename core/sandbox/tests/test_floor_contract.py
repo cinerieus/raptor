@@ -454,7 +454,15 @@ def test_future_below_floor_lane_is_caught_by_the_dispatch_assert(
                            timeout=60)
     e = excinfo.value
     assert e.floor is ContainmentTier.MOUNT_NS
-    assert e.achievable is ContainmentTier.LANDLOCK_ONLY
+    # The fallback lane's registry tier is LANDLOCK_ONLY; on a kernel
+    # without Landlock the dispatch honestly caps the declared tier at
+    # BARE (tags must never overstate what a lane delivers) — the
+    # refusal fires either way, with the host-true achievable. The
+    # simulated twin below pins the LANDLOCK_ONLY value hermetically.
+    from core.sandbox.landlock import check_landlock_available
+    assert e.achievable is (
+        ContainmentTier.LANDLOCK_ONLY if check_landlock_available()
+        else ContainmentTier.BARE)
     assert e.__cause__ is injected
     assert "RAPTOR_ALLOW_DEGRADED_UNTRUSTED" in str(e)
     assert len(attempts) == 1, "expected exactly one spawn attempt"
