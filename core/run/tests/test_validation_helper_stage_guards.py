@@ -327,3 +327,14 @@ class TestBinaryDiscoveryFailuresAreLoud:
         err = capsys.readouterr().err
         assert "binary discovery failed" in err
         assert "OSError" in err
+
+
+class TestStageSchemaHints:
+    def test_every_llm_stage_has_a_hint(self):
+        """The module docstring promises per-stage schema hints for
+        A-F; Stage E was missing, so the E→F handoff printed no
+        contract for stage-e.json."""
+        mod = _load_helper()
+        for stage in ("A", "B", "C", "D", "E", "F"):
+            assert stage in mod.STAGE_SCHEMA_HINTS, stage
+        assert "stage-e.json" in mod.STAGE_SCHEMA_HINTS["E"]
