@@ -1244,10 +1244,21 @@ def _first_positional(argv_rest: list) -> str | None:
 
 
 def main():
+    # SUPPRESS, not None/False: ``common`` parents BOTH the main
+    # parser and every subparser, and a subparser re-applies its
+    # defaults over the namespace — `--project X <subcmd>` (flag
+    # before the subcommand) parsed fine and then had the value
+    # silently clobbered back to the default. With SUPPRESS the
+    # subparser only touches the attribute when the flag actually
+    # appears after the subcommand; every reader already goes through
+    # getattr(args, ..., default).
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--out", default=None, help="Output directory")
-    common.add_argument("--project", default=None, help="Project directory")
-    common.add_argument("--raw", action="store_true", help="JSON output")
+    common.add_argument("--out", default=argparse.SUPPRESS,
+                        help="Output directory")
+    common.add_argument("--project", default=argparse.SUPPRESS,
+                        help="Project directory")
+    common.add_argument("--raw", action="store_true",
+                        default=argparse.SUPPRESS, help="JSON output")
 
     parser = argparse.ArgumentParser(
         prog="raptor-review",

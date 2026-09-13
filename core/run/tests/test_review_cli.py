@@ -125,3 +125,48 @@ class TestNoteEditWriteBase:
             mod.cmd_note(args)
         cmd = calls[0]
         assert cmd[cmd.index("--base") + 1] == "/explicit/base"
+
+
+class TestProjectFlagBeforeSubcommand:
+    """`--project X <subcmd>` must not silently drop the value.
+
+    ``common`` parents both the main parser and every subparser; the
+    subparser used to re-apply its None default over the value the
+    main parser had already stored (the hard-error for a bad
+    --project only fired for flag-after-subcommand order).
+    """
+
+    def test_bad_project_before_subcommand_hard_errors(
+            self, monkeypatch, capsys):
+        mod = _load_review_module()
+        monkeypatch.setattr(
+            "sys.argv",
+            ["raptor-review", "--project", "/nonexistent-project-xyz",
+             "stats"],
+        )
+        try:
+            mod.main()
+        except SystemExit as e:
+            assert e.code == 2
+        else:
+            raise AssertionError(
+                "bad --project before the subcommand was dropped "
+                "instead of hard-erroring"
+            )
+        err = capsys.readouterr().err
+        assert "neither a project directory nor a registered" in err
+
+    def test_bad_project_after_subcommand_still_hard_errors(
+            self, monkeypatch, capsys):
+        mod = _load_review_module()
+        monkeypatch.setattr(
+            "sys.argv",
+            ["raptor-review", "stats", "--project",
+             "/nonexistent-project-xyz"],
+        )
+        try:
+            mod.main()
+        except SystemExit as e:
+            assert e.code == 2
+        else:
+            raise AssertionError("bad --project accepted")
