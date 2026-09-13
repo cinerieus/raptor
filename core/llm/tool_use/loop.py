@@ -400,11 +400,22 @@ class ToolUseLoop:
         mt_nudges_left = self._max_tokens_nudges
         wall_start = time.monotonic()
 
-        # x-source: seed known_values from prompt + history
+        # x-source: seed known_values from prompt + history. History
+        # seeding applies the SAME trust rule as in-run discovery:
+        # user-authored text and successful tool results only (both
+        # live in user-role messages — the loop itself persists tool
+        # results that way, and the wire protocol allows them nowhere
+        # else). Assistant prose must NOT seed: in-run it never enters
+        # known_values, so seeding it here let a persisted trajectory
+        # containing hallucinated or injected assistant text launder
+        # undiscovered values past the pre-dispatch ToolCallBlocked
+        # gate on resume.
         known_values: set[str] = set()
         if next_message:
             known_values |= _extract_tokens_from_text(next_message)
         for msg in history:
+            if msg.role != "user":
+                continue
             for block in msg.content:
                 if isinstance(block, TextBlock):
                     known_values |= _extract_tokens_from_text(block.text)
