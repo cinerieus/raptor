@@ -241,9 +241,16 @@ def _signal_reachable_set(
     Walks the call graph from any function registered via signal() or
     sigaction().  Returns frozenset of ``"file:function"`` keys.
 
-    Falls back to empty set if signal handlers can't be identified
-    (safe: gate won't suppress).  Memoised per checklist identity —
-    the gate runs once per outcome on the same checklist.
+    Discovery is deliberately shallow: direct ``signal``/``sigaction``
+    call chains plus a handler-name heuristic. Handlers registered
+    through dispatch tables, wrapper functions, or stored function
+    pointers are MISSED — and a missed handler means the empty/partial
+    set fails toward the architecture gate DEMOTING its race findings
+    (the signal-reachability exception never fires for it), not toward
+    keeping them. The gate's heuristic refuter grade is what bounds
+    that direction; broader discovery would need real pointer analysis.
+    Memoised per checklist identity — the gate runs once per outcome
+    on the same checklist.
     """
     if not checklist:
         return frozenset()
@@ -343,7 +350,11 @@ def _refute_by_architecture(
     if not _is_single_threaded(domain_model, config):
         return None
 
-    # Exception: functions reachable from signal handlers can race
+    # Exception: functions reachable from signal handlers can race.
+    # Discovery misses table/wrapper-registered handlers (see
+    # _signal_reachable_set) — a miss demotes that handler's race
+    # findings rather than sparing them, bounded only by this gate's
+    # heuristic grade.
     sig_set = _signal_reachable_set(checklist)
     func_key = f"{outcome.file}:{outcome.function}"
     bare_key = f":{outcome.function}"
