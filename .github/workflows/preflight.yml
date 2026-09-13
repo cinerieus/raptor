@@ -78,14 +78,31 @@ jobs:
           out=/tmp/changed_files.txt
           # ``?`` + ``// []`` suppress jq's null-iteration error on
           # truncated or error-object responses (same defence as
-          # tests.yml). "No list" leaves the file empty and the scope
-          # step reports run=false: unlike the main suite there is no
-          # full-dispatch fallback, because running the entire suite
-          # under six simulations is exactly the latency this
-          # workflow's changed-file bound exists to avoid.
-          gh api --paginate \
-            "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-            --jq '(. // [])[]?.filename' > "$out" || : > "$out"
+          # tests.yml). A TRUNCATED list still degrades to skip: unlike
+          # the main suite there is no full-dispatch fallback, because
+          # running the entire suite under six simulations is exactly
+          # the latency this workflow's changed-file bound exists to
+          # avoid. A hard ``gh api`` failure is different — an empty
+          # file would silently skip every simulation leg and let
+          # preflight-passed go green (skipped-is-pass), so retry it and
+          # then fail the step loudly instead of passing on no data.
+          ok=false
+          for attempt in 1 2 3; do
+            if gh api --paginate \
+                 "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+                 --jq '(. // [])[]?.filename' > "$out"; then
+              ok=true
+              break
+            fi
+            echo "::warning::gh api attempt ${attempt} failed; retrying"
+            sleep $(( attempt * 10 ))
+          done
+          if [ "$ok" != "true" ]; then
+            echo "::error::could not list the PR's changed files" \
+              "(GitHub API failure) — refusing to skip the preflight" \
+              "simulations on missing data; re-run this job."
+            exit 1
+          fi
           echo "Changed files ($(wc -l < "$out")):"
           cat "$out"
 
