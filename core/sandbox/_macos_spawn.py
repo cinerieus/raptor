@@ -111,6 +111,7 @@ import logging
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -438,6 +439,41 @@ def _sweep_descendants(root_pid, *, live_snapshot=None, extra_pgids=(),
             len(swept), sorted(swept),
         )
     return swept
+
+
+def _refuse_hijacked_scratch_dir(paths: Iterable[str]) -> None:
+    """Refuse per-call scratch materialisation over a replaced path.
+
+    A sandboxed child holds write access to ``output``; with one
+    sandbox() context issuing multiple run() calls, a child from run N
+    can delete ``{output}/.home`` or ``{output}/.tmp`` (empty after
+    initial creation) and swap in a symlink pointing at a
+    user-writable location outside ``output``. The parent-side
+    symlink-following ``os.makedirs`` would then create directories at
+    the attacker-chosen destination — the bounded write-outside-
+    sandbox escape the Linux fake-home guard
+    (context.py, sandbox() construction) exists to close. That guard
+    runs ONCE at construction; this backend (re)creates the scratch
+    dirs on EVERY call, so the same lstat refusal must run per call.
+    Anything that exists but is not a regular directory — a symlink,
+    a FIFO (parent-side chmod/stat hang), a socket, a device node —
+    refuses loudly instead of proceeding.
+    """
+    for _p in paths:
+        try:
+            _st = os.lstat(_p)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(_st.st_mode) or stat.S_ISLNK(_st.st_mode):
+            msg = (
+                f"sandbox scratch path refuses to materialise: {_p!r} "
+                f"exists but is not a regular directory "
+                f"(mode=0o{_st.st_mode:o}). A prior sandboxed process "
+                f"may have replaced it to redirect parent-side file "
+                f"operations or cause a hang. Clean the output dir or "
+                f"use a fresh one."
+            )
+            raise ValueError(msg)
 
 
 def run_sandboxed(cmd: list[str], *,
@@ -822,8 +858,6 @@ def run_sandboxed(cmd: list[str], *,
         # writes to multiple XDG roots (e.g., pip, conda). The
         # docstring claimed "identical (env mutation)" — now true.
         fake_home_dir = os.path.join(output, ".home")
-        os.makedirs(fake_home_dir, mode=0o700, exist_ok=True)
-        child_env["HOME"] = fake_home_dir
         xdg_layout = {
             "XDG_CONFIG_HOME": os.path.join(fake_home_dir, ".config"),
             "XDG_CACHE_HOME":  os.path.join(fake_home_dir, ".cache"),
@@ -832,6 +866,14 @@ def run_sandboxed(cmd: list[str], *,
             "XDG_STATE_HOME":  os.path.join(fake_home_dir, ".local",
                                               "state"),
         }
+        # Symlink-TOCTOU defence before the per-call makedirs — same
+        # path list as the Linux construction-time guard, including
+        # the .local intermediate that makedirs would traverse.
+        _refuse_hijacked_scratch_dir(
+            [fake_home_dir, os.path.join(fake_home_dir, ".local"),
+             *xdg_layout.values()])
+        os.makedirs(fake_home_dir, mode=0o700, exist_ok=True)
+        child_env["HOME"] = fake_home_dir
         for var, path in xdg_layout.items():
             child_env[var] = path
             try:
@@ -872,6 +914,12 @@ def run_sandboxed(cmd: list[str], *,
     )
     if _write_isolation_engaged and output:
         _scratch_tmp = os.path.join(output, ".tmp")
+        # Same symlink-TOCTOU refusal as the fake-home paths: this
+        # dir is re-created per call inside the child-writable output
+        # tree, and TMPDIR steering through a swapped link would aim
+        # the parent's makedirs (and the child's tmp writes) at an
+        # attacker-chosen destination.
+        _refuse_hijacked_scratch_dir([_scratch_tmp])
         try:
             os.makedirs(_scratch_tmp, mode=0o700, exist_ok=True)
         except OSError:
