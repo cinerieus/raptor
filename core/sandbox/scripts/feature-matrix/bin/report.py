@@ -48,16 +48,56 @@ def parse_junits(lane_dir: Path) -> dict:
     return agg
 
 
-def shape_check(lane: str, probed: dict | None) -> tuple[str, list]:
-    expect = LANES[lane]["expect"]
+_FEATURE_SHORT = {
+    "landlock": "ll",
+    "userns": "uns",
+    "mount_in_userns": "mnt",
+    "proc_mount_in_userns": "proc",
+    "pivot_root_in_userns": "pivot",
+    "seccomp": "sec",
+}
+
+
+def shape_check(lane: str, probed: dict | None) -> tuple[str, list, list]:
+    """-> (verdict, divergences, degradations).
+
+    divergences are FATAL: the probe is missing, or a probed feature
+    contradicts a value the lane's own configuration forces (`expect`)
+    — the lane did not apply, so its test results describe a different
+    feature combination than the lane name claims.
+
+    degradations are NON-FATAL but named: an environment-conditioned
+    feature (`expect_env`) probed below its nominal value. That is a
+    real host shape (e.g. GitHub runners deny mount capability inside
+    unprivileged user namespaces), not a harness bug — the cell
+    self-classifies as degraded(<features>) so a novel runner shape is
+    labelled honestly instead of stamped as-intended while its test
+    column bleeds. Test failures still gate the run either way.
+    """
+    spec = LANES[lane]
+    expect = spec["expect"]
+    env_expect = spec.get("expect_env") or {}
     if probed is None:
-        return "NO-PROBE", ["probe.json missing/unreadable"]
+        return "NO-PROBE", ["probe.json missing/unreadable"], []
+    if expect is None and not env_expect:
+        return "recorded", [], []
+    # A lane may carry either tier alone (expect=None + env tier is a
+    # legal future shape); treat a missing hard tier as an empty one.
     if expect is None:
-        return "recorded", []
+        expect = {}
     assert isinstance(expect, dict)
     diverged = [f"{k}: intended {v!r}, probed {probed.get(k)!r}"
                 for k, v in expect.items() if probed.get(k) != v]
-    return ("SHAPE-DIVERGED", diverged) if diverged else ("as-intended", [])
+    if diverged:
+        return "SHAPE-DIVERGED", diverged, []
+    assert isinstance(env_expect, dict)
+    degraded_keys = [k for k, v in env_expect.items() if probed.get(k) != v]
+    if degraded_keys:
+        degradations = [f"{k}: nominal {env_expect[k]!r}, "
+                        f"probed {probed.get(k)!r}" for k in degraded_keys]
+        label = ",".join(_FEATURE_SHORT.get(k, k) for k in degraded_keys)
+        return f"degraded({label})", [], degradations
+    return "as-intended", [], []
 
 
 def fmt_shape(probed: dict | None, abi=None) -> str:
@@ -104,7 +144,7 @@ def main() -> None:
             except (OSError, json.JSONDecodeError):
                 pass
             tests = parse_junits(lane_dir)
-            verdict, divergences = shape_check(lane, probe)
+            verdict, divergences, degradations = shape_check(lane, probe)
 
             harness_err = None
             if meta.get("rc") not in (0, None):
@@ -125,26 +165,36 @@ def main() -> None:
                 "image": image, "lane": lane,
                 "landlock_abi": (probe_full or {}).get("landlock", {}).get("abi"),
                 "probed_shape": probe, "shape_verdict": verdict,
-                "divergences": divergences, "harness_error": harness_err,
+                "divergences": divergences, "degradations": degradations,
+                "harness_error": harness_err,
                 "duration_s": meta.get("duration_s"),
                 **{k: tests[k] for k in
                    ("tests", "failures", "errors", "skipped", "failed_tests")},
             })
 
     # ---- render ---------------------------------------------------------
+    # shape column width fits the widest verdict:
+    # degraded(mnt,proc,pivot) = 24.
     hdr = (f"{'image':<6} {'lane':<12} {'probed features':<56} "
-           f"{'shape':<15} {'pass':>5} {'fail':>5} {'err':>4} {'skip':>5}")
+           f"{'shape':<24} {'pass':>5} {'fail':>5} {'err':>4} {'skip':>5}")
     lines = [hdr, "-" * len(hdr)]
     for r in rows:
         passed = r["tests"] - r["failures"] - r["errors"] - r["skipped"]
         lines.append(
             f"{r['image']:<6} {r['lane']:<12} "
             f"{fmt_shape(r['probed_shape'], r['landlock_abi']):<56} "
-            f"{r['shape_verdict']:<15} "
+            f"{r['shape_verdict']:<24} "
             f"{passed:>5} {r['failures']:>5} {r['errors']:>4} {r['skipped']:>5}"
             + (f"  !! {r['harness_error']}" if r["harness_error"] else ""))
     table = "\n".join(lines)
     print(table)
+
+    # Environment degradations: named, non-fatal (see shape_check).
+    degr_lines = [f"[{r['image']}/{r['lane']}] DEGRADED {d}"
+                  for r in rows for d in r["degradations"]]
+    if degr_lines:
+        print("\nEnvironment degradations (non-fatal, cells self-classified):")
+        print("\n".join(degr_lines))
 
     fail_lines = []
     for r in rows:
@@ -171,6 +221,9 @@ def main() -> None:
     (run_dir / "matrix.json").write_text(json.dumps(rows, indent=1) + "\n")
     (run_dir / "failures.txt").write_text("\n".join(fail_lines) + "\n")
     md = ["# sandbox-matrix run " + run_dir.name, "", "```", table, "```", ""]
+    if degr_lines:
+        md += ["## Environment degradations (non-fatal)", "", "```"]
+        md += degr_lines + ["```", ""]
     if fail_lines:
         md += ["## Failures / divergences", "", "```"] + fail_lines + ["```", ""]
     (run_dir / "matrix.md").write_text("\n".join(md))

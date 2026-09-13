@@ -26,7 +26,8 @@
 #
 # --self-test: docker-free wiring check — generates the lane seccomp
 # profiles, runs the feature probe on the host, and exercises the
-# report aggregator on synthetic fixtures (clean + shape-diverged).
+# report aggregator on synthetic fixtures (clean + environment-degraded
+# + shape-diverged).
 #
 # --build-only: build the selected images (with the sxv.reqhash label
 # and the same build args as a full run) and stop before any lane
@@ -47,7 +48,8 @@ if [ "${1:-}" = "--self-test" ]; then
     python3 "$HERE/profiles/make_profiles.py" --out "$TMP/profiles"
     python3 - "$TMP/profiles" <<'PYEOF'
 import json, sys, pathlib
-for name in ("no-landlock", "no-userns", "no-both"):
+for name in ("no-landlock", "no-mount", "no-mount-nonet", "no-userns",
+             "no-both"):
     p = json.loads((pathlib.Path(sys.argv[1]) / f"{name}.json").read_text())
     assert p["syscalls"], name
 print("profiles ok")
@@ -62,22 +64,31 @@ for key in ("landlock", "userns", "mount_in_userns",
     assert key in shape, key
 print("probe ok:", shape)
 PYEOF
-    echo "== report aggregates and gates on shape divergence"
-    for verdict in clean diverged; do
+    echo "== report aggregates, self-classifies degradations, gates divergence"
+    for verdict in clean degraded diverged; do
         L="$TMP/run-$verdict/u24/full"
         mkdir -p "$L"
         if [ "$verdict" = clean ]; then
-            cp "$TMP/probe.json" "$L/probe.json"
-            python3 - "$L/probe.json" "$HERE/profiles" <<'PYEOF'
+            # feature-complete host: every hard AND env feature nominal
+            python3 - "$L/probe.json" <<'PYEOF'
 import json, sys
-sys.path.insert(0, sys.argv[2])
-from lanes import _MNT
-d = json.load(open(sys.argv[1]))
-# match the dynamic lane expectation (host AppArmor sysctl is kernel-wide)
-d["shape"] = {"landlock": "present", "userns": "ok",
-              "mount_in_userns": _MNT, "proc_mount_in_userns": _MNT,
-              "pivot_root_in_userns": _MNT, "seccomp": "ok"}
-json.dump(d, open(sys.argv[1], "w"))
+json.dump({"shape": {"landlock": "present", "userns": "ok",
+                     "mount_in_userns": "ok",
+                     "proc_mount_in_userns": "ok",
+                     "pivot_root_in_userns": "ok", "seccomp": "ok"},
+           "landlock": {"abi": 8}}, open(sys.argv[1], "w"))
+PYEOF
+        elif [ "$verdict" = degraded ]; then
+            # GitHub-runner shape: hard features fine, mount capability
+            # denied inside the userns (environment-conditioned tier) —
+            # must be NAMED, must NOT fail the run
+            python3 - "$L/probe.json" <<'PYEOF'
+import json, sys
+json.dump({"shape": {"landlock": "present", "userns": "ok",
+                     "mount_in_userns": "fail",
+                     "proc_mount_in_userns": "fail",
+                     "pivot_root_in_userns": "fail", "seccomp": "ok"},
+           "landlock": {"abi": 7}}, open(sys.argv[1], "w"))
 PYEOF
         else
             python3 - "$L/probe.json" <<'PYEOF'
@@ -93,8 +104,14 @@ PYEOF
             > "$L/junit-1.xml"
         printf '{"rc": 0, "duration_s": 1}' > "$L/meta.json"
     done
-    python3 "$HERE/bin/report.py" "$TMP/run-clean" >/dev/null \
+    python3 "$HERE/bin/report.py" "$TMP/run-clean" > "$TMP/out-clean" \
         || { echo "self-test FAIL: clean fixture reported non-zero" >&2; exit 1; }
+    grep -q "as-intended" "$TMP/out-clean" \
+        || { echo "self-test FAIL: clean fixture not as-intended" >&2; exit 1; }
+    python3 "$HERE/bin/report.py" "$TMP/run-degraded" > "$TMP/out-degraded" \
+        || { echo "self-test FAIL: degraded shape must not fail the run" >&2; exit 1; }
+    grep -q "degraded(mnt,proc,pivot)" "$TMP/out-degraded" \
+        || { echo "self-test FAIL: degradation not self-classified" >&2; exit 1; }
     if python3 "$HERE/bin/report.py" "$TMP/run-diverged" >/dev/null; then
         echo "self-test FAIL: shape divergence not gated" >&2; exit 1
     fi
@@ -150,7 +167,7 @@ while [ $# -gt 0 ]; do
         --lane-timeout) LANE_TIMEOUT="$2"; shift 2 ;;
         --py-version)   PY_VERSION="$2"; shift 2 ;;
         --results)      RESULTS_BASE="$2"; shift 2 ;;
-        -h|--help)      sed -n '2,36p' "$0"; exit 0 ;;
+        -h|--help)      sed -n '2,37p' "$0"; exit 0 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
