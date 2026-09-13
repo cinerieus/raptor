@@ -486,6 +486,40 @@ class TestCrossCancelQueryError:
         assert r.violations[0].free_func == "release_b"
 
 
+class TestCrossFreeFuncEscaping:
+    """free_func comes out of a prior Joern query — a method name of
+    the scanned repo's CPG, i.e. attacker-influenced text. It must
+    never be interpolated into the cancel query unvalidated: a quote
+    in the name would break out of the Scala string literal and run
+    attacker Scala in the unsandboxed JVM."""
+
+    def test_hostile_free_func_never_reaches_query(self):
+        from core.audit.callback_lifetime import (
+            check_callback_lifetime_cross,
+        )
+        hostile = 'f"); System.exit(0); cpg.method.name("'
+        joern = _ScriptedJoern([_REG, [(hostile, 42)], []])
+        r = check_callback_lifetime_cross(joern, "drv.c", "init_foo")
+        # reg + free queries only — the cancel query for the hostile
+        # pair was refused, and the hostile text never left the module.
+        assert len(joern.queries) == 2
+        assert all("System.exit" not in q for q in joern.queries)
+        # Fail direction: refusing the cancel check is a degraded
+        # (inconclusive) result, never a violation and never clean.
+        assert r.violation_found is False
+        assert "inconclusive" in r.reasoning
+
+    def test_valid_free_func_still_queried(self):
+        from core.audit.callback_lifetime import (
+            check_callback_lifetime_cross,
+        )
+        joern = _ScriptedJoern([_REG, _FREE, []])
+        r = check_callback_lifetime_cross(joern, "drv.c", "init_foo")
+        assert len(joern.queries) == 3
+        assert 'cpg.method.name("release_foo")' in joern.queries[2]
+        assert r.violation_found is True
+
+
 class TestSafeTeardownOrdering:
     def test_free_then_sync_cancel_is_not_safe(self):
         # Regression PoC: the free-then-cancel UAF — exactly the shape

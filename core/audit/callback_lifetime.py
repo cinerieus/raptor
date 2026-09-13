@@ -503,9 +503,29 @@ def check_callback_lifetime_cross(
             if free_func == reg_func:
                 continue
 
+            # free_func comes out of a prior Joern query result — a
+            # method name of the SCANNED repo's CPG, i.e. attacker-
+            # influenced text (C++ user-defined-literal operators and
+            # frontend-mangled names can carry quotes). It must pass
+            # the identifier grammar + Scala escaping before being
+            # interpolated into a query the unsandboxed JVM executes.
+            # Rejection is counted as a degraded cancel check, not a
+            # clean bill — same discipline as a failed refuter query.
+            from ._util import safe_joern_name
+            safe_free_func = safe_joern_name(str(free_func))
+            if safe_free_func is None:
+                logger.debug(
+                    "callback_lifetime: free-site method name %r "
+                    "fails identifier validation; skipping cancel "
+                    "check for this pair",
+                    free_func,
+                )
+                cancel_query_errors += 1
+                continue
+
             escaped_member = str(member_expr).replace("\\", "\\\\").replace('"', '\\"')
             cancel_query = (
-                f'cpg.method.name("{free_func}")'
+                f'cpg.method.name("{safe_free_func}")'
                 f'.ast.isCall.name("{cancel_names}")'
                 f'.filter(_.argument.order(0).code(".*{escaped_member}.*"))'
                 f".l"
