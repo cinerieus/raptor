@@ -5,12 +5,13 @@
 
 Usage: raptor-enrich-context-map <understand_dir>
 
-Replaces the pattern of calling each enricher script separately, which
-rebuilds the checklist/inventory 3-4 times. This loads checklist and
-context-map once, runs each enricher function in sequence, and saves
-the result once at the end.
-
-Individual enricher scripts remain for standalone use.
+A combined alternative to calling each enricher script separately
+(which rebuilds the checklist/inventory 3-4 times): loads checklist
+and context-map once, runs each enricher function in sequence, and
+saves the result once at the end. NOTE: covers the callgraph /
+forward-reachable / ast-view / sites / sinks stages only, and no
+production skill dispatches it yet — map.md still runs the standalone
+shims, which remain the production path.
 """
 import argparse
 import logging

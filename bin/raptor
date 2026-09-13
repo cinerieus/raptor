@@ -500,7 +500,16 @@ if [ -n "$CHECK_TARGET" ]; then
         echo "raptor: refusing to launch. Override: --trust-repo" >&2
         exit 2
     fi
-    # rc=3 = internal error; already logged to stderr. Don't block the launcher.
+    # rc=3 = internal error (python missing, import failure); already
+    # logged to stderr. DELIBERATELY non-blocking, asymmetric with the
+    # undocumented-code fail-closed mapping in raptor-cc-trust-check:
+    # rc=3 fires on operator-environment breakage (no python3 on PATH
+    # is exactly when the operator most needs the launcher to start),
+    # not on scan-result ambiguity — and the check re-runs inside the
+    # session where a working python gets a real verdict. An attacker
+    # who could force a CLEAN internal error would get the same skip,
+    # which is why the check runs with `-I` from RAPTOR_DIR (hostile
+    # repo content cannot reach its import path or cwd).
 fi
 
 cd "$RAPTOR_DIR" || { echo "raptor: cannot cd to $RAPTOR_DIR" >&2; exit 1; }

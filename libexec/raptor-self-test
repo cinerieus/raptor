@@ -7,7 +7,8 @@ Exercises as many operator commands as possible against small generated
 fixture projects (a vulnerable app, an SCA manifest set, a hostile
 Claude-Code-config repo, and a manifest-only ghost repo), in three tiers:
 
-  Tier 0 (default)   51 cases, no LLM calls at all. Children run with a
+  Tier 0 (default)   the full no-LLM registry (see --list; no LLM
+                     calls at all). Children run with a
                      scrubbed environment (API keys / dispatcher socket /
                      Ollama / claude CLI all hidden) so LLM-gated
                      pipelines take their documented degraded paths, plus
