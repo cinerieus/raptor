@@ -362,10 +362,22 @@ def _read_source(
     if len(text) > 500_000:
         return None
 
-    if line_start and line_end and line_start > 0:
+    if line_start and line_start > 0:
+        if line_end and line_end < line_start:
+            # Inverted span: corrupt gap metadata. The empty slice it
+            # used to yield was silently dropped by the caller; skip
+            # loudly instead of guessing at a slice.
+            logger.warning(
+                "_read_source: inverted span %s:%s-%s — skipping",
+                file_path, line_start, line_end,
+            )
+            return None
         lines = text.splitlines()
         start = max(0, line_start - 1)
-        end = min(len(lines), line_end)
+        # A missing/zero line_end clamps to the start line rather than
+        # falling through to the whole file (up to 500KB into the
+        # summary prompt path).
+        end = min(len(lines), max(line_end or line_start, line_start))
         return "\n".join(lines[start:end])
 
     return text

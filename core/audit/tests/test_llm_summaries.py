@@ -441,3 +441,37 @@ class TestHardenedSummaryRendering:
         )
         assert "ˮ" not in user
         assert "def f(x):" in user
+
+
+class TestReadSourceDegenerateSpans:
+    def _write(self, tmp_path):
+        f = tmp_path / "mod.py"
+        f.write_text("line1\nline2\nline3\nline4\nline5\n")
+        return tmp_path
+
+    def test_normal_span(self, tmp_path):
+        from core.audit.llm_summaries import _read_source
+
+        root = self._write(tmp_path)
+        assert _read_source(root, "mod.py", "f", 2, 4) == "line2\nline3\nline4"
+
+    def test_inverted_span_skips(self, tmp_path):
+        from core.audit.llm_summaries import _read_source
+
+        root = self._write(tmp_path)
+        assert _read_source(root, "mod.py", "f", 4, 2) is None
+
+    def test_zero_line_end_clamps_to_start_line(self, tmp_path):
+        # line_end=0 with a real line_start must not dump the whole
+        # file into the summary prompt path.
+        from core.audit.llm_summaries import _read_source
+
+        root = self._write(tmp_path)
+        assert _read_source(root, "mod.py", "f", 3, 0) == "line3"
+
+    def test_no_span_returns_whole_file(self, tmp_path):
+        from core.audit.llm_summaries import _read_source
+
+        root = self._write(tmp_path)
+        out = _read_source(root, "mod.py", "f", None, None)
+        assert out is not None and out.startswith("line1")
