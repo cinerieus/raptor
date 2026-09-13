@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.artifacts.provenance import provenance_of
+from core.atomic_fs import write_text_atomically
 from core.json import load_json as _load_json
 from core.security.prompt_output_sanitise import sanitise_code, sanitise_string
 
@@ -368,5 +369,7 @@ def _load_disproven(path: Path) -> list | None:
 def render_and_write(out_dir: Path, target: str | None = None) -> Path:
     content = render_directory(out_dir, target)
     output_path = out_dir / "diagrams.md"
-    output_path.write_text(content, encoding="utf-8")
+    # Atomic: diagrams.md is re-rendered and consumed by other tools —
+    # a crash mid-write left a half-written report in place.
+    write_text_atomically(output_path, content)
     return output_path
