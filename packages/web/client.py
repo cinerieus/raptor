@@ -431,8 +431,9 @@ class WebClient:
         """Read the streamed body into ``response._content`` up to
         :data:`_MAX_RESPONSE_BYTES`. If the body exceeds the cap,
         truncate and close the connection — the caller sees a body
-        of exactly ``_MAX_RESPONSE_BYTES`` bytes rather than the
-        process OOMing on a hostile multi-GB response.
+        capped near ``_MAX_RESPONSE_BYTES`` (it may overshoot by up
+        to one 64 KiB read chunk) rather than the process OOMing on
+        a hostile multi-GB response.
         """
         try:
             chunks: list[bytes] = []

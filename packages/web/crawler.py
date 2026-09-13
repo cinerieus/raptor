@@ -251,14 +251,12 @@ class WebCrawler:
             # That LOST the original host/scheme. WebClient._build_url
             # then `urljoin(base_url + '/', path)` re-anchored every
             # discovered URL onto base_url's host. Concrete failure
-            # mode: a discovered link
-            # `https://api.example.com/v1/users` (a sub-host the
-            # operator wanted in scope, e.g. assets.example.com or
-            # api.example.com under the same TARGET) was crawled as
-            # `<base_url>/v1/users` — wrong host, hits the wrong
-            # service, gets a 404 or worse cross-host data, and the
-            # actual sub-host endpoint is NEVER fetched even though
-            # the crawler thinks it covered it.
+            # mode: any absolute discovered link was silently refetched
+            # as `<base_url>/<its path>` — wrong resource on the wrong
+            # origin — while the client's scope check (strict
+            # scheme+host+port equality; sub-hosts are ALWAYS out of
+            # scope) never got to see, and reject, the real off-origin
+            # URL.
             #
             # Pass the full URL. `WebClient._build_url(url)` does
             # `urljoin(base_url+'/', url)` which preserves the
