@@ -25,11 +25,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+# No NONE profile: every registered tool carries an isolation tier —
+# an unsandboxed tier would contradict the containment-floor doctrine
+# ("never none") and nothing ever referenced one.
 class SandboxProfile:
     FULL = "full"
     TRUSTED = "trusted"
     CONTAINER = "container"
-    NONE = "none"
 
 
 @dataclass(frozen=True)
@@ -203,14 +205,15 @@ _LLM_PHASES = frozenset({
 def validate_all_tools_sandboxed(
     invoked_tools: list[str],
 ) -> list[str]:
-    """Check that every invoked tool has a sandbox policy.
+    """Advisory post-run report: ledger names without a policy entry.
 
-    Returns a list of tools WITHOUT a policy (should be empty).
-    LLM-only phases and cost-ledger spend buckets (review,
-    checker_synthesis, refinement, iris, etc.) are excluded — they
-    don't invoke external tools; subprocess tools enforce their
-    policies at the runner chokepoint and never appear in the cost
-    ledger this validator is fed from.
+    NOT an enforcement gate, and structurally unable to observe a
+    real unsandboxed tool: the orchestrator feeds this COST-LEDGER
+    phase names, and subprocess tools never book cost there — their
+    isolation is enforced at the core.sandbox spawn layer.  All this
+    can flag is a ledger spend class missing from the _LLM_PHASES
+    allowlist (historically false positives; see the list's inline
+    notes).  Returns the names without a policy.
     """
     missing = []
     for tool in invoked_tools:

@@ -9498,8 +9498,14 @@ def _run_audit_body(
         invoked = list(result.cost_tracker.phases.keys())
         unsandboxed = validate_all_tools_sandboxed(invoked)
         if unsandboxed:
+            # Advisory reference-table gap, not an enforcement result:
+            # these are cost-ledger phase names, and tool isolation is
+            # enforced at the core.sandbox spawn layer regardless.
             logger.warning(
-                "sandbox policy: %d tools invoked without policy: %s",
+                "sandbox policy (advisory): %d cost-ledger phase name(s) "
+                "have no policy/allowlist entry: %s — likely a new LLM "
+                "spend class missing from _LLM_PHASES, not an "
+                "unsandboxed tool",
                 len(unsandboxed),
                 ", ".join(unsandboxed),
             )
