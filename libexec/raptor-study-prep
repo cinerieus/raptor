@@ -20,7 +20,6 @@ import bisect
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -3309,9 +3308,14 @@ def _is_under_projects_base(directory: Path) -> bool:
 
 
 def _promote_to_project_concepts(src: Path, output_dir: Path) -> None:
-    """Copy a file to ``<project>/concepts/`` if inside a project."""
-    import shutil
+    """Merge ``patterns.json`` into ``<project>/concepts/`` if inside
+    a project.
 
+    Merge, never copy: an unconditional replace let a narrowly scoped
+    run's patterns clobber the whole-tree accumulation (last writer
+    wins). Routed through the shared core merge so there is one
+    promotion semantics to maintain.
+    """
     project_dir = output_dir.parent
     if not (
         (project_dir / "project.json").is_file()
@@ -3323,23 +3327,13 @@ def _promote_to_project_concepts(src: Path, output_dir: Path) -> None:
     concepts_dir.mkdir(parents=True, exist_ok=True)
     canonical = concepts_dir / src.name
 
-    tmp = None
     try:
-        fd, tmp = tempfile.mkstemp(
-            dir=str(concepts_dir), suffix=".tmp", prefix=f"{src.stem}-",
-        )
-        os.close(fd)
-        shutil.copy2(str(src), tmp)
-        Path(tmp).rename(canonical)
+        from core.concepts.study import merge_promote_patterns
+        merge_promote_patterns(src, canonical)
         print(f"study-prep: promoted {src.name} to {canonical}",
               file=sys.stderr)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"study-prep: promotion failed: {exc}", file=sys.stderr)
-        if tmp:
-            import contextlib
-
-            with contextlib.suppress(OSError):
-                Path(tmp).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

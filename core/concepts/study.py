@@ -392,6 +392,39 @@ def merge_promote_domain_model(per_run_path: Path,
     logger.info("promoted domain-model.json to %s", canonical)
 
 
+def merge_promote_patterns(src: Path, canonical: Path) -> None:
+    """Merge a run's ``patterns.json`` into the canonical copy.
+
+    THE promotion write for discovered patterns — both study-prep and
+    the study loop route through it. Keyed by pattern name, run wins
+    per key: a narrowly scoped run must never replace the whole-tree
+    accumulation. Raises OSError/ValueError on unreadable input —
+    callers decide how loudly to report.
+    """
+    from core.json import load_json
+
+    # Study artifacts are small RAPTOR-written run output; the cap
+    # matches the study loop's artifact ceiling.
+    max_bytes = 64 * 1024 * 1024
+    run_data = load_json(src, strict=True, max_bytes=max_bytes) or {}
+    if not isinstance(run_data, dict):
+        return
+    merged: dict[str, Any] = {}
+    if canonical.is_file():
+        prior = load_json(canonical, strict=True, max_bytes=max_bytes)
+        if isinstance(prior, dict):
+            merged = prior
+    patterns = merged.get("patterns")
+    if not isinstance(patterns, dict):
+        patterns = {}
+    run_patterns = run_data.get("patterns")
+    if isinstance(run_patterns, dict):
+        patterns.update(run_patterns)
+    merged.update({k: v for k, v in run_data.items() if k != "patterns"})
+    merged["patterns"] = patterns
+    save_json(canonical, merged)
+
+
 def _is_under_projects_base(directory: Path) -> bool:
     """Check if directory is under the default projects output base."""
     try:

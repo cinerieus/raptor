@@ -2050,3 +2050,56 @@ class TestMultilangPass:
             tmp_path, tmp_path, None, ["main"], [], c_files_in_scope=True,
         )
         assert (items, docs, unresolved) == ([], [], [])
+
+
+# ------------------------------------------------------------------
+# Project promotion
+# ------------------------------------------------------------------
+
+class TestPromoteToProjectConcepts:
+    def test_patterns_merge_not_clobber(self, tmp_path) -> None:
+        """A scoped run's patterns.json merges into the project copy —
+        an unconditional replace erased the whole-tree accumulation
+        (last writer wins)."""
+        project = tmp_path / "proj"
+        out = project / "run_001"
+        out.mkdir(parents=True)
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        concepts = project / "concepts"
+        concepts.mkdir()
+        (concepts / "patterns.json").write_text(json.dumps({
+            "patterns": {"whole_tree_fn": {"role": "allocator"}},
+        }), encoding="utf-8")
+        src = out / "patterns.json"
+        src.write_text(json.dumps({
+            "patterns": {"scoped_fn": {"role": "validator"}},
+        }), encoding="utf-8")
+
+        prep._promote_to_project_concepts(src, out)
+
+        promoted = json.loads((concepts / "patterns.json").read_text())
+        assert set(promoted["patterns"]) == {"whole_tree_fn", "scoped_fn"}
+
+    def test_first_promotion_creates_canonical(self, tmp_path) -> None:
+        project = tmp_path / "proj"
+        out = project / "run_001"
+        out.mkdir(parents=True)
+        (project / "project.json").write_text("{}", encoding="utf-8")
+        src = out / "patterns.json"
+        src.write_text(json.dumps({
+            "patterns": {"fn": {"role": "parser"}},
+        }), encoding="utf-8")
+
+        prep._promote_to_project_concepts(src, out)
+
+        promoted = json.loads(
+            (project / "concepts" / "patterns.json").read_text())
+        assert promoted["patterns"] == {"fn": {"role": "parser"}}
+
+    def test_non_project_dir_is_noop(self, tmp_path) -> None:
+        out = tmp_path / "run_001"
+        out.mkdir()
+        src = out / "patterns.json"
+        src.write_text(json.dumps({"patterns": {}}), encoding="utf-8")
+        prep._promote_to_project_concepts(src, out)
+        assert not (tmp_path / "concepts").exists()

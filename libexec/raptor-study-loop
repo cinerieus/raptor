@@ -246,7 +246,8 @@ def _promote_to_project(output_dir: Path, concepts_dir: Path | None) -> None:
     pat_src = output_dir / "patterns.json"
     if pat_src.is_file():
         try:
-            _merge_promote_patterns(pat_src, concepts_dir / "patterns.json")
+            from core.concepts.study import merge_promote_patterns
+            merge_promote_patterns(pat_src, concepts_dir / "patterns.json")
             promoted += 1
         except (OSError, ValueError) as exc:
             print("study-loop: WARNING: failed to promote "
@@ -258,33 +259,6 @@ def _promote_to_project(output_dir: Path, concepts_dir: Path | None) -> None:
     if promoted:
         print(f"study-loop: promoted domain model to {concepts_dir}",
               file=sys.stderr)
-
-
-def _merge_promote_patterns(src: Path, canonical: Path) -> None:
-    """Merge a run's ``patterns.json`` into the canonical copy.
-
-    Keyed by pattern name, run wins per key — a narrowly scoped run
-    must never replace the whole-tree accumulation.
-    """
-    run_data = load_json(src, strict=True,
-                         max_bytes=_MAX_STUDY_ARTIFACT_BYTES) or {}
-    if not isinstance(run_data, dict):
-        return
-    merged = {}
-    if canonical.is_file():
-        prior = load_json(canonical, strict=True,
-                          max_bytes=_MAX_STUDY_ARTIFACT_BYTES)
-        if isinstance(prior, dict):
-            merged = prior
-    patterns = merged.get("patterns")
-    if not isinstance(patterns, dict):
-        patterns = {}
-    run_patterns = run_data.get("patterns")
-    if isinstance(run_patterns, dict):
-        patterns.update(run_patterns)
-    merged.update({k: v for k, v in run_data.items() if k != "patterns"})
-    merged["patterns"] = patterns
-    save_json(canonical, merged)
 
 
 def _store_in_sage(output_dir: Path, target: str) -> None:
