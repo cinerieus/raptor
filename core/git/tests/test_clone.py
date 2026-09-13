@@ -95,6 +95,29 @@ def test_clone_failure_raises_runtime_error(tmp_path: Path) -> None:
                               tmp_path / "out")
 
 
+def test_clone_proxy_hosts_follow_isolated_override(tmp_path: Path) -> None:
+    """The conftest fixture redirects the operator proxy-hosts
+    override to a per-test path — writing an override THERE must steer
+    ``clone_repository``'s allowlist. This pins both the resolution
+    seam and the suite's hermeticity: a real operator override (e.g. a
+    private-mirror config that bans github.com) can no longer leak
+    into these tests."""
+    import json
+
+    from core.git import _proxy_hosts as mod
+
+    mod._OVERRIDE_CONFIG_PATH.write_text(
+        json.dumps({"hosts": ["mirror.example.test"]}), encoding="utf-8",
+    )
+    with patch("core.sandbox.run_untrusted_networked") as mock_run:
+        mock_run.side_effect = _clone_materialises
+        # Any allowlisted-shape URL; the override governs proxy_hosts,
+        # not URL validation.
+        clone_repository("https://github.com/foo/bar", tmp_path / "out")
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs.get("proxy_hosts") == ["mirror.example.test"]
+
+
 def test_clone_engages_egress_proxy(tmp_path: Path) -> None:
     """``run_untrusted_networked`` implicitly engages the egress proxy.
     Pin ``proxy_hosts`` so future refactors can't drop it."""
