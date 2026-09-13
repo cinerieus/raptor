@@ -198,8 +198,12 @@ def _run_analyse(argv):
     try:
         start_run(output_dir, "sca", target=str(target))
     except Exception as e:
+        from core.project.oplock import OpLockContention
         from core.run.pin import ProjectArgvError
-        if isinstance(e, ProjectArgvError):
+        if isinstance(e, (ProjectArgvError, OpLockContention)):
+            # Same CLI contract as raptor-run-lifecycle: a contended
+            # project prints the named-holder refusal, never a raw
+            # traceback.
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
         raise
