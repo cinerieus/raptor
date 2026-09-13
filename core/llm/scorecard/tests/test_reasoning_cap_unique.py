@@ -31,6 +31,11 @@ PRODUCERS = [
     "judge.py",
     "consensus.py",
     "reasoning_divergence.py",
+    "prefilter.py",
+    "stability.py",
+    "self_consistency.py",
+    "cross_family.py",
+    "validate_feedback.py",
 ]
 
 

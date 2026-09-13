@@ -36,6 +36,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from . import _MAX_REASONING_CHARS
 from .scorecard import EventType, ModelScorecard, Policy
 
 _logger = logging.getLogger(__name__)
@@ -144,8 +145,8 @@ def record_prefilter_outcome(
             # ending up in the scorecard. The first ~500 chars are
             # almost always the model's verdict-summary; the rest
             # is usually procedural or restating the question.
-            "this_reasoning": (cheap_reasoning or "")[:500],
-            "other_reasoning": (full_reasoning or "")[:500],
+            "this_reasoning": (cheap_reasoning or "")[:_MAX_REASONING_CHARS],
+            "other_reasoning": (full_reasoning or "")[:_MAX_REASONING_CHARS],
         }
     scorecard.record_event(
         decision_class=decision_class,
