@@ -167,6 +167,12 @@ class TestLegBStaleAlias:
         assert d["event"]["verb"] == "BIO_free"
         assert d["event"]["vocab_source"] == "learned"
         assert d["invalidation_search"]["found"] is None
+        # The receipt must describe the search that actually ran —
+        # a claimed callee-depth scan that never executes would
+        # overstate confidence in "alias live".
+        assert "depth" not in d["invalidation_search"]
+        assert d["invalidation_search"]["scope"] == \
+            "event-function-remainder+census-null-writes"
         assert d["post_event_reads"][0]["function"] == "ctx_pool"
         assert d["owner"] == {"name": "b", "field": "pool"}
 

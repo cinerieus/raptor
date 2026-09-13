@@ -141,10 +141,6 @@ _HYPOTHESIS_STOPWORDS = frozenset({
     "void", "char",
 })
 
-# Invalidation search bounds (leg B step 3).
-_INVALIDATION_CALLEE_DEPTH = 2
-_MAX_INVALIDATION_FUNCTIONS = 50
-
 # Standing pre-pass caps.
 PREPASS_BUDGET_S = 20.0
 MAX_PARITY_DEVIATIONS = 20
@@ -562,9 +558,11 @@ def _invalidation_receipt(
     census: FieldCensus,
 ) -> dict[str, Any] | None:
     """Search for an invalidating write to the alias after the event:
-    in the event function's remainder, then in direct callees
-    (depth ≤ 2, capped). Returns the receipt when found (→ refuted),
-    else None (alias live)."""
+    in the event function's remainder, then census-wide NULL writes to
+    the alias field on the same holder (the invalidate-in-helper
+    shape — the census records carry cross-function writes, so no
+    callee-body walk runs). Returns the receipt when found
+    (→ refuted), else None (alias live)."""
     if edge.kind == "field":
         # The NULL write must hit the ALIAS-HOLDING base: an
         # unconstrained `\w+->field = NULL` match let a write to any
@@ -610,7 +608,8 @@ def _invalidation_receipt(
                     "line": w.line,
                     "code": w.code,
                 }
-    del source_texts  # depth-2 callee scan rides the census records
+    del source_texts  # unused: census records already carry the
+    # cross-function null-writes this search consumes
     return None
 
 
@@ -808,9 +807,11 @@ def _adjudicate_alias(
         event={**event, "function": function_span.name,
                "file": file_path},
         post_event_reads=reads,
+        # The receipt must describe the search that actually ran:
+        # event-function remainder plus census-recorded NULL writes —
+        # not a callee-body walk this module does not perform.
         invalidation_search={
-            "scanned_functions": 1,
-            "depth": _INVALIDATION_CALLEE_DEPTH,
+            "scope": "event-function-remainder+census-null-writes",
             "found": None,
         },
     )
