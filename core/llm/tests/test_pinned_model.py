@@ -214,3 +214,27 @@ class TestPinnedMaxTokensCap:
         self._install_limits(monkeypatch, {})
         cfg = _pinned_llm_config("anthropic/claude-unknown-test")
         assert cfg.primary_model.max_tokens == 64000
+
+
+def test_pinned_llm_config_tolerates_non_dict_config_entries(monkeypatch):
+    """_read_config_models deliberately passes non-dict entries
+    through; a stray string/number in the operator's models.json must
+    degrade to a skip (like every sibling consumer), not an
+    AttributeError from every LLMClient(pinned_model=...)."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    entries = [
+        "garbage-string-entry",
+        42,
+        {"provider": "anthropic", "model": "claude-opus-4-8",
+         "api_key": "test-fake-key"},
+    ]
+    monkeypatch.setattr(
+        "core.llm.config._get_configured_models", lambda: list(entries),
+    )
+    # Shorthand resolution walks configured model names; credential
+    # discovery walks provider entries — both paths must skip the
+    # non-dict entries and land on the real one.
+    cfg = _pinned_llm_config("claude-opus-4-8")
+    assert cfg.primary_model is not None
+    assert cfg.primary_model.provider == "anthropic"
+    assert cfg.primary_model.api_key == "test-fake-key"

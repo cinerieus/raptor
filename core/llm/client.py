@@ -1041,10 +1041,15 @@ def _pinned_llm_config(model_name: str) -> 'LLMConfig':
         from core.security.llm_family import (
             resolve_model_shorthand as _resolve_shorthand,
         )
+        # isinstance guard: _read_config_models deliberately passes
+        # non-dict entries through, and every sibling consumer
+        # tolerates them — one stray string in the operator's
+        # models.json must not turn every pinned-model construction
+        # into an AttributeError.
         configured = [
             e.get("model", "")
             for e in _get_configured_models()
-            if e.get("model")
+            if isinstance(e, dict) and e.get("model")
         ]
         resolved = _resolve_shorthand(model_name, configured)
         if resolved is not None:
@@ -1067,6 +1072,9 @@ def _pinned_llm_config(model_name: str) -> 'LLMConfig':
     base = builder() if builder is not None else None
     if base is None:
         for entry in _get_configured_models():
+            # Same non-dict tolerance as the shorthand resolution above.
+            if not isinstance(entry, dict):
+                continue
             if entry.get("provider") == provider and entry.get("api_key"):
                 base = ModelConfig(
                     provider=provider,
