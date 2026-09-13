@@ -3,6 +3,8 @@
 import re
 
 _SAFE_ID_RE = re.compile(r'[^A-Za-z0-9_-]')
+# Dash runs are Mermaid edge tokens (`--`, `---`) — see sanitize_id.
+_DASH_RUN_RE = re.compile(r'-{2,}')
 
 _FENCE_RE = re.compile(r'`{3,}')
 
@@ -56,10 +58,15 @@ def sanitize_id(node_id: str) -> str:
     ID can inject arbitrary Mermaid directives including click callbacks
     that execute JavaScript when rendered in a browser.
 
-    Strips everything except [A-Za-z0-9_-].
+    Strips everything except [A-Za-z0-9_-], then collapses dash RUNS
+    to a single dash: `--`/`---` are Mermaid EDGE tokens even in node
+    position, so an id like `A---B` would parse as an edge between
+    phantom nodes A and B and inject spurious topology into the
+    rendered graph. A single `-` inside an id is inert.
     """
     sanitized = _SAFE_ID_RE.sub('_', str(node_id))
-    return sanitized if sanitized.strip('_') else "node"
+    sanitized = _DASH_RUN_RE.sub('-', sanitized)
+    return sanitized if sanitized.strip('_-') else "node"
 
 
 def detect_id_collisions(raw_ids) -> list[tuple[str, list[str]]]:

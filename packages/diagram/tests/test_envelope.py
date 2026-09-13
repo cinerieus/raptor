@@ -104,3 +104,30 @@ class TestFlowTraceMalformedSteps:
         # instead of degrading the whole trace to "Could not render".
         assert 'S1["' in out
         assert 'S2["' in out
+
+
+class TestSanitizeIdDashRuns:
+    def test_dash_run_collapsed(self):
+        from ..sanitize import sanitize_id
+
+        # `A---B["label"]` parses as an EDGE between phantom nodes A
+        # and B in flowchart context; runs must collapse to one dash.
+        assert sanitize_id("A---B") == "A-B"
+        assert sanitize_id("A--B") == "A-B"
+
+    def test_single_dash_kept(self):
+        from ..sanitize import sanitize_id
+
+        assert sanitize_id("entry-point") == "entry-point"
+
+    def test_all_dash_id_falls_back(self):
+        from ..sanitize import sanitize_id
+
+        assert sanitize_id("---") == "node"
+
+    def test_stripped_chars_then_dash_run_still_collapsed(self):
+        from ..sanitize import sanitize_id
+
+        # Strip pass may not INTRODUCE runs (strips map to '_'), but a
+        # pre-existing run around stripped chars must still collapse.
+        assert "--" not in sanitize_id("x!--!y--z")
