@@ -35,16 +35,20 @@ from typing import Any, TYPE_CHECKING
 from core.json import load_json, save_json
 
 
-# The ground-truth label sources, shared by the exploited-set loader
-# and the provenance block so the two can never drift apart.
-_GROUND_TRUTH_FILES = (
-    "kev_signals.json",
-    "exploitdb_signals.json",
-    "metasploit_signals.json",
-    "github_poc_signals.json",
-    "osv_evidence_signals.json",
-    "vulnrichment_signals.json",
-)
+def _ground_truth_files() -> tuple[str, ...]:
+    """Locator for the ground-truth label sources — the single list
+    shared by the exploited-set loader and the provenance block so the
+    two can never drift apart. Each file is parsed with ``load_json``
+    by both callers.
+    """
+    return (
+        "kev_signals.json",
+        "exploitdb_signals.json",
+        "metasploit_signals.json",
+        "github_poc_signals.json",
+        "osv_evidence_signals.json",
+        "vulnrichment_signals.json",
+    )
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -198,7 +202,7 @@ def _load_ground_truth(corpus_dir: Path) -> set[str]:
     have skewed the precision metric vs the metric refit optimises.
     """
     exploited: set[str] = set()
-    for fname in _GROUND_TRUTH_FILES:
+    for fname in _ground_truth_files():
         path = corpus_dir / fname
         if not path.is_file():
             continue
@@ -387,7 +391,7 @@ def _provenance_summary(corpus_dir: Path) -> dict[str, str]:
     # signal with its own snapshot) — pre-fix the dominant label source
     # (vulnrichment, ~29k labels) was missing from the provenance
     # block, making metric shifts unattributable.
-    for fname in _GROUND_TRUTH_FILES + ("epss_signals.json",):
+    for fname in _ground_truth_files() + ("epss_signals.json",):
         path = corpus_dir / fname
         if not path.is_file():
             continue
