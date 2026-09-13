@@ -1961,7 +1961,6 @@ def _go_method_bodies(source: str) -> list[tuple[str, str, str, str]]:
     Go method. Body extent = brace balance from the signature line."""
     out = []
     for m in _GO_METHOD_RE.finditer(source):
-        start = source.find("{", m.end() - 1)
         sig_end = source.find("\n", m.end())
         brace = source.find("{", sig_end - 1 if sig_end > 0 else m.end())
         if brace < 0:
@@ -1979,7 +1978,6 @@ def _go_method_bodies(source: str) -> list[tuple[str, str, str, str]]:
                     break
         out.append((m.group(1), m.group(2), m.group(3),
                     source[brace:end + 1]))
-        del start
     return out
 
 
