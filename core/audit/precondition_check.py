@@ -188,15 +188,20 @@ def verify_preconditions(
 def _read_function_source(
     target_path: Path, file_path: str, function_name: str,
 ) -> str | None:
-    """Read a function's source from the target directory."""
-    full = (target_path / file_path).resolve()
-    if not full.is_relative_to(target_path.resolve()):
-        return None
-    if not full.is_file():
-        return None
-    try:
-        text = full.read_text(errors="replace")
-    except OSError:
+    """Read a function's source from the target directory.
+
+    ``file_path`` arrives from LLM-authored assumption records, so the
+    join is containment-checked and the read size-capped
+    (``core.source.read_contained`` — also absorbs pathological
+    values like NUL bytes that the previous hand-rolled
+    ``resolve()``/``is_relative_to`` guard let raise). Any refusal
+    reads as source-unavailable: the caller's inconclusive lane,
+    never a verdict.
+    """
+    from core.source import read_contained
+
+    text = read_contained(target_path, file_path)
+    if text is None:
         return None
 
     # For C: find function definition by name and extract the body

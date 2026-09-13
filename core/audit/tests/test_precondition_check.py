@@ -424,6 +424,55 @@ class TestVerifyPreconditions:
         assert not verdict.any_contradicted
         assert verdict.checks[0].verdict == "inconclusive"
 
+    def test_traversal_path_is_inconclusive(self, tmp_path):
+        # location.file is LLM-authored: a ../ segment must not escape
+        # the analysed root (pinned across the contained-read helper
+        # migration).
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.c").write_text(REQPARSE_C)
+        verdict = verify_preconditions([{
+            "assumption": "no bounds check",
+            "check_type": "caller_bounds_checks",
+            "location": {
+                "file": "../outside.c", "function": "handle_request",
+            },
+            "expect_absent": True,
+        }], target)
+        assert not verdict.any_contradicted
+        assert verdict.checks[0].verdict == "inconclusive"
+        assert "could not read" in verdict.checks[0].evidence
+
+    def test_absolute_path_is_inconclusive(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text(REQPARSE_C)
+        verdict = verify_preconditions([{
+            "assumption": "no bounds check",
+            "check_type": "caller_bounds_checks",
+            "location": {
+                "file": str(outside), "function": "handle_request",
+            },
+            "expect_absent": True,
+        }], target)
+        assert not verdict.any_contradicted
+        assert verdict.checks[0].verdict == "inconclusive"
+
+    def test_nul_byte_path_is_inconclusive(self, target_dir):
+        # A NUL byte in the LLM-authored path must read as
+        # source-unavailable, not raise out of the verifier.
+        verdict = verify_preconditions([{
+            "assumption": "no bounds check",
+            "check_type": "caller_bounds_checks",
+            "location": {
+                "file": "req\x00parse.c", "function": "handle_request",
+            },
+            "expect_absent": True,
+        }], target_dir)
+        assert not verdict.any_contradicted
+        assert verdict.checks[0].verdict == "inconclusive"
+
     def test_multiple_preconditions_one_contradicted(self, target_dir):
         """If any precondition is contradicted, any_contradicted is True."""
         preconditions = [
