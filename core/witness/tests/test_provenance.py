@@ -4,10 +4,12 @@ witness/feasibility evidence records (W1 witness/verdict provenance).
 
 from __future__ import annotations
 
+import itertools
 import os
 
 import pytest
 
+from core.security import mac_key
 from core.witness import provenance as prov
 
 
@@ -415,3 +417,60 @@ class TestWitnessManifestMAC:
         prov.stamp_witness_manifest(manifest)
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "this-xdg"))
         assert not prov.verify_witness_manifest(manifest)
+
+
+class TestKeyCreationRace:
+    """The loser of the O_EXCL creation race must tolerate the
+    winner's create-to-write window."""
+
+    @pytest.fixture()
+    def race_warn_calls(self, monkeypatch):
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            prov, "_warn_once_suspect_key",
+            lambda *args: calls.append(args),
+        )
+        return calls
+
+    @pytest.fixture()
+    def lose_creation_race(self, monkeypatch):
+        """Make the key-create os.open lose the O_EXCL race."""
+        real_open = os.open
+
+        def fake_open(path, flags, mode=0o777):
+            if flags & os.O_EXCL:
+                raise FileExistsError(path)
+            return real_open(path, flags, mode)
+
+        monkeypatch.setattr(os, "open", fake_open)
+        monkeypatch.setattr(mac_key.time, "sleep", lambda s: None)
+
+    def test_race_loser_retries_through_empty_read(
+            self, monkeypatch, race_warn_calls, lose_creation_race):
+        """Between the winner's O_EXCL create and its write the key
+        file exists with 0 bytes. The loser must keep polling through
+        that transient shape and stamp with the winner's full key —
+        aborting on the first short read persisted the loser's
+        evidence records unstamped (demoted to LLM-tier, re-derived)
+        and flagged the operator's healthy key as suspect."""
+        full_key = b"k" * 32
+        reads = iter([None, b"", full_key])
+        monkeypatch.setattr(
+            prov, "_read_existing_key", lambda path: next(reads),
+        )
+
+        assert prov._load_or_create_key() == full_key
+        assert race_warn_calls == []
+
+    def test_persistent_wrong_length_warns_after_retries(
+            self, monkeypatch, race_warn_calls, lose_creation_race):
+        """A key file that STAYS short is genuinely suspect: the loop
+        runs out of retries, warns once, and refuses (None)."""
+        reads = itertools.chain([None], itertools.repeat(b"short"))
+        monkeypatch.setattr(
+            prov, "_read_existing_key", lambda path: next(reads),
+        )
+
+        assert prov._load_or_create_key() is None
+        assert len(race_warn_calls) == 1
+        assert "wrong length" in race_warn_calls[0][1]
