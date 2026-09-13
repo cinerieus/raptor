@@ -31,7 +31,7 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
-from ._base import build_purl
+from ._base import build_purl, lockfile_confidence
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias
 
@@ -324,13 +324,13 @@ def _walk_v1(
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.GIT:
-        return Confidence("medium", reason="package-lock.json git source")
-    if pin_style is PinStyle.PATH:
-        return Confidence("medium", reason="package-lock.json file/url source")
-    if version is None:
-        return Confidence("low", reason="package-lock.json entry without version")
-    return Confidence("high", reason="package-lock.json resolved entry")
+    return lockfile_confidence(
+        pin_style, version,
+        git_reason="package-lock.json git source",
+        path_reason="package-lock.json file/url source",
+        unversioned_reason="package-lock.json entry without version",
+        resolved_reason="package-lock.json resolved entry",
+    )
 
 
 # ``npm-shrinkwrap.json`` is byte-identical to package-lock.json in

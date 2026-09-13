@@ -43,7 +43,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
-from ._base import build_purl
+from ._base import build_purl, lockfile_confidence
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias
 
@@ -366,13 +366,13 @@ def _classify_packages_entry(
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.GIT:
-        return Confidence("medium", reason="pnpm-lock.yaml git source")
-    if pin_style is PinStyle.PATH:
-        return Confidence("medium", reason="pnpm-lock.yaml file source")
-    if version is None:
-        return Confidence("low", reason="pnpm-lock.yaml entry without version")
-    return Confidence("high", reason="pnpm-lock.yaml resolved entry")
+    return lockfile_confidence(
+        pin_style, version,
+        git_reason="pnpm-lock.yaml git source",
+        path_reason="pnpm-lock.yaml file source",
+        unversioned_reason="pnpm-lock.yaml entry without version",
+        resolved_reason="pnpm-lock.yaml resolved entry",
+    )
 
 
 register(filenames=["pnpm-lock.yaml"])(parse)

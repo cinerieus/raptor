@@ -502,6 +502,9 @@ def _confidence(
     version: str | None,
     is_managed: bool,
 ) -> Confidence:
+    # Deliberately NOT the shared ``_base`` ladder: Maven confidence
+    # keys on property-resolution completeness and dependencyManagement
+    # provenance, not on pin style.
     if not fully_resolved:
         return Confidence("medium",
                           reason="POM property substitution incomplete")

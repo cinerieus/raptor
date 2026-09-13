@@ -31,7 +31,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
-from ._base import build_purl
+from ._base import build_purl, lockfile_confidence
 from . import _safe_read, register
 from ._npm_alias import looks_like_package_name as _looks_like_package_name
 
@@ -360,13 +360,13 @@ def _pin_from_berry_resolution(
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.GIT:
-        return Confidence("medium", reason="yarn.lock git source")
-    if pin_style is PinStyle.PATH:
-        return Confidence("medium", reason="yarn.lock workspace/file source")
-    if version is None:
-        return Confidence("low", reason="yarn.lock entry without version")
-    return Confidence("high", reason="yarn.lock resolved entry")
+    return lockfile_confidence(
+        pin_style, version,
+        git_reason="yarn.lock git source",
+        path_reason="yarn.lock workspace/file source",
+        unversioned_reason="yarn.lock entry without version",
+        resolved_reason="yarn.lock resolved entry",
+    )
 
 
 register(filenames=["yarn.lock"])(parse)

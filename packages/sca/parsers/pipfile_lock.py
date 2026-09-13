@@ -34,7 +34,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
-from ._base import build_purl
+from ._base import build_purl, lockfile_confidence
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -137,22 +137,13 @@ def _strip_eq(value: Any) -> str | None:
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.GIT:
-        return Confidence(
-            "medium",
-            reason="Pipfile.lock git source; ref recorded as version",
-        )
-    if pin_style is PinStyle.PATH:
-        return Confidence(
-            "medium",
-            reason="Pipfile.lock path/file source; no version",
-        )
-    if version is None:
-        return Confidence(
-            "low",
-            reason="Pipfile.lock entry without version",
-        )
-    return Confidence("high", reason="Pipfile.lock resolved entry")
+    return lockfile_confidence(
+        pin_style, version,
+        git_reason="Pipfile.lock git source; ref recorded as version",
+        path_reason="Pipfile.lock path/file source; no version",
+        unversioned_reason="Pipfile.lock entry without version",
+        resolved_reason="Pipfile.lock resolved entry",
+    )
 
 
 register(filenames=["Pipfile.lock"])(parse)

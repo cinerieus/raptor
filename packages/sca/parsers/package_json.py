@@ -74,7 +74,7 @@ import re
 from pathlib import Path
 
 from ..models import Confidence, Dependency, PinStyle
-from ._base import build_purl
+from ._base import build_purl, manifest_confidence
 from ..versions import semver
 from . import _safe_read, register
 from ._npm_alias import split_npm_alias as _split_npm_alias
@@ -535,16 +535,15 @@ def _classify(spec: str) -> tuple[PinStyle, str | None, str | None]:
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.UNKNOWN:
-        return Confidence("low", reason="package.json spec unrecognised")
-    if pin_style in (PinStyle.GIT, PinStyle.PATH):
-        return Confidence(
-            "medium",
-            reason="package.json points to git/path source; version best-effort",
-        )
-    if version is None:
-        return Confidence("medium", reason="package.json wildcard version")
-    return Confidence("high", reason="package.json structured field")
+    return manifest_confidence(
+        pin_style, version,
+        unrecognised_reason="package.json spec unrecognised",
+        git_path_reason=(
+            "package.json points to git/path source; version best-effort"
+        ),
+        unpinned_reason="package.json wildcard version",
+        pinned_reason="package.json structured field",
+    )
 
 
 

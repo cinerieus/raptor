@@ -36,7 +36,7 @@ from typing import Any
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
-from ._base import build_purl
+from ._base import build_purl, manifest_confidence
 from . import _safe_read, register
 
 logger = logging.getLogger(__name__)
@@ -602,20 +602,21 @@ def _confidence(
     pin_style: PinStyle, version: str | None, editable: bool
 ) -> Confidence:
     if editable:
+        # Editable installs precede the shared ladder: the pin style
+        # is meaningless when the source is a live working tree.
         return Confidence(
             "medium",
             reason="requirements.txt editable install; version unresolved",
         )
-    if pin_style is PinStyle.UNKNOWN:
-        return Confidence("low", reason="requirements.txt spec unrecognised")
-    if pin_style in (PinStyle.GIT, PinStyle.PATH):
-        return Confidence(
-            "medium",
-            reason="requirements.txt git/path source; version best-effort",
-        )
-    if version is None:
-        return Confidence("medium", reason="requirements.txt unpinned entry")
-    return Confidence("high", reason="requirements.txt structured spec")
+    return manifest_confidence(
+        pin_style, version,
+        unrecognised_reason="requirements.txt spec unrecognised",
+        git_path_reason=(
+            "requirements.txt git/path source; version best-effort"
+        ),
+        unpinned_reason="requirements.txt unpinned entry",
+        pinned_reason="requirements.txt structured spec",
+    )
 
 
 

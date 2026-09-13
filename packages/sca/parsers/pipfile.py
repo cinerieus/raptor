@@ -35,7 +35,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
-from ._base import build_purl
+from ._base import build_purl, manifest_confidence
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -194,15 +194,13 @@ def _classify_fallback(
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
-    if pin_style is PinStyle.UNKNOWN:
-        return Confidence("low", reason="Pipfile spec unrecognised")
-    if pin_style in (PinStyle.GIT, PinStyle.PATH):
-        return Confidence(
-            "medium", reason="Pipfile git/path source; version best-effort",
-        )
-    if version is None:
-        return Confidence("medium", reason="Pipfile unpinned entry")
-    return Confidence("high", reason="Pipfile structured spec")
+    return manifest_confidence(
+        pin_style, version,
+        unrecognised_reason="Pipfile spec unrecognised",
+        git_path_reason="Pipfile git/path source; version best-effort",
+        unpinned_reason="Pipfile unpinned entry",
+        pinned_reason="Pipfile structured spec",
+    )
 
 
 __all__ = ["parse"]

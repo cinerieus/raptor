@@ -164,6 +164,10 @@ def _classify(entry: dict[str, Any]) -> tuple[str | None, PinStyle]:
 
 
 def _confidence(pin_style: PinStyle, version: str | None) -> Confidence:
+    # Deliberately NOT the shared ``_base`` ladder: vcpkg keys on
+    # EXACT/RANGE structured fields (ports have no git/path pin
+    # shapes and a bare port name is still medium-trust registry
+    # metadata, not a low-trust unversioned lockfile row).
     if pin_style == PinStyle.EXACT and version:
         return Confidence("high", reason="vcpkg.json structured field")
     if pin_style == PinStyle.RANGE and version:

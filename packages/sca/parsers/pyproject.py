@@ -28,7 +28,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
-from ._base import build_purl
+from ._base import build_purl, manifest_confidence
 from . import _safe_read, register
 from .requirements import _spec_bounds
 
@@ -400,31 +400,25 @@ def _poetry_bounds(
 def _confidence_for_pep508(
     pin_style: PinStyle, version: str | None
 ) -> Confidence:
-    if pin_style in (PinStyle.GIT, PinStyle.PATH):
-        return Confidence(
-            "medium",
-            reason="pyproject.toml git/path dep; version best-effort",
-        )
-    if pin_style is PinStyle.UNKNOWN:
-        return Confidence("low", reason="pyproject.toml spec unrecognised")
-    if version is None:
-        return Confidence("medium", reason="pyproject.toml wildcard version")
-    return Confidence("high", reason="pyproject.toml PEP 621 entry")
+    return manifest_confidence(
+        pin_style, version,
+        unrecognised_reason="pyproject.toml spec unrecognised",
+        git_path_reason="pyproject.toml git/path dep; version best-effort",
+        unpinned_reason="pyproject.toml wildcard version",
+        pinned_reason="pyproject.toml PEP 621 entry",
+    )
 
 
 def _confidence_for_poetry(
     pin_style: PinStyle, version: str | None
 ) -> Confidence:
-    if pin_style is PinStyle.UNKNOWN:
-        return Confidence("low", reason="Poetry dep table without version")
-    if pin_style in (PinStyle.GIT, PinStyle.PATH):
-        return Confidence(
-            "medium",
-            reason="Poetry git/path source; version best-effort",
-        )
-    if version is None:
-        return Confidence("medium", reason="Poetry wildcard version")
-    return Confidence("high", reason="Poetry tool table")
+    return manifest_confidence(
+        pin_style, version,
+        unrecognised_reason="Poetry dep table without version",
+        git_path_reason="Poetry git/path source; version best-effort",
+        unpinned_reason="Poetry wildcard version",
+        pinned_reason="Poetry tool table",
+    )
 
 
 

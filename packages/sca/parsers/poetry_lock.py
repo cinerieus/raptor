@@ -37,7 +37,7 @@ from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
 from ..naming import pep503_name
-from ._base import build_purl
+from ._base import build_purl, lockfile_confidence
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -139,7 +139,7 @@ def _build_dep(pkg: dict[str, Any], path: Path) -> Dependency | None:
         pin_style=pin_style,
         direct=False,
         purl=build_purl("pypi", pep503_name(name), version),
-        parser_confidence=_confidence(pin_style, version, scope, confidence_reason),
+        parser_confidence=_confidence(pin_style, version, confidence_reason),
     )
 
 
@@ -158,16 +158,15 @@ def _infer_scope(pkg: dict[str, Any]) -> str:
 def _confidence(
     pin_style: PinStyle,
     version: str | None,
-    scope: str,                           # noqa: ARG001 — kept for symmetry
     base_reason: str,
 ) -> Confidence:
-    if pin_style is PinStyle.GIT:
-        return Confidence("medium", reason=base_reason)
-    if pin_style is PinStyle.PATH:
-        return Confidence("medium", reason=base_reason)
-    if version is None:
-        return Confidence("low", reason="poetry.lock entry without version")
-    return Confidence("high", reason=base_reason)
+    return lockfile_confidence(
+        pin_style, version,
+        git_reason=base_reason,
+        path_reason=base_reason,
+        unversioned_reason="poetry.lock entry without version",
+        resolved_reason=base_reason,
+    )
 
 
 
