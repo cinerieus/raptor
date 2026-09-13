@@ -174,22 +174,22 @@ contributors, one line each:
   `.github/scripts/check_command_metadata.py`) — every
   `.claude/commands/*.md` needs a parseable `dispatch:` field whose
   target exists on disk.
-- **env-docs** (daily, `.github/scripts/check_env_docs.py`) — extracts
+- **env-docs** (PR gate + daily sweep, `.github/scripts/check_env_docs.py`) — extracts
   every environment variable the tree reads or writes; an undocumented
   operator-facing variable fails, and so does a stale entry in
   [environment.md](environment.md).
-- **vocab-lists** (daily, `.github/scripts/check_vocab_lists.py`) —
+- **vocab-lists** (PR gate + daily sweep, `.github/scripts/check_vocab_lists.py`) —
   literal function-name lists longer than nine names outside the
   data-pack seams fail; route the names through a pack.
-- **miswiring** (daily, `.github/scripts/check_miswiring.py`) — dead
+- **miswiring** (PR gate + daily sweep, `.github/scripts/check_miswiring.py`) — dead
   definitions, kwarg/signature mismatches, swallowed exceptions,
   parsed-but-never-read flags. Note it counts textual mentions in
   `docs/`, `.claude/`, `bin/`, `tiers/`, and `.github/` as
   references — a doc line can keep a symbol "alive".
-- **optional-dep-imports** (daily) — test files importing optional
+- **optional-dep-imports** (PR gate + daily sweep) — test files importing optional
   packages need an import guard, or they pass on developer hosts and
   fail on bare CI.
-- **canonical-json** (daily, `.github/scripts/check_canonical_json.py`)
+- **canonical-json** (PR gate + daily sweep, `.github/scripts/check_canonical_json.py`)
   — canonical JSON byte forms are frozen: inside the MAC/hash module
   list every raw `json.dumps` must be `core.json.dumps_canonical` or
   baselined with a note, and a `json.dumps` result flowing into

@@ -104,11 +104,14 @@ frontmatter field pointing at the CLI entry point. The entry point goes in
 
 Beyond the test suite and lint (which run on every PR — including
 `check_command_metadata.py`, which requires every `.claude/commands/*.md`
-to carry a parseable `dispatch:` field whose target exists on disk), two
-scheduled scans run daily from
-`.github/workflows/miswiring-scan.yml`. They are not PR gates — the
-full-repo index takes a while and the findings need human judgement —
-but a failure is actionable:
+to carry a parseable `dispatch:` field whose target exists on disk), the
+repo-invariant detectors are PR gates too: the `repo-invariants` job in
+`.github/workflows/lint.yml` runs them on every pull request, push to
+`main`, and merge-queue entry, and
+`.github/workflows/miswiring-scan.yml` re-runs the same set daily as a
+belt-and-braces sweep. A new finding fails the job; deliberate
+exceptions go in the detector's baseline JSON with a note. The two you
+are most likely to hit:
 
 - **Miswiring scan** (`.github/scripts/check_miswiring.py`) — detects
   kwarg/signature mismatches, broken in-repo imports, dead definitions,
