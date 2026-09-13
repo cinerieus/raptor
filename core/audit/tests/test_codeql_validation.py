@@ -368,6 +368,53 @@ class TestSmtPruneSarifMatches:
         assert (kept, pruned) == (1, 0)
         assert calls == []
 
+    def test_prune_treats_signedness_as_guessed(
+        self, tmp_path, monkeypatch,
+    ):
+        # The harvested guard text carries no type information, so the
+        # prune must not assert a known signedness: profile=None routes
+        # validate_path to the both-profiles-agree rule instead of the
+        # single-profile check an explicit "uint64" buys.
+        import packages.exploit_feasibility.smt_path as smt_path_mod
+
+        target = _write_guarded_source(tmp_path)
+        sarif = _sarif_with_flow([("src/vuln.c", 3)])
+        profiles: list = []
+
+        def stub(conditions, profile="MISSING", timeout_ms=None, **kw):
+            profiles.append(profile)
+            return {
+                "feasible": True, "reasoning": "sat",
+                "unsatisfied": [], "satisfied": [], "unknown": [],
+                "smt_available": True,
+            }
+
+        monkeypatch.setattr(smt_path_mod, "validate_path", stub)
+        _smt_prune_sarif_matches(sarif, target)
+        assert profiles == [None]
+
+    @pytest.mark.skipif(
+        not __import__(
+            "core.smt_solver.availability", fromlist=["z3_available"],
+        ).z3_available(),
+        reason="z3 not installed",
+    )
+    def test_signed_error_check_guard_not_pruned(self, tmp_path):
+        """``if (ret < 0)`` — the ubiquitous C signed error check —
+        must keep the match: under a pinned unsigned profile it
+        encodes as ULT(ret, 0), unsat, and refuted a live path."""
+        target = tmp_path / "target"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "signed.c").write_text(
+            "int f(int ret) {\n"
+            "    if (ret < 0)\n"
+            "        sink(ret);\n"
+            "}\n",
+        )
+        sarif = _sarif_with_flow([("src/signed.c", 3)])
+        kept, pruned, receipts = _smt_prune_sarif_matches(sarif, target)
+        assert (kept, pruned, receipts) == (1, 0, [])
+
     @pytest.mark.skipif(
         not __import__(
             "core.smt_solver.availability", fromlist=["z3_available"],

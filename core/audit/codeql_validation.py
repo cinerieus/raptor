@@ -474,9 +474,18 @@ def _smt_prune_sarif_matches(
                     all_unsat = False
                     continue
                 try:
+                    # profile=None: the guards are raw source text
+                    # harvested with no type information, so their
+                    # signedness is a GUESS — validate_path then
+                    # reports infeasible only when BOTH signedness
+                    # profiles agree. A pinned "uint64" asserted
+                    # knowledge this harvester doesn't have: the
+                    # ubiquitous C signed error check (ret < 0)
+                    # encodes as ULT(ret, 0), unsat, and pruned a
+                    # live dataflow match outright.
                     res = validate_path(
                         conditions,
-                        profile="uint64",
+                        profile=None,
                         timeout_ms=_SMT_PRUNE_TIMEOUT_MS,
                     )
                 except Exception:
