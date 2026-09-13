@@ -544,6 +544,15 @@ def _sanitize_log_message(msg: str) -> str:
 
     Searchable tags: #SECURITY #API_KEY_PROTECTION #LOG_SANITIZATION
     Related: Cursor Bot Bug #2, PR #32, defense-in-depth best practice
+
+    Finishes with ``core.security.redaction.redact_secrets`` — the
+    repo's broader, actively-maintained pattern set (the per-attempt
+    logs a few lines above the terminal give-up messages already use
+    it) — so pattern additions there automatically guard the
+    highest-visibility message (the raised RuntimeError text that
+    propagates into reports) instead of only the weaker local set.
+    The local patterns run first and keep their triage-friendly
+    ``[REDACTED-API-KEY]`` markers for the shapes they cover.
     """
     # Redact private key material before shorter generic patterns. If a log line
     # is truncated before the END marker, redact through the end of the message.
@@ -580,8 +589,13 @@ def _sanitize_log_message(msg: str) -> str:
     msg = re.sub(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b', '[REDACTED-API-KEY]', msg)
     # Redact key/value or JSON-ish assignments such as API_KEY=*** or "token": "***".
     # Keep these field names intentionally bounded to avoid redacting metadata
-    # such as PASSWORD_POLICY, SECRET_ROTATION_DAYS, MAX_API_KEY_LENGTH, or
-    # pagination cursors like page_token/next_token.
+    # such as PASSWORD_POLICY, SECRET_ROTATION_DAYS, or MAX_API_KEY_LENGTH.
+    # NOTE: the shared redact_secrets final pass below additionally
+    # redacts secret-SUFFIXED names by NAME (its long-standing URL
+    # convention), so pagination-cursor VALUES ≥8 chars (page_token,
+    # next_token) no longer survive this function even though the
+    # local vocabulary here excludes them — pinned both ways in
+    # test_pagination_cursor_boundary.
     secret_field = (
         r'(?:[A-Za-z0-9_-]*(?:API[_-]?KEY|PASSWORD|'
         r'SECRET[_-]?KEY|SECRET[_-]?ACCESS[_-]?KEY)'
@@ -613,12 +627,16 @@ def _sanitize_log_message(msg: str) -> str:
         flags=re.IGNORECASE,
     )
     # Unquoted values end at common log/JSON delimiters.
-    return re.sub(
+    msg = re.sub(
         rf'(\b{secret_field}\b\s*[:=]\s*)([^"\'\s,}}]+)',
         r'\1[REDACTED-API-KEY]',
         msg,
         flags=re.IGNORECASE,
     )
+    # Final pass through the shared redactor (docstring rationale).
+    from core.security.redaction import redact_secrets
+
+    return redact_secrets(msg)
 
 
 def _is_auth_error(error: Exception) -> bool:

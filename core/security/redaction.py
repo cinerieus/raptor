@@ -161,11 +161,38 @@ _URL_PAIR_RE = re.compile(
 )
 
 
+# Code-expression value shapes the assignment pass must NOT redact.
+# `token = lexer.next_token()` / `signature = inspect.signature(func)` /
+# `auth = request.headers.get(...)` are diagnostic code snippets (LLM
+# reasoning quotes them into disagreement samples); their "values" are
+# dotted attribute paths or call expressions, never credentials.
+# Trade-off, both directions: skipping them preserves sample/log
+# diagnostic value; a REAL secret shaped exactly like a dotted
+# identifier path (segments starting with letters, no +/=) under a
+# secret-named assignment would evade — canonical dotted secrets
+# (JWTs) are caught by the vendor pattern that runs earlier, and
+# random credentials virtually never parse as attribute paths.
+_CODE_VALUE_RE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\Z")
+
+
 def _redact_assignment(match: re.Match[str]) -> str:
     if not is_secret_field_name(match.group(2)):
         return match.group(0)
+    value = match.group(5)
+    end = match.end()
+    is_call = end < len(match.string) and match.string[end] == "("
+    if is_call or _CODE_VALUE_RE.match(value):
+        return match.group(0)
     return (f"{match.group(1)}{match.group(2)}{match.group(1)}"
             f"{match.group(3)}{match.group(4)}[REDACTED]")
+
+
+def _redact_basic(match: re.Match[str]) -> str:
+    value = match.group(1)
+    mixed_case = value != value.lower() and value != value.upper()
+    if mixed_case or re.search(r"[0-9+/=]", value):
+        return "Basic [REDACTED]"
+    return match.group(0)
 
 
 def _redact_url_pair(match: re.Match[str]) -> str:
@@ -317,9 +344,18 @@ def redact_secrets(value: object, *, reveal_secrets: bool = False) -> str:
         text,
         flags=re.IGNORECASE,
     )
+    # Basic credentials are base64("user:pass"); real encodings carry
+    # a digit, '+', '/', '=' or mixed case essentially always, while
+    # an all-one-case digitless word after "Basic"/"basic" is prose
+    # ("basic understanding of heap grooming"). Trade-off, both
+    # directions: the value gate preserves prose in disagreement
+    # samples and reports; the residual — a credential whose base64
+    # happens to be all-one-case letters with no digits or padding —
+    # is a vanishing corner of the encoding space, accepted and
+    # pinned by test.
     text = re.sub(
-        r"Basic\s+[A-Za-z0-9+/]{8,}={0,2}",
-        "Basic [REDACTED]",
+        r"Basic\s+([A-Za-z0-9+/]{8,}={0,2})",
+        _redact_basic,
         text,
         flags=re.IGNORECASE,
     )
