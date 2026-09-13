@@ -1242,17 +1242,19 @@ def cmd_stale(args: argparse.Namespace) -> int:
 
 
 def cmd_feedback(args: argparse.Namespace) -> int:
-    """Import /validate results back into annotations.
+    """Import /validate results as review-journal corrections.
 
-    Closes the Reflexion loop: /validate verdicts flow back into
-    /audit annotations, updating status + body so subsequent runs
-    learn from past mistakes.
+    Closes the Reflexion loop: /validate verdicts append correction
+    entries to the review journal so subsequent runs learn from past
+    mistakes. Annotations are consulted READ-ONLY — a human-grade note
+    with a conclusion status vetoes the correction — and are never
+    written back (annotations are human-authored).
 
-    Status transitions:
+    Verdict transitions (journal entries, not annotation edits):
       - ruled_out / is_true_positive=false → finding|suspicious → clean
       - confirmed / exploitable when audit said clean → clean → finding
-      - confirmed / exploitable when audit said finding → no status change,
-        append corroboration note
+      - confirmed / exploitable when audit said finding → corroboration
+        entry, verdict unchanged
     """
     from core.audit.feedback import import_validation_results
 
@@ -1272,7 +1274,7 @@ def cmd_feedback(args: argparse.Namespace) -> int:
         audit_out_dir=audit_out,
     )
 
-    print(f"Feedback imported: {result['updated']} annotation(s) updated")
+    print(f"Feedback imported: {result['updated']} journal correction(s)")
     if result["downgraded"]:
         print(f"  Downgraded: {result['downgraded']} "
               f"(finding/suspicious → clean)")
@@ -1281,7 +1283,8 @@ def cmd_feedback(args: argparse.Namespace) -> int:
     if result["corroborated"]:
         print(f"  Corroborated: {result['corroborated']}")
     if result["skipped"]:
-        print(f"  Skipped (no matching annotation): {result['skipped']}")
+        print(f"  Skipped (no prior verdict, or human-note veto): "
+              f"{result['skipped']}")
     return 0
 
 
