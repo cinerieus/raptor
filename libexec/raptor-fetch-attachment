@@ -15,13 +15,19 @@ network tool of their own. Constraints, all fail-closed:
   - https only;
   - the transfer goes through ``core.http.EgressClient`` (in-process
     egress proxy: hostname allowlist pinned to the attachment's own
-    host, private-IP / loopback resolution refused, size-capped body).
+    host, private-IP / loopback resolution refused, size-capped body);
+  - the destination is confined to the ``attachments/`` directory
+    beside the bug report: only the final file name of ``<dest-file>``
+    is honoured (sanitised to a conservative charset), and any parent
+    (``..``) component refuses — the file name originates in the
+    untrusted tracker, so it must never steer the write location.
 
 The downloaded file is an untrusted crash input: callers feed it to
 the instrumented target program, nothing else.
 
 Exit codes: 0 success, 1 download/validation failure, 2 usage error.
 """
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -50,6 +56,35 @@ from core.json import load_json  # noqa: E402
 _MAX_REPORT_BYTES = 8 * 1024 * 1024
 
 
+# Attachment file names come from the untrusted tracker (the agent
+# composes <workdir>/attachments/<filename> from the report), so the
+# kept name is reduced to a conservative charset.
+_SAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_MAX_NAME_LEN = 128
+
+
+def _confine_dest(dest_arg: str, report_path: Path) -> Path | None:
+    """Confine the requested destination under the run's attachment
+    directory (``attachments/`` beside the bug report).
+
+    Only the final file name of *dest_arg* is honoured; a ``..``
+    component anywhere refuses outright (None) rather than being
+    silently repaired — a traversal-shaped name is a signal worth
+    surfacing, not normalising. The name is then reduced to a
+    conservative charset and stripped of leading dots/dashes so it can
+    be neither an option shape nor a dotfile.
+    """
+    raw = Path(dest_arg)
+    if ".." in raw.parts:
+        return None
+    name = raw.name
+    if not name or name == ".":
+        return None
+    name = _SAFE_NAME_CHARS.sub("_", name)
+    name = name.lstrip(".-")[:_MAX_NAME_LEN] or "attachment.bin"
+    return report_path.resolve().parent / "attachments" / name
+
+
 def _attachment_urls(report: object) -> set:
     if not isinstance(report, dict):
         return set()
@@ -68,7 +103,7 @@ def main() -> int:
               file=sys.stderr)
         return 2
 
-    report_path, url, dest = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    report_path, url = Path(sys.argv[1]), sys.argv[2]
 
     report = load_json(report_path, max_bytes=_MAX_REPORT_BYTES)
     if report is None:
@@ -97,6 +132,23 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
+    dest = _confine_dest(sys.argv[3], report_path)
+    if dest is None:
+        print(
+            "refusing download: destination must not contain parent "
+            "('..') components and must end in a file name; the file "
+            "is stored under the bug report's attachments/ directory",
+            file=sys.stderr,
+        )
+        return 1
+    if dest.parent.is_symlink():
+        print(
+            f"refusing download: {dest.parent} is a symlink — the "
+            "attachments directory must be a real directory",
+            file=sys.stderr,
+        )
+        return 1
+
     from core.http import HttpError
     from core.http.egress_backend import EgressClient
     client = EgressClient(allowed_hosts=[parts.hostname])
@@ -107,7 +159,12 @@ def main() -> int:
         return 1
 
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        print(f"refusing download: {dest} is a symlink", file=sys.stderr)
+        return 1
     dest.write_bytes(body)
+    if str(dest) != sys.argv[3]:
+        print(f"note: destination confined to {dest}", file=sys.stderr)
     print(f"OK: {url} -> {dest} ({len(body)} bytes)")
     return 0
 
