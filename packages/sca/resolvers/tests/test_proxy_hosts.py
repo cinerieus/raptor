@@ -394,9 +394,12 @@ def test_e2e_real_calibration_against_python3_binary(tmp_path,
     hosts = ph.proxy_hosts_for_pip()
     assert hosts == ["pypi.org", "files.pythonhosted.org"]
 
-    # Memoised — second call returns same and doesn't re-spawn.
-    assert real_python in ph._CALIBRATED_CACHE
-    cached = ph._CALIBRATED_CACHE[real_python]
+    # Memoised — second call returns same and doesn't re-spawn. Keyed
+    # on (binary path, env-key set): the on-disk profile is
+    # parameterised by env_keys, so the memo must be too.
+    memo_keys = [k for k in ph._CALIBRATED_CACHE if k[0] == real_python]
+    assert memo_keys, "no memo entry for the probed binary"
+    cached = ph._CALIBRATED_CACHE[memo_keys[0]]
     if cached is not None:
         # Non-None cache means the probe succeeded. Sanity-check
         # the captured profile's shape: it has either some paths_read

@@ -280,7 +280,8 @@ def compute_risk_estimate(
     else:
         components["ssvc_automatable_multiplier"] = 1.0
 
-    # 3. EPSS: 0..1 probability mapped onto a 0.30..1.00 multiplier.
+    # 3. EPSS: 0..1 probability mapped onto a floor..(floor+range)
+    #    multiplier (defaults ~0.44..0.90; both ends calibration-tunable).
     epss = finding.epss if finding.epss is not None else epss_missing
     epss_mult = epss_floor + epss_range * epss
     base *= epss_mult

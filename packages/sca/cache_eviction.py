@@ -1,10 +1,10 @@
 """Cache eviction for ``~/.raptor/cache/sca/``.
 
 Walks the cache root and unlinks every regular file whose mtime is
-older than the configured horizon. Empty subdirectories are removed
-too. Top-level cache root and its first-level subdirs (``queries``,
-``vulns``, ``kev``, ``epss``, …) are left in place even when empty —
-they get recreated on the next run anyway.
+older than the configured horizon. Empty subdirectories (at any
+depth) are removed too; only the cache root itself is kept — the
+first-level subdirs (``queries``, ``vulns``, ``kev``, ``epss``, …)
+get recreated on the next run anyway.
 
 The eviction is best-effort: any single OSError on a file is logged
 and skipped (don't break the gate over a permission quirk on one
@@ -69,10 +69,11 @@ def evict_stale(
     now_t = now if now is not None else time.time()
     cutoff = now_t - max_age_days * 86400
 
-    # Two-pass: first remove stale files, then remove empty subdirs
-    # so directory rmdir() succeeds. The cache root itself is never
+    # One rglob walk shared by both passes (files first, then empty
+    # subdirs so rmdir() succeeds). The cache root itself is never
     # removed.
-    for entry in _iter_files(cache_root):
+    entries = _list_entries(cache_root)
+    for entry in _iter_files(entries):
         result.files_scanned += 1
         try:
             st = entry.stat()
@@ -93,7 +94,7 @@ def evict_stale(
 
     # Remove empty directories. Deepest-first so parents are eligible
     # only after their children.
-    dirs = sorted(_iter_dirs(cache_root),
+    dirs = sorted(_iter_dirs(entries),
                   key=lambda p: len(p.parts), reverse=True)
     for d in dirs:
         if d == cache_root:
@@ -107,12 +108,17 @@ def evict_stale(
     return result
 
 
-def _iter_files(root: Path) -> Iterable[Path]:
-    """Yield every regular file under ``root`` (depth-first)."""
+def _list_entries(root: Path) -> list[Path]:
+    """One recursive walk of ``root`` — shared by the file and dir
+    passes (rglob'ing twice materialised the whole tree twice)."""
     try:
-        entries = list(root.rglob("*"))
+        return list(root.rglob("*"))
     except OSError:
-        return
+        return []
+
+
+def _iter_files(entries: list[Path]) -> Iterable[Path]:
+    """Yield every regular file among ``entries``."""
     for p in entries:
         try:
             if p.is_file():
@@ -122,12 +128,8 @@ def _iter_files(root: Path) -> Iterable[Path]:
             continue
 
 
-def _iter_dirs(root: Path) -> Iterable[Path]:
-    """Yield every directory under ``root`` (including ``root`` itself)."""
-    try:
-        entries = list(root.rglob("*"))
-    except OSError:
-        return
+def _iter_dirs(entries: list[Path]) -> Iterable[Path]:
+    """Yield every directory among ``entries``."""
     for p in entries:
         try:
             if p.is_dir():

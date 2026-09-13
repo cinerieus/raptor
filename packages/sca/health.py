@@ -149,6 +149,15 @@ class _ProbeBudgetClient:
         return self._inner.get_bytes(
             url, timeout=timeout or self._TIMEOUT, **kw)
 
+    def request(self, method, url, *, timeout=None, **kw):
+        # The budget must clamp the generic surface too — pre-fix a
+        # probe using .request directly rode the inner client's full
+        # 600s retry schedule via __getattr__.
+        kw.setdefault("total_timeout", self._TOTAL_TIMEOUT)
+        kw.setdefault("retries", self._RETRIES)
+        return self._inner.request(
+            method, url, timeout=timeout or self._TIMEOUT, **kw)
+
     def __getattr__(self, name):
         return getattr(self._inner, name)
 

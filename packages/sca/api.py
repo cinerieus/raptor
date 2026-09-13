@@ -43,8 +43,10 @@ def analyse(
         performed after the SCA run completes.
 
     Returns a dict with keys: ``status``, ``findings_path``,
-    ``sarif_path``, ``vuln_findings``, ``hygiene_findings``,
-    ``supply_chain_findings``, ``deps_analysed``, ``llm_cost``.
+    ``sarif_path``, ``report_path``, ``sbom_path``, ``vuln_findings``,
+    ``hygiene_findings``, ``supply_chain_findings``,
+    ``suppressed_findings``, ``in_kev``, ``deps_analysed``,
+    ``llm_cost``.
     """
     options = RunOptions(offline=offline, no_cache=no_cache)
 

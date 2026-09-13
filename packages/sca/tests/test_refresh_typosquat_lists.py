@@ -320,7 +320,8 @@ def test_refresh_all_write_failure_marked_distinctly(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise PermissionError("read-only filesystem")
 
-    monkeypatch.setattr(Path, "write_text", boom)
+    import packages.sca.refresh_typosquat_lists as rtl
+    monkeypatch.setattr(rtl, "write_text_atomically", boom)
     results = refresh_all(http, top_n=10, data_dir=tmp_path, only=["PyPI"])
     assert results["PyPI.json"].startswith("write-failed:")
 

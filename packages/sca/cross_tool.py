@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, TYPE_CHECKING
 from pathlib import Path
+from typing import Any
 
 from core.json import load_json
 from core.sarif.parser import load_sarif
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -109,18 +106,22 @@ def _extract_cves_from_finding(f: dict[str, Any]) -> set[str]:
     sca = f.get("sca") or {}
     # Primary advisory.
     primary = sca.get("advisory") or {}
+    # isinstance guards: findings.json can be hand-edited; a non-str
+    # id/alias must not crash the whole cross-tool pass.
     adv_id = primary.get("id", "")
-    if adv_id:
+    if isinstance(adv_id, str) and adv_id:
         ids.add(adv_id.upper())
     for alias in primary.get("aliases", []):
-        ids.add(alias.upper())
+        if isinstance(alias, str):
+            ids.add(alias.upper())
     # All advisories (includes primary + siblings).
     for adv in sca.get("all_advisories", []):
         aid = adv.get("id", "")
-        if aid:
+        if isinstance(aid, str) and aid:
             ids.add(aid.upper())
         for alias in adv.get("aliases", []):
-            ids.add(alias.upper())
+            if isinstance(alias, str):
+                ids.add(alias.upper())
     return ids
 
 
@@ -135,11 +136,10 @@ def _collect_sarif_refs(
     for d in sarif_dirs:
         if not d.is_dir():
             continue
-        for sarif_file in d.glob("*.sarif"):
-            _scan_sarif_file(sarif_file, out)
+        # One recursive walk — the earlier top-level glob + recursive
+        # glob pair walked the whole tree twice.
         for sarif_file in d.glob("**/*.sarif"):
-            if sarif_file.parent != d:
-                _scan_sarif_file(sarif_file, out)
+            _scan_sarif_file(sarif_file, out)
     return out
 
 

@@ -91,8 +91,9 @@ def main(argv: Sequence[str]) -> int:
             target=Path(args.target).resolve(),
             findings_path=Path(args.findings).resolve(),
         )
+    # argparse ``choices`` makes an unknown action unreachable;
+    # parser.error raises SystemExit if that invariant ever breaks.
     parser.error(f"unknown action {args.action!r}")
-    return 2
 
 
 def _cmd_list(target: Path, *, emit_json: bool) -> int:

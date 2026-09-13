@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from core.atomic_fs import write_text_atomically
 from core.json import JsonCache, save_json
 
 from . import SCA_CACHE_ROOT, default_client
@@ -284,7 +285,6 @@ def main(argv: Sequence[str]) -> int:
     if args.check:
         actionable = _count_actionable(
             candidates,
-            allow_major=args.allow_major,
             allow_major_without_review=args.allow_major_without_review,
             allow_degraded=args.allow_degraded,
             ecosystem_allowlist=ecosystem_allowlist,
@@ -1398,7 +1398,6 @@ def _run_self_test(
         )
         post_actionable = _count_actionable(
             post_candidates,
-            allow_major=allow_major,
             allow_major_without_review=allow_major_without_review,
             allow_degraded=allow_degraded,
             ecosystem_allowlist=ecosystem_allowlist,
@@ -1450,7 +1449,6 @@ def _run_self_test(
 def _count_actionable(
     candidates: list[HardenCandidate],
     *,
-    allow_major: bool,
     allow_major_without_review: bool,
     allow_degraded: bool,
     ecosystem_allowlist: set | None = None,
@@ -1806,7 +1804,9 @@ def _write_report(
                 f"in `{c.manifest}` — {c.detail}" for c in by_status["downgraded_safety"])
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    # Atomic like the sibling JSON artifacts — a crash mid-write must
+    # not leave a truncated report.
+    write_text_atomically(path, "\n".join(lines))
 
 
 def _print_summary(

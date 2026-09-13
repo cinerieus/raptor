@@ -408,7 +408,7 @@ class OsvOfflineDB:
 # Canonicalisation + matching
 # ---------------------------------------------------------------------------
 
-def _our_ecosystem(osv_value: str) -> str | None:
+def _our_ecosystem(osv_value: str) -> str:
     """Reverse-map OSV's ecosystem-string (``crates.io``) to ours
     (``Cargo``). Returns the OSV value unchanged when no mapping needed."""
     reverse = {

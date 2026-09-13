@@ -36,6 +36,7 @@ from io import StringIO
 from pathlib import Path
 
 from core.cve import EpssClient, KevClient
+from core.atomic_fs import write_text_atomically
 from core.json import JsonCache
 from core.security.log_sanitisation import escape_nonprintable
 from core.security.prompt_output_sanitise import sanitise_string
@@ -129,7 +130,8 @@ def main(
     if args.out:
         out = Path(args.out).resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(report, encoding="utf-8")
+        # Atomic — a crash mid-write must not leave a truncated report.
+        write_text_atomically(out, report)
     sys.stdout.write(report)
     sys.stdout.flush()
     return exit_code

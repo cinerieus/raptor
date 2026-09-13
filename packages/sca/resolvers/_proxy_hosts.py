@@ -177,9 +177,11 @@ _YARN_ENV_KEYS: tuple[str, ...] = (
 
 # Per-process memoisation. Calibration is sha-keyed on disk; without
 # this in-memory layer, every resolver subprocess in a scan would
-# stat the cache file independently. Keyed on the resolved binary
-# path.
-_CALIBRATED_CACHE: dict[str, object | None] = {}
+# stat the cache file independently. Keyed on (binary path, env-key
+# set) — load_or_calibrate is parameterised by env_keys, so two tools
+# sharing one binary with different env-key sets must not serve each
+# other's profile.
+_CALIBRATED_CACHE: dict[tuple[str, tuple[str, ...]], object | None] = {}
 
 
 def _load_override(tool: str) -> list | None:
@@ -229,19 +231,22 @@ def _calibrated_profile(bin_path: str | None,
     ``bin_path``. Returns None on any failure — calibration is
     advisory; static layers carry the policy when it's unavailable.
 
-    Memoised per-process by resolved binary path; the cache key for
-    the on-disk profile already accounts for env_keys, so the memo
-    just avoids repeated file stats during a single scan.
+    Memoised per-process by (resolved binary path, env-key set) —
+    the on-disk profile is parameterised by env_keys, so the memo key
+    must be too (two tools sharing one binary with different env-key
+    sets must not serve each other's profile). The memo just avoids
+    repeated file stats during a single scan.
     """
     if not bin_path:
         return None
-    if bin_path in _CALIBRATED_CACHE:
-        return _CALIBRATED_CACHE[bin_path]
+    memo_key = (bin_path, tuple(env_keys))
+    if memo_key in _CALIBRATED_CACHE:
+        return _CALIBRATED_CACHE[memo_key]
 
     try:
         from core.sandbox.calibrate import load_or_calibrate
     except ImportError:
-        _CALIBRATED_CACHE[bin_path] = None
+        _CALIBRATED_CACHE[memo_key] = None
         return None
 
     try:
@@ -255,7 +260,7 @@ def _calibrated_profile(bin_path: str | None,
         profile = load_or_calibrate(
             bin_path,
             probe_args=("--version",),
-            env_keys=tuple(env_keys),
+            env_keys=memo_key[1],
             timeout=20,
         )
     except (FileNotFoundError, RuntimeError, OSError,
@@ -269,10 +274,10 @@ def _calibrated_profile(bin_path: str | None,
             "falling back to static policy",
             bin_path, exc,
         )
-        _CALIBRATED_CACHE[bin_path] = None
+        _CALIBRATED_CACHE[memo_key] = None
         return None
 
-    _CALIBRATED_CACHE[bin_path] = profile
+    _CALIBRATED_CACHE[memo_key] = profile
     return profile
 
 

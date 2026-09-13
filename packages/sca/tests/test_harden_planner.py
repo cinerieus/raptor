@@ -501,7 +501,7 @@ def _candidate(status: str) -> HardenCandidate:
 def test_count_actionable_promoted_always_counts() -> None:
     from packages.sca.harden import _count_actionable
     cands = [_candidate("promoted"), _candidate("promoted")]
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False) == 2
 
@@ -515,7 +515,7 @@ def test_count_actionable_skips_non_actionable() -> None:
         _candidate("no_versions"),
         _candidate("needs_network"),
     ]
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False) == 0
 
@@ -524,11 +524,11 @@ def test_count_actionable_review_required_gated() -> None:
     from packages.sca.harden import _count_actionable
     cands = [_candidate("review_required")]
     # Default: review_required not actionable.
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False) == 0
     # With --allow-major-without-review: counts.
-    assert _count_actionable(cands, allow_major=True,
+    assert _count_actionable(cands,
                              allow_major_without_review=True,
                              allow_degraded=False) == 1
 
@@ -536,10 +536,10 @@ def test_count_actionable_review_required_gated() -> None:
 def test_count_actionable_degraded_gated() -> None:
     from packages.sca.harden import _count_actionable
     cands = [_candidate("degraded_safety")]
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False) == 0
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=True) == 1
 
@@ -603,21 +603,21 @@ def test_count_actionable_ecosystem_allowlist() -> None:
 
     cands = [_c("PyPI"), _c("npm"), _c("Debian")]
     # No allowlist: all 3 count.
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False) == 3
     # PyPI only: just 1.
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False,
                              ecosystem_allowlist={"PyPI"}) == 1
     # PyPI + npm: 2.
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False,
                              ecosystem_allowlist={"PyPI", "npm"}) == 2
     # Empty allowlist: 0.
-    assert _count_actionable(cands, allow_major=False,
+    assert _count_actionable(cands,
                              allow_major_without_review=False,
                              allow_degraded=False,
                              ecosystem_allowlist=set()) == 0

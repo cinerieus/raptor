@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import argparse
 import json
+
+from core.atomic_fs import write_text_atomically
 import logging
 import sys
 from collections.abc import Callable
@@ -308,7 +310,10 @@ def refresh_all(
                     and target.read_text(encoding="utf-8") == new_blob):
                 out[fname] = "unchanged"
                 continue
-            target.write_text(new_blob, encoding="utf-8")
+            # Atomic: these files seed the typosquat detector's
+            # reference sets — a torn write must not ship a truncated
+            # popular-package list.
+            write_text_atomically(target, new_blob)
         except OSError as e:
             # Output target unwritable: a hard failure (see ``main``), kept
             # distinct from a soft per-source fetch failure above.
