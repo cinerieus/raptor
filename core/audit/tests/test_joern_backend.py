@@ -117,6 +117,79 @@ class TestStalenessGate:
         assert "src/stale.c" not in imported
 
 
+class TestMergeJoernFlowsTruncation:
+    """The joern_query output cap must apply to merged flow lists.
+
+    merge_joern_flows feeds Joern flows (attacker-influenced source
+    analysis output) into the evidence index and, from there, into LLM
+    context. The safe_env output limit only caps that surface if the
+    call site's tool key actually resolves in _OUTPUT_LIMITS — an
+    unknown key silently returns the list uncapped.
+    """
+
+    @staticmethod
+    def _checklist() -> dict:
+        return {
+            "target_path": "/target",
+            "files": [{
+                "path": "src/a.c",
+                "items": [{
+                    "name": "parse", "line_start": 1, "line_end": 40,
+                }],
+            }],
+        }
+
+    @staticmethod
+    def _oversized_flows(n: int = 250) -> dict:
+        return {
+            "src/a.c:parse": [
+                {"source_method": f"src_{i}", "sink": "memcpy"}
+                for i in range(n)
+            ],
+        }
+
+    def test_call_site_key_has_configured_limit(self):
+        # Pins the production tool key against _OUTPUT_LIMITS: if the
+        # key at the merge_joern_flows call site drifts to a name with
+        # no configured limit, the end-to-end tests below fail too,
+        # but this states the contract directly.
+        from core.audit.safe_env import get_output_limit
+        limit = get_output_limit("joern_query")
+        assert limit is not None
+        assert limit.max_results == 100
+
+    def test_new_record_flows_truncated(self):
+        from core.audit.joern_backend import merge_joern_flows
+        index = merge_joern_flows(
+            self._oversized_flows(), {}, self._checklist(), None,
+        )
+        rec = index["src/a.c:parse"]
+        assert len(rec.joern_flows) == 100
+
+    def test_existing_record_flows_truncated(self):
+        from core.evidence import EvidenceRecord
+        from core.audit.joern_backend import merge_joern_flows
+        existing = {
+            "src/a.c:parse": EvidenceRecord(
+                file="src/a.c", function="parse",
+                line_start=1, line_end=40,
+            ),
+        }
+        index = merge_joern_flows(
+            self._oversized_flows(), existing, self._checklist(), None,
+        )
+        rec = index["src/a.c:parse"]
+        assert len(rec.joern_flows) == 100
+
+    def test_under_limit_flows_untouched(self):
+        from core.audit.joern_backend import merge_joern_flows
+        index = merge_joern_flows(
+            self._oversized_flows(5), {}, self._checklist(), None,
+        )
+        rec = index["src/a.c:parse"]
+        assert len(rec.joern_flows) == 5
+
+
 class TestCurrentContentHash:
     def test_prefers_own_manifest(self, tmp_path):
         target = tmp_path / "target"

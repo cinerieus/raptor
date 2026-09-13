@@ -98,9 +98,20 @@ def truncate_output(
     """Truncate tool output to the configured limit.
 
     Returns (truncated_items, truncation_note_or_None).
+
+    An unregistered *tool* key returns the items uncapped — that is
+    always call-site drift (every caller intends a cap), so it is
+    logged loudly rather than silently no-opping.
     """
     limit = get_output_limit(tool)
-    if limit is None or len(items) <= limit.max_results:
+    if limit is None:
+        logger.warning(
+            "no output limit configured for tool key '%s' — "
+            "output passed through uncapped",
+            tool,
+        )
+        return items, None
+    if len(items) <= limit.max_results:
         return items, None
 
     truncated = items[:limit.max_results]

@@ -1018,11 +1018,15 @@ def merge_joern_flows(
         if key in evidence_index:
             existing = evidence_index[key]
             if rec.joern_flows and not existing.joern_flows:
-                truncated, _note = truncate_output(rec.joern_flows, "joern")
+                truncated, _note = truncate_output(
+                    rec.joern_flows, "joern_query",
+                )
                 existing.joern_flows = truncated
         else:
             if rec.joern_flows:
-                rec.joern_flows, _note = truncate_output(rec.joern_flows, "joern")
+                rec.joern_flows, _note = truncate_output(
+                    rec.joern_flows, "joern_query",
+                )
             evidence_index[key] = rec
 
     enriched = sum(1 for r in merged.values() if r.joern_flows)
