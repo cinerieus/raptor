@@ -457,6 +457,21 @@ class TestEnrichment:
         assert inv["perlasm"]["generators_detected"] == 1
         assert inv["perlasm"]["analysed"] == 1
 
+    def test_repeat_enrichment_keeps_totals_consistent(
+            self, target, tmp_path, fake_sandbox, monkeypatch):
+        """Enriching the same inventory dict twice must not drift
+        total_files: the second pass skips every already-present record
+        as a duplicate, and only APPENDED records may count."""
+        monkeypatch.setattr(perlasm.shutil, "which", lambda _: "/usr/bin/perl")
+        _write_generator(target, "crypto/aes/asm/aes-demo-armv8.pl")
+        inv = self._inventory()
+        enrich_inventory_with_perlasm(inv, target, cache_dir=tmp_path / "c")
+        assert inv["total_files"] == len(inv["files"]) == 2
+
+        enrich_inventory_with_perlasm(inv, target, cache_dir=tmp_path / "c")
+        assert len(inv["files"]) == 2
+        assert inv["total_files"] == 2
+
     def test_gaps_land_in_limitations(self, target, tmp_path, monkeypatch):
         monkeypatch.setattr(perlasm.shutil, "which", lambda _: None)
         _write_generator(target, "crypto/aes/asm/g.pl")

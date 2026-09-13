@@ -530,11 +530,12 @@ def enrich_inventory_with_perlasm(inventory: dict, target_path: str | Path,
 
     files = inventory.setdefault("files", [])
     existing = {f.get("path") for f in files}
-    added_items = added_functions = added_sloc = 0
+    added_files = added_items = added_functions = added_sloc = 0
     for record in result.file_records:
         if record["path"] in existing:
             continue
         files.append(record)
+        added_files += 1
         added_items += len(record["items"])
         added_functions += len(record["items"])
         added_sloc += record["sloc"]
@@ -572,9 +573,11 @@ def enrich_inventory_with_perlasm(inventory: dict, target_path: str | Path,
                 len(new_items), gen_rel,
             )
     if result.file_records:
-        inventory["total_files"] = inventory.get("total_files", 0) + len(
-            result.file_records
-        )
+        # Count APPENDED records, not everything the pass produced — a
+        # record whose path already exists is skipped above (repeat
+        # enrichment of the same inventory dict), and counting the
+        # unfiltered list drifted total_files away from len(files).
+        inventory["total_files"] = inventory.get("total_files", 0) + added_files
         inventory["total_items"] = inventory.get("total_items", 0) + added_items
         inventory["total_functions"] = (
             inventory.get("total_functions", 0) + added_functions
