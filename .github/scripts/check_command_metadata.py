@@ -46,6 +46,21 @@ _ACCEPTED_DISPATCH_PREFIXES = (
     "bash ",
 )
 
+# The commands.md sentence that owns the documented exclusion list.
+_EXCL_SENTENCE_RE = re.compile(
+    r"internal/duplicate commands.*?(?=\.\s|\n\n)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# A backticked command name inside that sentence: `raptor-scan` or
+# `/commands` (leading slash stripped to match .md stems).
+_BACKTICKED_NAME_RE = re.compile(r"`/?([\w][\w-]*)`")
+
+
+def _excluded_names(sentence: str) -> set[str]:
+    """Names documented as excluded: backticked tokens only."""
+    return set(_BACKTICKED_NAME_RE.findall(sentence))
+
 
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """Return the YAML-ish frontmatter as a flat dict. The repo uses
@@ -130,15 +145,14 @@ def main() -> int:
             excluded_via_frontmatter.add(name)
 
     # Parity: commands.md's hardcoded exclusion list must match the
-    # frontmatter-flagged set. Pull the names out of the documented
-    # text by looking for the pattern "raptor-X" / "/X" in the
-    # exclusion sentence.
+    # frontmatter-flagged set. Only BACKTICKED names in the exclusion
+    # sentence count (`` `raptor-scan` `` / `` `/commands` ``): a bare-
+    # word scrape counted every English word that happened to collide
+    # with a command stem (the word "commands" in the sentence itself
+    # matched commands.md), so renaming a command to a common word or
+    # rewording the sentence flipped the lint in confusing ways.
     commands_md = COMMANDS_INDEX.read_text(encoding="utf-8")
-    excl_pattern = re.compile(
-        r"internal/duplicate commands.*?(?=\.\s|\n\n)",
-        re.IGNORECASE | re.DOTALL,
-    )
-    m = excl_pattern.search(commands_md)
+    m = _EXCL_SENTENCE_RE.search(commands_md)
     if not m:
         errs.append(
             "commands.md: could not locate the 'Exclude internal/duplicate "
@@ -146,8 +160,16 @@ def main() -> int:
             "lint or restore the sentence."
         )
     else:
-        excluded_in_index = set(re.findall(r"raptor-[\w-]+|\b\w[\w-]+\b", m.group(0)))
-        # Drop noise tokens; only keep names that correspond to .md files.
+        excluded_in_index = _excluded_names(m.group(0))
+        if not excluded_in_index:
+            errs.append(
+                "commands.md: the exclusion sentence names no backticked "
+                "commands — list each excluded command as `name` (or "
+                "`/name`); bare prose words are not counted."
+            )
+        # Only names that correspond to .md files can be parity-checked;
+        # a mistyped name surfaces as the frontmatter side's
+        # "not listed in commands.md's exclude sentence" error.
         md_names = {p.stem for p in md_files}
         excluded_in_index = excluded_in_index & md_names
 
