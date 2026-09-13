@@ -1251,6 +1251,38 @@ class TestGenerateLuaHarness:
         harness = generate_lua_harness(spec, tmp_path)
         assert "scripts.parser" in harness
 
+    def test_json_encode_escapes_backslash_and_control_chars(self, tmp_path):
+        """A message containing backslash-quote or a raw newline must
+        survive json_encode as parseable single-line JSON — malformed
+        output degrades the verdict to inconclusive (target-influenced
+        verdict suppression)."""
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="lib/auth.lua", function="validate",
+            language="lua",
+            args=["x"],
+            lang_config={"require_path": "lib.auth"},
+        )
+        harness = generate_lua_harness(spec, tmp_path)
+        # Backslash must be escaped BEFORE the quote: quote-first would
+        # let backslash-quote re-open the string. Control bytes must be
+        # spelt \uXXXX, never emitted raw.
+        bs_pos = harness.index("gsub('\\\\', '\\\\\\\\')")
+        quote_pos = harness.index("gsub('\"', '\\\\\"')")
+        assert bs_pos < quote_pos
+        assert "'\\\\u%04X'" in harness
+        lua = shutil.which("lua") or shutil.which("lua5.4") \
+            or shutil.which("lua5.3") or shutil.which("luajit")
+        if lua:
+            prologue = harness.split("local ok_req")[0]
+            hostile = 'boom \\" quote\nnewline\ttab'
+            snippet = prologue + (
+                'io.write(json_encode({status="exception", token=_tok,'
+                ' type="error", message=' + hy._lua_quote(hostile) + "}))"
+            )
+            out = _run_stdout([lua, "-e", snippet])
+            assert "\n" not in out
+            assert json.loads(out)["message"] == hostile
+
 
 # -- generate_perl_harness -----------------------------------------------------
 

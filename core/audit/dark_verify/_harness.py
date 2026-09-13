@@ -776,14 +776,22 @@ def generate_lua_harness(
         package.path = {_lua_quote(target_str)} .. '/?.lua;' .. package.path
         local _tok = {token_lit}
         local json_ok = true
+        local function json_escape(s)
+            -- Backslash FIRST: escaping the quote first would let a
+            -- message containing backslash-quote re-open the string.
+            s = s:gsub('\\\\', '\\\\\\\\')
+            s = s:gsub('"', '\\\\"')
+            s = s:gsub('%c', function(c)
+                return string.format('\\\\u%04X', string.byte(c))
+            end)
+            return s
+        end
         local function json_encode(t)
             local parts = {{}}
             for k, v in pairs(t) do
                 local vstr
                 if type(v) == "string" then
-                    vstr = '"' .. v:gsub('"', '\\\\"') .. '"'
-                elseif v == nil then
-                    vstr = "null"
+                    vstr = '"' .. json_escape(v) .. '"'
                 else
                     vstr = tostring(v)
                 end
