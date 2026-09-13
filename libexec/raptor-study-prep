@@ -2757,13 +2757,18 @@ def main() -> None:
                 continue
             all_includes.update(_extract_includes(content))
 
-        # Resolve against search_dirs WITHOUT the source_root constraint
+        # Resolve against search_dirs WITHOUT the target-dir constraint
+        # (that's the point of pass 1.5), but CONFINED to each search
+        # dir: #include paths come straight from the scanned repo, so
+        # `../../../etc/foo.h` traversal or an out-pointing symlink
+        # must never pull host files into study-list.json / LLM
+        # prompts. confine() resolves symlinks and refuses escapes.
         scanned_paths = {str(f.resolve()) for f in source_files}
         ext_headers: list[Path] = []
         for inc_path in all_includes:
             for d in search_dirs:
-                candidate = (d / inc_path).resolve()
-                if not candidate.is_file():
+                candidate = confine(d, inc_path)
+                if candidate is None or not candidate.is_file():
                     continue
                 if candidate.suffix not in _HEADER_EXTENSIONS:
                     continue

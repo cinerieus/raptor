@@ -416,3 +416,91 @@ class TestScopeFromReadingListContainment:
         (root / "link.c").symlink_to(outside)
         rl = self._write_rl(tmp_path, ["link.c"])
         assert prep._scope_from_reading_list(rl, root, [root]) is None
+
+
+# ------------------------------------------------------------------
+# Pass 1.5: external-header include containment
+# ------------------------------------------------------------------
+
+
+class TestExternalHeaderContainment:
+    """Pass 1.5 resolves #include paths from the scanned repo without
+    the target-dir constraint — but confined to the search dirs: a
+    hostile repo's traversal include or out-pointing symlink must not
+    pull host files into study-list.json (and from there into LLM
+    prompts)."""
+
+    def _tree(self, tmp_path: Path) -> tuple[Path, Path]:
+        secret = tmp_path / "secret"
+        secret.mkdir()
+        (secret / "creds.h").write_text(
+            "/* alpha_ctx helper */\n"
+            "struct alpha_secret {\n    int key;\n};\n",
+            encoding="utf-8",
+        )
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "alpha.c").write_text(
+            '#include "../secret/creds.h"\n'
+            "struct alpha_ctx {\n    int a;\n};\n"
+            "int alpha_ctx_new(void) { return 0; }\n",
+            encoding="utf-8",
+        )
+        return repo, secret
+
+    def test_traversal_include_not_read(self, tmp_path) -> None:
+        # The pass-1.5 stderr line is the faithful observable: it
+        # prints only when at least one external header was actually
+        # read and struct-extracted.
+        repo, _secret = self._tree(tmp_path)
+        out = tmp_path / "out"
+        result = _run_prep([
+            str(repo), str(out), "--root", str(repo),
+            "--identifier", "alpha_ctx",
+        ])
+        assert result.returncode == 0, result.stderr
+        assert "pass 1.5" not in result.stderr
+        assert "alpha_ctx" in _item_names(out)
+
+    def test_symlink_escape_not_read(self, tmp_path) -> None:
+        repo, secret = self._tree(tmp_path)
+        # In-tree include path, but the directory is a symlink out.
+        (repo / "vaulted").symlink_to(secret, target_is_directory=True)
+        (repo / "alpha.c").write_text(
+            '#include "vaulted/creds.h"\n'
+            "struct alpha_ctx {\n    int a;\n};\n"
+            "int alpha_ctx_new(void) { return 0; }\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        result = _run_prep([
+            str(repo), str(out), "--root", str(repo),
+            "--identifier", "alpha_ctx",
+        ])
+        assert result.returncode == 0, result.stderr
+        assert "pass 1.5" not in result.stderr
+
+    def test_in_tree_include_still_extracted(self, tmp_path) -> None:
+        """The legitimate pass-1.5 case keeps working: a header under
+        the source root but outside the target subdir."""
+        root = tmp_path / "repo"
+        (root / "crypto").mkdir(parents=True)
+        (root / "include").mkdir()
+        (root / "include" / "helper.h").write_text(
+            "/* alpha_ctx support */\n"
+            "struct alpha_helper {\n    int h;\n};\n",
+            encoding="utf-8",
+        )
+        (root / "crypto" / "alpha.c").write_text(
+            '#include "include/helper.h"\n'
+            "struct alpha_ctx {\n    int a;\n};\n"
+            "int alpha_ctx_new(void) { return 0; }\n",
+            encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        result = _run_prep([
+            str(root / "crypto"), str(out), "--root", str(root),
+            "--identifier", "alpha_ctx",
+        ])
+        assert result.returncode == 0, result.stderr
+        assert "pass 1.5: 1 external headers scanned" in result.stderr
