@@ -12,7 +12,10 @@ Defence layers implemented here:
   a single line — these feed line-shaped trusted prompt regions)
 - Injection pattern detection: flags content that resembles
   prompt injection attempts
-- Structural wrapping: marks target-derived blocks as DATA
+
+Structural wrapping of source blocks lives in
+``core.security.prompt_envelope`` (single-token envelope tags),
+not here.
 
 The orchestrator consumes these through ``sanitise_for_prompt()``
 and ``scan_for_injection()``.
@@ -46,14 +49,13 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # table alignment inside one.
 _LINE_SPLICE_RE = re.compile(r"[\t\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
 
+# Only ranges with at least one _LATIN_CONFUSABLES member: the scan
+# loop fires solely for characters in that table, so a range without
+# members can never label a warning.
 _CONFUSABLE_RANGES = [
     ("Ѐ", "ӿ", "Cyrillic"),
     ("Ͱ", "Ͽ", "Greek"),
-    (" ", "⁯", "General Punctuation"),
     ("＀", "￯", "Fullwidth"),
-    ("℀", "⅏", "Letterlike Symbols"),
-    ("⅐", "↏", "Number Forms"),
-    ("ɐ", "ʯ", "IPA Extensions"),
 ]
 
 _LATIN_CONFUSABLES: dict[str, str] = {
@@ -277,25 +279,6 @@ def scan_source_file(
     result.warnings.extend(warnings)
 
     return result
-
-
-def wrap_source_block(
-    source: str,
-    file_path: str,
-    function_name: str,
-    lines: str | None = None,
-) -> str:
-    """Wrap source code in structural tags marking it as data."""
-    attrs = f'file="{sanitise_path(file_path)}" function="{sanitise_name(function_name)}"'
-    if lines:
-        attrs += f' lines="{lines}"'
-
-    safe_source = source.replace("</source-code>", "<\\/source-code>")
-    return (
-        f"<source-code {attrs}>\n"
-        f"{safe_source}\n"
-        f"</source-code>"
-    )
 
 
 def sanitise_for_prompt(

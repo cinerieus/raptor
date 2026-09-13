@@ -12,7 +12,6 @@ from core.audit.prompt_defence import (
     sanitise_string_literal,
     scan_for_injection,
     scan_source_file,
-    wrap_source_block,
 )
 
 
@@ -197,30 +196,6 @@ class TestInjectionWarning:
         )
         note = w.to_prompt_note()
         assert len(note) < 300
-
-
-class TestWrapSourceBlock:
-    def test_wraps_with_tags(self):
-        result = wrap_source_block(
-            "int x = 0;", "foo.c", "main",
-        )
-        assert "<source-code" in result
-        assert 'file="foo.c"' in result
-        assert 'function="main"' in result
-        assert "</source-code>" in result
-
-    def test_with_lines(self):
-        result = wrap_source_block(
-            "code", "f.c", "fn", lines="10-20",
-        )
-        assert 'lines="10-20"' in result
-
-    def test_sanitises_embedded_values(self):
-        result = wrap_source_block(
-            "code", "f\x00.c", "fn\x01",
-        )
-        assert "\x00" not in result
-        assert "\x01" not in result
 
 
 class TestSanitiseForPrompt:
