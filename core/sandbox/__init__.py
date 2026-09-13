@@ -12,7 +12,8 @@ Six independent isolation layers (any combination may be active):
   profiles. Runs alongside the optional egress proxy, never combined.
 - PID namespace (--pid --fork): hides host PIDs from the sandbox,
   blocking kill() / ptrace against host processes. The sandboxed
-  command runs as PID 1 in its own namespace.
+  command runs as PID 2 in its own namespace, behind the minimal
+  PID-1 waiter described in the mount-namespace bullet below.
 - IPC namespace (--ipc): isolates SysV shm / sem / message queues. A
   compromised child can't use host-wide IPC resource-limits to DoS
   other processes, nor read same-UID apps' shm segments by key.
