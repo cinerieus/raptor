@@ -123,13 +123,64 @@ def test_ceiling_is_count_plus_budget_clamped(tmp_path, monkeypatch):
         f"(absolute-cap regression?)")
 
 
+def _live_same_uid_tasks() -> "int | None":
+    """Live same-UID kernel TASK count — RLIMIT_NPROC's actual
+    accounting unit on Linux is tasks (every thread), not processes,
+    so the ps-based process count underestimates what a lowered soft
+    limit is compared against at fork time. /proc scan on Linux; the
+    ps process count elsewhere (darwin's limit counts processes)."""
+    if sys.platform == "linux":
+        import os
+        uid = os.getuid()
+        total = 0
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                if os.stat(f"/proc/{p}").st_uid != uid:
+                    continue
+                total += len(os.listdir(f"/proc/{p}/task"))
+            except OSError:
+                continue  # raced exit — best-effort census
+        return total or None
+    return _macos_spawn._same_uid_process_count()
+
+
 def test_kernel_clamp_bounds_the_request(tmp_path, monkeypatch):
     """Darwin shape emulated on any host: a kernel clamp BELOW
     count+budget wins — the spawn layer must request the honoured
-    value, so the child reads exactly the clamp."""
+    value, so the child reads exactly the clamp.
+
+    The fake clamp is sized relative to LIVE same-UID usage rather
+    than fixed: the kernel checks a lowered RLIMIT_NPROC against the
+    UID's live task count at fork time, so a fixed sub-usage value
+    made the shim's own fork die EAGAIN whenever a parallel test tier
+    held more live tasks than the constant — while any value far
+    below count+budget still makes the clamp win the min() this test
+    pins."""
     fake_count = 100000
     budget = 64
-    fake_clamp = 1333
+    live = _live_same_uid_tasks()
+    if live is None:
+        pytest.skip("live same-UID task count unavailable — cannot "
+                    "size a fork-safe sub-ceiling clamp")
+    fake_clamp = max(1333, live * 2 + 1024)
+    if fake_clamp >= fake_count + budget - 128:
+        pytest.skip("live same-UID usage leaves no window for a "
+                    "clamp below count+budget")
+    if _REAL_KERNEL_CLAMP is not None and fake_clamp >= _REAL_KERNEL_CLAMP:
+        # The emulated clamp must stay the BINDING one: at or above
+        # the real kern.maxprocperuid the kernel bound takes over and
+        # the child would observe the real clamp, not the emulation.
+        pytest.skip("no window between live usage and "
+                    "kern.maxprocperuid for a binding emulated clamp")
+    _, _hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    if _hard != resource.RLIM_INFINITY and fake_clamp > _hard:
+        # A soft request above the hard limit cannot be granted (a
+        # tight container --ulimit nproc), so the clamp under test
+        # would never reach the child.
+        pytest.skip("NPROC hard limit below the sized clamp — no "
+                    "window to observe the emulated clamp")
     monkeypatch.setattr(_macos_spawn, "_same_uid_process_count",
                         lambda: fake_count)
     monkeypatch.setattr(_macos_spawn, "_darwin_nproc_kernel_clamp",
