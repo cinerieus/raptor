@@ -254,6 +254,126 @@ class TestFoldRefusals:
         assert val is REFUSE
 
 
+def _get_site_key(idx, src: str, marker: str = "// READ") -> str | None:
+    """Resolved key of the get invocation on the marker line, or None
+    when the site did not qualify."""
+    lines = src.split("\n")
+    target_line = next(
+        i + 1 for i, ln in enumerate(lines) if marker in ln
+    )
+    sites = [
+        (ln, col) for (ln, col) in idx._get_sites if ln == target_line
+    ]
+    assert sites, f"no get site on marker line {target_line}"
+    got = idx.get_site(*sites[0])
+    return got[1] if got else None
+
+
+class TestPositionalLinearity:
+    """The linearity proof must reject ops whose statement is not a
+    direct child of the declaration's block. A braceless loop/if body
+    shares the declaration's NEAREST block while executing repeatedly
+    or conditionally — replaying it once resolves a positional get to
+    the wrong element (runtime ``get(0)`` reads the shifted, possibly
+    tainted slot), which is the false-suppression direction."""
+
+    _DECL = (
+        "        ArrayList<String> l = new ArrayList<>();\n"
+        '        l.add("safe1");\n'
+        '        l.add("safe2");\n'
+        "        l.add(x);\n"
+    )
+
+    def test_braceless_for_body_refuses_positional(self):
+        idx, src = _index(
+            self._DECL
+            + "        for (int i = 0; i < 2; i++) l.remove(0);\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        assert idx.tracked("l")
+        # Runtime: both removes execute, get(0) reads the tainted x.
+        # The simulation must not commit a positional binding.
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_braceless_if_body_refuses_positional(self):
+        idx, src = _index(
+            self._DECL
+            + "        if (x != null) l.remove(0);\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_braceless_while_body_refuses_positional(self):
+        idx, src = _index(
+            self._DECL
+            + "        while (x != null) l.remove(0);\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_nested_braceless_bodies_refuse_positional(self):
+        idx, src = _index(
+            self._DECL
+            + "        for (int i = 0; i < 2; i++) if (x != null) l.remove(0);\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_braced_loop_body_refuses_positional(self):
+        # The braced twin lands in a DIFFERENT block — refused by the
+        # shared-block condition, before linearity is even asked.
+        idx, src = _index(
+            self._DECL
+            + "        for (int i = 0; i < 2; i++) { l.remove(0); }\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        assert _get_site_key(idx, src) == ALL_ELEMENTS
+
+    def test_braceless_refusal_keeps_taint(self):
+        # End-to-end polarity: the ALL_ELEMENTS fallback is governed
+        # by every write, so the tainted add refuses the fold.
+        from core.analysis.const_fold_java import REFUSE
+        idx, src = _index(
+            self._DECL
+            + "        for (int i = 0; i < 2; i++) l.remove(0);\n"
+            + "        String bar = l.get(0); // READ\n"
+        )
+        resolver = CollectionFoldResolver(idx)
+        lines = src.split("\n")
+        target_line = next(
+            i + 1 for i, ln in enumerate(lines) if "// READ" in ln
+        )
+        col = lines[target_line - 1].index("l.get")
+
+        class _FakeNode:
+            start_point = (target_line - 1, col)
+
+        assert resolver(_FakeNode(), _refold_literals, 0) is REFUSE
+
+    def test_straight_line_remove_still_proves_linear(self):
+        # Both directions: direct-child statements keep the proof.
+        idx, src = _index(
+            "        ArrayList<String> l = new ArrayList<>();\n"
+            "        l.add(x);\n"
+            '        l.add("a");\n'
+            "        l.remove(0);\n"
+            "        String bar = l.get(0); // READ\n"
+        )
+        key = _get_site_key(idx, src)
+        assert key is not None and key.startswith("pos@")
+
+    def test_get_nested_in_call_still_proves_linear(self):
+        # The wrapper allowlist must pass ordinary expression nesting.
+        idx, src = _index(
+            "        ArrayList<String> l = new ArrayList<>();\n"
+            '        l.add("a");\n'
+            "        l.add(x);\n"
+            "        out.println(l.get(0)); // READ\n"
+        )
+        key = _get_site_key(idx, src)
+        assert key is not None and key.startswith("pos@")
+
+
 # ---------------------------------------------------------------------------
 # Happy paths
 # ---------------------------------------------------------------------------
