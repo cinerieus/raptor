@@ -13,15 +13,19 @@ envelope.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 from pathlib import Path
+
+import pytest
 
 from core.evidence import EvidenceTier
 from core.iris import integrity
 from core.iris.api import get_project_sanitisers
 from core.iris.specs import TaintSpec
 from core.iris.store import load_specs, persist_refined_specs, save_specs
+from core.security import mac_key
 
 
 def _project(tmp_path: Path):
@@ -290,3 +294,65 @@ def test_truncated_key_file_reads_exact_length(tmp_path, monkeypatch) -> None:
     got = integrity._read_existing_key(key_file)
     assert isinstance(got, bytes)
     assert len(got) == 10
+
+
+# ---------------------------------------------------------------------------
+# Key-creation race: the loser must tolerate the winner's write gap
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _race_warn_calls(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        integrity, "_warn_once_suspect_key",
+        lambda *args: calls.append(args),
+    )
+    return calls
+
+
+@pytest.fixture()
+def _lose_creation_race(monkeypatch, tmp_path):
+    """Make the key-create os.open lose the O_EXCL race."""
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    real_open = os.open
+
+    def fake_open(path, flags, mode=0o777):
+        if flags & os.O_EXCL:
+            raise FileExistsError(path)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(mac_key.time, "sleep", lambda s: None)
+
+
+def test_race_loser_retries_through_empty_read(
+        monkeypatch, _race_warn_calls, _lose_creation_race) -> None:
+    """Between the winner's O_EXCL create and its write the key file
+    exists with 0 bytes. The loser must keep polling through that
+    transient shape and stamp with the winner's full key — aborting on
+    the first short read left the loser's envelope unstamped (tiers
+    floor to heuristic on the next read) and flagged the operator's
+    healthy key as suspect."""
+    full_key = b"k" * 32
+    reads = iter([None, b"", full_key])
+    monkeypatch.setattr(
+        integrity, "_read_existing_key", lambda path: next(reads),
+    )
+
+    assert integrity._load_or_create_key() == full_key
+    assert _race_warn_calls == []
+
+
+def test_persistent_wrong_length_warns_after_retries(
+        monkeypatch, _race_warn_calls, _lose_creation_race) -> None:
+    """A key file that STAYS short is genuinely suspect: the loop runs
+    out of retries, warns once, and refuses (None)."""
+    reads = itertools.chain([None], itertools.repeat(b"short"))
+    monkeypatch.setattr(
+        integrity, "_read_existing_key", lambda path: next(reads),
+    )
+
+    assert integrity._load_or_create_key() is None
+    assert len(_race_warn_calls) == 1
+    assert "wrong length" in _race_warn_calls[0][1]
