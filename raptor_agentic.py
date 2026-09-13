@@ -119,6 +119,59 @@ def _fail_run_and_exit(out_dir: Path, reason: str) -> NoReturn:
     sys.exit(1)
 
 
+def _run_validation_phase_checked(
+        run_dir: Path, /, **phase_kwargs) -> tuple[dict, int]:
+    """Phase 2 (dedup/exploitability validation) with lifecycle capture.
+
+    Pre-fix the call site had no error handling: an exception inside
+    the phase crash-aborted the whole pipeline as an unhandled
+    traceback, leaving the run marker at "running" and no failure
+    record. Fail the run with the error recorded instead.
+    SandboxSetupError keeps propagating to the entry-point handler —
+    its actionable message and exit-code contract must survive.
+    """
+    from packages.exploitability_validation import run_validation_phase
+    try:
+        return run_validation_phase(**phase_kwargs)
+    except SandboxSetupError:
+        raise
+    except Exception as e:
+        logger.exception("exploitability validation phase crashed")
+        _fail_run_and_exit(
+            run_dir,
+            f"exploitability validation phase crashed: "
+            f"{type(e).__name__}: {e}",
+        )
+
+
+def _fail_or_warn_missing_analysis(out_dir: Path, rc: int,
+                                   stderr: str) -> None:
+    """Phase 3 finished without an analysis report.
+
+    A nonzero analysis subprocess is a failed phase: fail the run and
+    exit nonzero. Pre-fix the pipeline degraded to a stderr warning
+    and still completed "successfully" (exit 0, empty analysis
+    section), so orchestration layers treated a substantively failed
+    run as complete. rc == 0 with no report keeps the established
+    warn-and-degrade (nothing to analyse is not an error).
+    """
+    if rc != 0:
+        print(f"✗ Analysis subprocess failed (exit code {rc})",
+              file=sys.stderr)
+        if stderr:
+            print(f"    Error: {stderr[:500]}", file=sys.stderr)
+        logger.error("Phase 3 failed - rc=%d, stderr=%s", rc, stderr[:200])
+        _fail_run_and_exit(
+            out_dir,
+            f"analysis subprocess exited {rc} with no analysis report",
+        )
+    print("⚠️  Analysis produced no output", file=sys.stderr)
+    if stderr:
+        print(f"    Error: {stderr[:500]}", file=sys.stderr)
+    logger.warning("Phase 3 produced no report - rc=%d, stderr=%s",
+                   rc, stderr[:200])
+
+
 def _materialise_threat_model_phase(
     *,
     target: Path,
@@ -3508,10 +3561,11 @@ Examples:
     # ========================================================================
     # PHASE 2: EXPLOITABILITY VALIDATION
     # ========================================================================
-    # Run validation phase (handles all modes: skip, dedup-only, full validation)
-    from packages.exploitability_validation import run_validation_phase
-
-    validation_result, validated_findings = run_validation_phase(
+    # Run validation phase (handles all modes: skip, dedup-only, full
+    # validation). Checked wrapper: a crash inside the phase fails the
+    # run's lifecycle instead of crash-aborting the pipeline.
+    validation_result, validated_findings = _run_validation_phase_checked(
+        out_dir,
         repo_path=str(original_repo_path),
         out_dir=out_dir,
         sarif_files=sarif_files,
@@ -3729,10 +3783,9 @@ Examples:
                     for line in elig_block.splitlines():
                         print(f"  {line}")
         else:
-            print("⚠️  Analysis failed or produced no output", file=sys.stderr)
-            if stderr:
-                print(f"    Error: {stderr[:500]}", file=sys.stderr)
-            logger.warning("Phase 3 failed - rc=%d, stderr=%s", rc, stderr[:200])
+            # rc != 0 → failed phase: run marked failed, nonzero exit.
+            # rc == 0 with no report keeps the warn-and-degrade path.
+            _fail_or_warn_missing_analysis(out_dir, rc, stderr or "")
             analysis = {}
 
     # ========================================================================

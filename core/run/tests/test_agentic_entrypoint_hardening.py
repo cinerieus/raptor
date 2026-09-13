@@ -234,6 +234,79 @@ class TestFailRunAndExit:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2 / Phase 3 failure capture
+# ---------------------------------------------------------------------------
+
+
+class TestValidationPhaseChecked:
+    def test_crash_fails_the_run_and_exits(self, tmp_path):
+        agentic = _import_agentic()
+        calls = []
+        with patch("packages.exploitability_validation."
+                   "run_validation_phase",
+                   side_effect=ValueError("bad sarif")), \
+                patch("core.run.fail_run",
+                      side_effect=lambda out_dir, reason: calls.append(
+                          (out_dir, reason))), \
+                pytest.raises(SystemExit) as exc:
+            agentic._run_validation_phase_checked(
+                tmp_path, repo_path="x", out_dir=tmp_path)
+        assert exc.value.code == 1
+        assert calls and calls[0][0] == tmp_path
+        assert "ValueError" in calls[0][1]
+
+    def test_success_passes_result_through(self, tmp_path):
+        agentic = _import_agentic()
+        sentinel = ({"completed": True}, 7)
+        with patch("packages.exploitability_validation."
+                   "run_validation_phase", return_value=sentinel), \
+                patch("core.run.fail_run") as fail_run:
+            result = agentic._run_validation_phase_checked(
+                tmp_path, repo_path="x", out_dir=tmp_path)
+        assert result == sentinel
+        assert not fail_run.called
+
+    def test_sandbox_error_keeps_propagating(self, tmp_path):
+        # SandboxSetupError has its own actionable handler and exit
+        # code at the entry point — never converted to a plain fail.
+        agentic = _import_agentic()
+        from core.sandbox import SandboxSetupError
+        with patch("packages.exploitability_validation."
+                   "run_validation_phase",
+                   side_effect=SandboxSetupError("m", "hint")), \
+                pytest.raises(SandboxSetupError):
+            agentic._run_validation_phase_checked(
+                tmp_path, repo_path="x", out_dir=tmp_path)
+
+    def test_call_site_uses_the_checked_wrapper(self):
+        src = (_RAPTOR_ROOT / "raptor_agentic.py").read_text(
+            encoding="utf-8")
+        assert "_run_validation_phase_checked(\n        out_dir," in src
+
+
+class TestMissingAnalysisReport:
+    def test_nonzero_rc_fails_the_run(self, tmp_path, capsys):
+        agentic = _import_agentic()
+        calls = []
+        with patch("core.run.fail_run",
+                   side_effect=lambda out_dir, reason: calls.append(
+                       (out_dir, reason))), \
+                pytest.raises(SystemExit) as exc:
+            agentic._fail_or_warn_missing_analysis(tmp_path, 2, "boom")
+        assert exc.value.code == 1
+        assert calls and "exited 2" in calls[0][1]
+
+    def test_zero_rc_keeps_the_degrade_path(self, tmp_path, capsys):
+        # Direction two: a clean subprocess with nothing to report
+        # still degrades with a warning — completed runs stay rc 0.
+        agentic = _import_agentic()
+        with patch("core.run.fail_run") as fail_run:
+            agentic._fail_or_warn_missing_analysis(tmp_path, 0, "")
+        assert not fail_run.called
+        assert "produced no output" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # _cli_entry lifecycle backstop
 # ---------------------------------------------------------------------------
 
