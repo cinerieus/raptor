@@ -2111,121 +2111,129 @@ def run_sandboxed(
         # knows whether to degrade (mount) or fail loud (Landlock/seccomp/
         # unshare). Default 'U' (fail-loud) for any pre-mount step.
         _status_step = b"U"
-        # Tracer-ready pipe: target child doesn't read from or write to
-        # this pipe; the tracer subprocess writes one end and the main
-        # parent reads the other. Close both inherited ends so the pipe
-        # doesn't keep references to the target child's fd table.
-        if _audit_engaged:
-            os.close(t_ready_r)
-            os.close(t_ready_w)
-        if capture_output:
-            os.close(out_r)
-            os.close(err_r)
-            os.dup2(out_w, 1)
-            os.dup2(err_w, 2)
-            os.close(out_w)
-            os.close(err_w)
-        else:
-            # stdout=/stderr= redirects (int fd, file-like, DEVNULL,
-            # STDOUT for stderr). Pre-fix these kwargs were silently
-            # DROPPED on this path — the child inherited the parent's
-            # fd 1/2 regardless, which also defeated run_untrusted's
-            # write-only tty reopen (the child kept the O_RDWR pty
-            # slave and could read() the operator's keystrokes
-            # through its own stdout). PIPE is unsupported here, same
-            # as stdin: fail closed to /dev/null with a stderr note.
-            for _redir, _fdnum, _label in ((stdout, 1, b"stdout"),
-                                           (stderr, 2, b"stderr")):
-                if _redir is None:
-                    continue
-                if _redir == subprocess.PIPE:
+        # The guard starts HERE, before any stdio plumbing: a bad
+        # caller-supplied stdout=/stderr=/stdin= argument (closed file,
+        # object without a usable fileno(), invalid fd int) raises in
+        # the FORKED child, and without the os._exit backstop that
+        # exception unwinds the caller's stack in BOTH processes — the
+        # orchestrator's finally handlers (proxy unregister, evidence
+        # close, lifecycle writes) would run twice, and the parent
+        # mis-diagnoses the death as "no ready signal".
+        try:
+            # Tracer-ready pipe: target child doesn't read from or write to
+            # this pipe; the tracer subprocess writes one end and the main
+            # parent reads the other. Close both inherited ends so the pipe
+            # doesn't keep references to the target child's fd table.
+            if _audit_engaged:
+                os.close(t_ready_r)
+                os.close(t_ready_w)
+            if capture_output:
+                os.close(out_r)
+                os.close(err_r)
+                os.dup2(out_w, 1)
+                os.dup2(err_w, 2)
+                os.close(out_w)
+                os.close(err_w)
+            else:
+                # stdout=/stderr= redirects (int fd, file-like, DEVNULL,
+                # STDOUT for stderr). Pre-fix these kwargs were silently
+                # DROPPED on this path — the child inherited the parent's
+                # fd 1/2 regardless, which also defeated run_untrusted's
+                # write-only tty reopen (the child kept the O_RDWR pty
+                # slave and could read() the operator's keystrokes
+                # through its own stdout). PIPE is unsupported here, same
+                # as stdin: fail closed to /dev/null with a stderr note.
+                for _redir, _fdnum, _label in ((stdout, 1, b"stdout"),
+                                               (stderr, 2, b"stderr")):
+                    if _redir is None:
+                        continue
+                    if _redir == subprocess.PIPE:
+                        try:
+                            os.write(2, b"sandbox: %s=subprocess."
+                                        b"PIPE not supported via the "
+                                        b"mount-ns path; falling back to "
+                                        b"/dev/null.\n" % _label)
+                        except OSError:
+                            pass
+                        _redir = subprocess.DEVNULL
+                    if _redir == subprocess.DEVNULL:
+                        _dn = os.open("/dev/null", os.O_WRONLY)
+                        os.dup2(_dn, _fdnum)
+                        os.close(_dn)
+                        continue
+                    if _fdnum == 2 and _redir == subprocess.STDOUT:
+                        os.dup2(1, 2)
+                        continue
+                    _rfd = _redir if isinstance(_redir, int) else _redir.fileno()
+                    if _rfd != _fdnum:
+                        os.dup2(_rfd, _fdnum)
+            # stdin: caller-supplied fd/file if any, else /dev/null (defence
+            # against tty-based escapes — a child with an inherited tty can
+            # TIOCSTI-inject or ^Z into the parent's job control). The
+            # Landlock-only path honours stdin=; the mount-ns path MUST do
+            # the same or it silently drops input (bug previously hit by
+            # packages/binary_analysis/debugger.py passing `stdin=open(...)`
+            # for gdb's crash-replay input).
+            # Map the caller's stdin= into fd 0. Handles the same cases
+            # subprocess.Popen does:
+            #   - None or subprocess.DEVNULL → /dev/null
+            #   - subprocess.PIPE  → unsupported on this path (context.py
+            #     already routes `input=` callers away from _spawn, so PIPE
+            #     is always a caller mistake — fail closed with /dev/null
+            #     and a stderr note rather than silently letting the child
+            #     talk to whatever fd -1 resolves to).
+            #   - int fd (real)    → dup2 onto 0
+            #   - file-like object → dup2 on .fileno() onto 0
+            _use_devnull = (
+                stdin is None
+                or stdin == subprocess.DEVNULL
+                or stdin == subprocess.PIPE
+            )
+            if _use_devnull:
+                if stdin == subprocess.PIPE:
                     try:
-                        os.write(2, b"sandbox: %s=subprocess."
-                                    b"PIPE not supported via the "
-                                    b"mount-ns path; falling back to "
-                                    b"/dev/null.\n" % _label)
+                        os.write(2, b"sandbox: stdin=subprocess.PIPE "
+                                    b"not supported via the mount-ns path; "
+                                    b"use `input=` or an explicit fd. "
+                                    b"Falling back to /dev/null.\n")
                     except OSError:
                         pass
-                    _redir = subprocess.DEVNULL
-                if _redir == subprocess.DEVNULL:
-                    _dn = os.open("/dev/null", os.O_WRONLY)
-                    os.dup2(_dn, _fdnum)
-                    os.close(_dn)
-                    continue
-                if _fdnum == 2 and _redir == subprocess.STDOUT:
-                    os.dup2(1, 2)
-                    continue
-                _rfd = _redir if isinstance(_redir, int) else _redir.fileno()
-                if _rfd != _fdnum:
-                    os.dup2(_rfd, _fdnum)
-        # stdin: caller-supplied fd/file if any, else /dev/null (defence
-        # against tty-based escapes — a child with an inherited tty can
-        # TIOCSTI-inject or ^Z into the parent's job control). The
-        # Landlock-only path honours stdin=; the mount-ns path MUST do
-        # the same or it silently drops input (bug previously hit by
-        # packages/binary_analysis/debugger.py passing `stdin=open(...)`
-        # for gdb's crash-replay input).
-        # Map the caller's stdin= into fd 0. Handles the same cases
-        # subprocess.Popen does:
-        #   - None or subprocess.DEVNULL → /dev/null
-        #   - subprocess.PIPE  → unsupported on this path (context.py
-        #     already routes `input=` callers away from _spawn, so PIPE
-        #     is always a caller mistake — fail closed with /dev/null
-        #     and a stderr note rather than silently letting the child
-        #     talk to whatever fd -1 resolves to).
-        #   - int fd (real)    → dup2 onto 0
-        #   - file-like object → dup2 on .fileno() onto 0
-        _use_devnull = (
-            stdin is None
-            or stdin == subprocess.DEVNULL
-            or stdin == subprocess.PIPE
-        )
-        if _use_devnull:
-            if stdin == subprocess.PIPE:
-                try:
-                    os.write(2, b"sandbox: stdin=subprocess.PIPE "
-                                b"not supported via the mount-ns path; "
-                                b"use `input=` or an explicit fd. "
-                                b"Falling back to /dev/null.\n")
-                except OSError:
-                    pass
-            devnull = os.open("/dev/null", os.O_RDONLY)
-            os.dup2(devnull, 0)
-            os.close(devnull)
-        else:
-            try:
-                stdin_fd = stdin if isinstance(stdin, int) else stdin.fileno()
-                os.dup2(stdin_fd, 0)
-                # Close the original fd so the child doesn't inherit a
-                # duplicate (the caller's file object may not have
-                # O_CLOEXEC, in which case execvpe would leave both
-                # fds pointing at the same file). dup2 clears CLOEXEC
-                # on fd 0, which is what we want — stdin stays open
-                # across exec.
-                if stdin_fd != 0:
-                    try:
-                        os.close(stdin_fd)
-                    except OSError:
-                        pass
-            except (AttributeError, OSError):
                 devnull = os.open("/dev/null", os.O_RDONLY)
                 os.dup2(devnull, 0)
                 os.close(devnull)
-        # New session → no controlling tty. Honoured only when caller
-        # explicitly or implicitly opts in — subprocess.run defaults to
-        # start_new_session=False (session inherited) and callers relying
-        # on a controlling tty (e.g. interactive gdb under /crash-analysis
-        # via `sandbox(profile='debug')` + start_new_session=False) need
-        # the same behaviour through this path. Previously _spawn
-        # unconditionally setsid'd, silently defeating that escape
-        # hatch on mount-ns-capable hosts.
-        if start_new_session:
-            try:
-                os.setsid()
-            except OSError:
-                pass
+            else:
+                try:
+                    stdin_fd = stdin if isinstance(stdin, int) else stdin.fileno()
+                    os.dup2(stdin_fd, 0)
+                    # Close the original fd so the child doesn't inherit a
+                    # duplicate (the caller's file object may not have
+                    # O_CLOEXEC, in which case execvpe would leave both
+                    # fds pointing at the same file). dup2 clears CLOEXEC
+                    # on fd 0, which is what we want — stdin stays open
+                    # across exec.
+                    if stdin_fd != 0:
+                        try:
+                            os.close(stdin_fd)
+                        except OSError:
+                            pass
+                except (AttributeError, OSError):
+                    devnull = os.open("/dev/null", os.O_RDONLY)
+                    os.dup2(devnull, 0)
+                    os.close(devnull)
+            # New session → no controlling tty. Honoured only when caller
+            # explicitly or implicitly opts in — subprocess.run defaults to
+            # start_new_session=False (session inherited) and callers relying
+            # on a controlling tty (e.g. interactive gdb under /crash-analysis
+            # via `sandbox(profile='debug')` + start_new_session=False) need
+            # the same behaviour through this path. Previously _spawn
+            # unconditionally setsid'd, silently defeating that escape
+            # hatch on mount-ns-capable hosts.
+            if start_new_session:
+                try:
+                    os.setsid()
+                except OSError:
+                    pass
 
-        try:
             # Step 3: create namespaces. Leaves us as "nobody" in the
             # new user-ns until the parent runs newuidmap on us.
             # CLONE_NEWCGROUP: without it every process in the
