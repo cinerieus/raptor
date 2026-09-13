@@ -17,6 +17,8 @@ common denominator for C/C++/Java/Go/Rust/JS/TS).
 
 from __future__ import annotations
 
+import re
+
 # Extensions handled by the hash-comment (Python/shell-style) scanner.
 _HASH_COMMENT_EXTS = (
     ".py", ".pyi", ".sh", ".bash", ".rb", ".pl", ".tcl",
@@ -27,6 +29,14 @@ _HASH_COMMENT_EXTS = (
 # JS/TS template literals).
 _BACKTICK_EXTS = (".go", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 
+# JS/TS treat '...' as a full string literal. Everywhere else in the
+# C family (C/C++/Java/Go/Rust) a single quote only ever opens a
+# short char/rune literal — treating it as a to-end-of-line string
+# made a Rust lifetime tick (&'a str) blank the rest of the line,
+# forging absence receipts.
+_SQ_STRING_EXTS = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_SQ_STRING_LANGS = frozenset({"javascript", "typescript", "tsx", "jsx"})
+
 # Language-id routing for callers that already know the language
 # (checkers holding an inventory language id or a tree-sitter grammar
 # name rather than a file path).
@@ -36,6 +46,10 @@ _HASH_COMMENT_LANGS = frozenset({
 _BACKTICK_LANGS = frozenset({
     "go", "javascript", "typescript", "tsx", "jsx",
 })
+
+
+# Char-literal shape: 'x' or a short escape ('\n', '\'', '\x41').
+_CHAR_LIT_RE = re.compile(r"'(?:\\[^\n]{1,3}|[^'\\\n])'")
 
 
 def sanitized_view(
@@ -61,12 +75,15 @@ def sanitized_view(
             return _strip_python_like(source)
         return _strip_c_family(
             source, backtick_strings=lang in _BACKTICK_LANGS,
+            single_quote_strings=lang in _SQ_STRING_LANGS,
         )
     lower = (file_path or "").lower()
     if lower.endswith(_HASH_COMMENT_EXTS):
         return _strip_python_like(source)
-    backticks = lower.endswith(_BACKTICK_EXTS)
-    return _strip_c_family(source, backtick_strings=backticks)
+    return _strip_c_family(
+        source, backtick_strings=lower.endswith(_BACKTICK_EXTS),
+        single_quote_strings=lower.endswith(_SQ_STRING_EXTS),
+    )
 
 
 def _blank(chars: list[str], start: int, end: int) -> None:
@@ -76,7 +93,11 @@ def _blank(chars: list[str], start: int, end: int) -> None:
             chars[i] = " "
 
 
-def _strip_c_family(source: str, *, backtick_strings: bool = False) -> str:
+def _strip_c_family(
+    source: str, *,
+    backtick_strings: bool = False,
+    single_quote_strings: bool = False,
+) -> str:
     chars = list(source)
     n = len(source)
     i = 0
@@ -93,7 +114,19 @@ def _strip_c_family(source: str, *, backtick_strings: bool = False) -> str:
             end = n if close < 0 else close + 2
             _blank(chars, i, end)
             i = end
-        elif ch in ('"', "'") or (backtick_strings and ch == "`"):
+        elif ch == "'" and not single_quote_strings:
+            # Char/rune literal only, and only when it has the
+            # char-literal shape (closing quote within a couple of
+            # characters, escapes allowed). A lone tick — a Rust
+            # lifetime, an apostrophe in code — is NOT a literal and
+            # must not swallow the rest of the line.
+            end = _char_literal_end(source, i)
+            if end is None:
+                i += 1
+            else:
+                _blank(chars, i + 1, end - 1)
+                i = end
+        elif ch == '"' or ch == "'" or (backtick_strings and ch == "`"):
             end = _string_end(source, i, ch, raw=(ch == "`"))
             # Keep the delimiters so shapes like ``""`` stay visible;
             # blank only the contents.
@@ -129,6 +162,18 @@ def _strip_python_like(source: str) -> str:
         else:
             i += 1
     return "".join(chars)
+
+
+def _char_literal_end(source: str, start: int) -> int | None:
+    """Index just past a char-literal's closing quote, or None.
+
+    Accepts the char-literal shape only: one plain character
+    (``'x'``) or a short escape (``'\\n'``, ``'\\x41'`` — at most
+    three characters after the backslash). Anything else is not a
+    literal.
+    """
+    m = _CHAR_LIT_RE.match(source, start)
+    return m.end() if m else None
 
 
 def _string_end(source: str, start: int, quote: str, *, raw: bool = False) -> int:

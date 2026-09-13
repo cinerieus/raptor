@@ -28,6 +28,33 @@ class TestCFamily:
         assert "strcpy(a, b)" in view
         assert "'x'" not in view
 
+    def test_rust_lifetime_tick_does_not_blank_the_line(self):
+        # `'` opened a to-end-of-line string, so `&'a str` blanked
+        # everything after the tick — code on the rest of the line
+        # produced false absence receipts.
+        view = sanitized_view(
+            "fn f<'a>(x: &'a str) -> &'a str { check_perm(x); x }",
+            "lib.rs",
+        )
+        assert "check_perm(x)" in view
+
+    def test_escaped_char_literal_blanked(self):
+        view = sanitized_view("if (c == '\\n') strcpy(a, b);", "a.c")
+        assert "strcpy(a, b)" in view
+        assert "'\\n'" not in view
+
+    def test_hex_escape_char_literal_blanked(self):
+        view = sanitized_view("if (c == '\\x41') go();", "a.c")
+        assert "go()" in view
+        assert "x41" not in view
+
+    def test_js_single_quoted_string_still_blanked(self):
+        # JS/TS treat '...' as a full string literal — the
+        # char-literal shape restriction must not apply there.
+        view = sanitized_view("var s = 'memcpy here'; run();", "a.js")
+        assert "memcpy" not in view
+        assert "run();" in view
+
     def test_escaped_quote_inside_string(self):
         view = sanitized_view(r'p("a\"b popen( c"); q();', "a.c")
         assert "popen" not in view
