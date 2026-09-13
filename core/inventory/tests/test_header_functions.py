@@ -98,6 +98,18 @@ class TestBuildIndex:
         assert "abs_val" in idx
         assert "return -x" in idx["abs_val"][1]
 
+    def test_function_pointer_parameter(self, tmp_path):
+        """A fn-pointer parameter nests parentheses inside the list;
+        the flat [^)]* param pattern never reached the brace."""
+        (tmp_path / "cb.h").write_text(
+            "static inline void each(int n, void (*cb)(int)) {\n"
+            "    for (int i = 0; i < n; i++) cb(i);\n"
+            "}\n"
+        )
+        idx = build_header_function_index(tmp_path)
+        assert "each" in idx
+        assert "cb(i)" in idx["each"][1]
+
     def test_subdirectory_headers(self, tmp_path):
         sub = tmp_path / "include" / "mylib"
         sub.mkdir(parents=True)

@@ -24,11 +24,15 @@ _HEADER_EXTENSIONS = frozenset({".h", ".hh", ".hpp", ".hxx"})
 # Handles: static inline int foo(int x) {
 #          __attribute__((always_inline)) static void bar(void) {
 #          ZEXTERN int ZEXPORT crc32(uLong crc, ...) {
+#          static int each(int n, void (*cb)(int)) {
+# The parameter list tolerates one level of nested parentheses (same
+# sub-pattern the __attribute__ clause uses) so function-pointer
+# parameters don't hide the definition.
 _FUNC_DEF_RE = re.compile(
     r"^[ \t]*"
     r"(?:__attribute__\s*\(\([^()]*(?:\([^()]*\)[^()]*)*\)\)\s+)*"
     r"(?:\w+\s+)*?"
-    r"(\w+)\s*\([^)]*\)\s*\{",
+    r"(\w+)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*\{",
     re.MULTILINE,
 )
 
