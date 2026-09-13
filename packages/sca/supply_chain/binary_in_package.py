@@ -77,6 +77,7 @@ from core.json import load_json_bounded
 from ..discovery import EXCLUDED_DIR_NAMES
 from ..models import Confidence, Dependency, Manifest
 from ..parsers import _safe_read
+from . import _own_host
 
 # Subset of EXCLUDED_DIR_NAMES that's safe to skip during binary
 # scanning.  We DELIBERATELY recurse into ``dist/``, ``build/``,
@@ -485,7 +486,7 @@ def scan_target(
     # manifest "owns" each binary hit.  Most projects have one
     # top-level manifest; monorepos have several.
     manifests_list = list(manifests)
-    deps_list = list(deps)
+    del deps  # host is a pure function of the owning manifest
     # Per-manifest declaration / own-name answers, computed lazily so
     # each manifest body is parsed at most once regardless of hit count.
     declares_cache: dict[Path, bool] = {}
@@ -512,10 +513,22 @@ def scan_target(
             own_name = own_name_cache[owner.path]
             if own_name is not None and _is_per_platform_name(own_name):
                 continue
-        # Find the closest manifest's dep for finding attribution;
-        # default to the placeholder dep if none.
-        host = _closest_dep(path, manifests_list, deps_list)
-        if host is None:
+        # Attribute the hit to the owning manifest's OWN package
+        # identity (or its placeholder), never to a dep the manifest
+        # declares: dep ordering is controlled by the scanned repo, so
+        # first-dep attribution named an innocent third party (and
+        # let a planted binary spuriously compose with unrelated
+        # findings on that dep). Sharing the resolver with the
+        # lifecycle-hook adapters also makes the HOOK+BINARY
+        # composite pair reachable — both sides of the pair produce
+        # identical host keys for the same manifest.
+        if owner is not None:
+            host = _own_host.resolve_own_host(
+                owner,
+                reason="placeholder for binary-in-package finding host",
+                placeholder_name="<project-tree>",
+            )
+        else:
             host = _placeholder_dep(target)
         declared = False
         if owner is not None:
@@ -594,8 +607,7 @@ def _closest_manifest(
     manifests: Sequence[Manifest],
 ) -> Manifest | None:
     """Return the manifest whose directory most closely dominates
-    ``path`` (same containment walk as :func:`_closest_dep`, without
-    requiring a declared dep).  None when no manifest dominates."""
+    ``path``.  None when no manifest dominates."""
     best_depth = -1
     best: Manifest | None = None
     for m in manifests:
@@ -608,34 +620,6 @@ def _closest_manifest(
         if depth > best_depth:
             best = m
             best_depth = depth
-    return best
-
-
-def _closest_dep(
-    path: Path,
-    manifests: Sequence[Manifest],
-    deps: Sequence[Dependency],
-) -> Dependency | None:
-    """Return the dep declared by the manifest closest to ``path``
-    in the directory tree.  Returns None when no manifest dominates
-    the file (caller falls back to a placeholder)."""
-    best_depth = -1
-    best: Dependency | None = None
-    for m in manifests:
-        m_dir = m.path.parent.resolve()
-        try:
-            path.resolve().relative_to(m_dir)
-        except ValueError:
-            continue
-        depth = len(m_dir.parts)
-        if depth <= best_depth:
-            continue
-        # Find a dep declared in this manifest.
-        for d in deps:
-            if d.declared_in == m.path:
-                best = d
-                best_depth = depth
-                break
     return best
 
 

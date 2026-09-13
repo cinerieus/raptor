@@ -22,7 +22,9 @@ What this layer must defend against:
     ``(ecosystem, name, version)`` — different versions are different
     groups.  An attacker still gains nothing because any single
     malicious version still trips the per-detector signals; we just
-    don't help them by combining unrelated versions.
+    don't help them by combining unrelated versions.  (Placeholder-
+    hosted findings from tree-walking detectors key on their
+    anchoring manifest instead — see :func:`_dep_key`.)
 
   * **Family-map gaps used to slip findings past the chokepoint** —
     a finding kind we don't classify gets no family and no
@@ -164,11 +166,26 @@ _SEVERITY_ORDER: tuple[Severity, ...] = (
 _RANK: Mapping[Severity, int] = {s: i for i, s in enumerate(_SEVERITY_ORDER)}
 
 
-def _dep_key(dep: Dependency) -> tuple[str, str, str]:
+def _dep_key(dep: Dependency) -> tuple[str, str, str | None]:
     """Per-version grouping key.  An attacker who spreads payload
     across multiple versions deliberately fragments the composite
     signal; that's their choice — we don't help them combine across
-    versions either."""
+    versions either.
+
+    Placeholder hosts (``<``-prefixed names, which no ecosystem's
+    name grammar can produce) come from tree-walking detectors whose
+    subject is the scanned package itself and whose manifest carries
+    no own name.  They key on the anchoring manifest instead: the
+    per-detector placeholder NAMES legitimately differ, and keying
+    on the name would both fragment same-manifest conjunctions
+    (killing the HOOK+BINARY / HOOK+EGRESS hard pairs) and spuriously
+    merge unrelated manifests that share a placeholder spelling."""
+    if dep.name.startswith("<"):
+        # Ecosystem deliberately excluded: detectors disagree on the
+        # placeholder's ecosystem for the same manifest (fallbacks
+        # range over the manifest's ecosystem, "Project", "unknown"),
+        # and the manifest path alone already identifies the subject.
+        return ("", f"declared-in:{dep.declared_in}", None)
     return (dep.ecosystem, dep.name, dep.version)
 
 

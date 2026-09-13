@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..models import Confidence, Dependency, Manifest, PinStyle
-from . import _hook_patterns
+from . import _hook_patterns, _own_host
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -143,9 +143,13 @@ def _host_dep_for_target(
     manifests: Sequence[Manifest],
     target: Path,
 ) -> Dependency | None:
-    """Find the first RubyGems dep whose declared manifest is under
-    ``target``.  Used to attribute extconf findings to the host
-    gemspec/Gemfile."""
+    """Anchor extconf findings at the first RubyGems manifest under
+    ``target``, carrying the gem's OWN name (gemspec) when it
+    declares one.  The extconf script is the gem's own code —
+    attributing it to whichever dep the parser emitted first named
+    an innocent third party and keyed the publish-helper worm-shape
+    suppression on the wrong name."""
+    del deps
     for m in manifests:
         if m.ecosystem != "RubyGems" or m.is_lockfile:
             continue
@@ -153,9 +157,11 @@ def _host_dep_for_target(
             m.path.relative_to(target)
         except ValueError:
             continue
-        for d in deps:
-            if d.declared_in == m.path:
-                return d
+        return _own_host.resolve_own_host(
+            m,
+            reason="placeholder for rubygems-lifecycle-hook finding host",
+            placeholder_name="<extconf>",
+        )
     return None
 
 

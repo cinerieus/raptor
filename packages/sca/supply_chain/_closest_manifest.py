@@ -17,6 +17,7 @@ from pathlib import Path
 from collections.abc import Sequence
 
 from ..models import Confidence, Dependency, Manifest, PinStyle
+from . import _own_host
 
 
 def closest_manifest(
@@ -56,17 +57,29 @@ def project_host_dep(
     scope: str = "main",
     ecosystem_fallback: str = "Project",
 ) -> Dependency:
-    """Synthesise the placeholder host ``Dependency`` for a
-    project-level finding at ``path``, anchored to the closest
-    manifest (or ``target`` itself when no manifest dominates)."""
+    """Synthesise the host ``Dependency`` for a project-level finding
+    at ``path``, anchored to the closest manifest (or ``target``
+    itself when no manifest dominates).
+
+    Anchored hosts carry the package's OWN name when the manifest
+    declares one (via the shared :mod:`._own_host` resolver), so
+    every tree-walking detector produces the same host key for the
+    same manifest — the composite chokepoint's cross-family pairs
+    depend on that.  ``name`` is the per-detector placeholder used
+    when no own name resolves (must stay ``<``-prefixed)."""
     closest = closest_manifest(manifests, path)
-    declared_in = closest.path if closest else target
-    ecosystem = closest.ecosystem if closest else ecosystem_fallback
+    if closest is not None:
+        return _own_host.resolve_own_host(
+            closest,
+            reason=reason,
+            placeholder_name=name,
+            scope=scope,
+        )
     return Dependency(
-        ecosystem=ecosystem,
+        ecosystem=ecosystem_fallback,
         name=name,
         version=None,
-        declared_in=declared_in,
+        declared_in=target,
         scope=scope,
         is_lockfile=False,
         pin_style=PinStyle.UNKNOWN,

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from ..models import (
     Confidence, Dependency, Manifest,
 )
-from . import _hook_patterns
+from . import _hook_patterns, _own_host
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -103,24 +103,14 @@ def scan_manifests(
 
 
 def _host_dep(deps: list[Dependency], m: Manifest) -> Dependency:
-    """Find a Dependency to anchor the finding on — first
-    Cargo-eco dep from the same dir, else a synthetic one."""
-    for d in deps:
-        if d.ecosystem == "Cargo" and d.declared_in == m.path:
-            return d
-    # Synthetic anchor — no real dep to point at.
-    from packages.sca.models import PinStyle
-    return Dependency(
-        ecosystem="Cargo",
-        name="<project>",
-        version=None,
-        declared_in=m.path,
-        scope="main",
-        is_lockfile=False,
-        pin_style=PinStyle.UNKNOWN,
-        direct=True,
-        purl="",
-        parser_confidence=Confidence(
-            "high", reason="synthetic project anchor",
-        ),
+    """Anchor the finding on the crate's OWN name from Cargo.toml
+    ``[package].name`` (placeholder when absent) — ``build.rs`` is
+    the crate's own code, so attributing it to whichever dep the
+    parser emitted first named an innocent third party and keyed
+    the publish-helper worm-shape suppression on the wrong name."""
+    del deps
+    return _own_host.resolve_own_host(
+        m,
+        reason="placeholder for cargo-build-script finding host",
+        placeholder_name="<project>",
     )

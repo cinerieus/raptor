@@ -78,7 +78,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
 
-from ..models import Confidence, Dependency, Manifest, PinStyle
+from ..models import Confidence, Dependency, Manifest
+from . import _own_host
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,7 @@ def scan_manifests(
     for m in manifests:
         if m.path.name != "package.json" or m.is_lockfile:
             continue
-        host = _host_dep(deps_list, m) or _placeholder_for_manifest(m)
+        host = _host_dep(deps_list, m)
         out.extend(_scan_one(m.path, host))
     return out
 
@@ -294,28 +295,16 @@ def _severity_for(hit: GitRefHit) -> tuple[str, Confidence]:
 
 def _host_dep(
     deps: list[Dependency], manifest: Manifest,
-) -> Dependency | None:
-    for d in deps:
-        if d.declared_in == manifest.path:
-            return d
-    return None
-
-
-def _placeholder_for_manifest(manifest: Manifest) -> Dependency:
-    return Dependency(
-        ecosystem=manifest.ecosystem,
-        name="<package.json>",
-        version=None,
-        declared_in=manifest.path,
-        scope="main",
-        is_lockfile=False,
-        pin_style=PinStyle.UNKNOWN,
-        direct=True,
-        purl="",
-        parser_confidence=Confidence(
-            "low",
-            reason="placeholder for orphan-commit-dep finding host",
-        ),
+) -> Dependency:
+    """Anchor findings to the package's OWN name (``data.name``) —
+    the git-ref rows live in the package's own manifest; attributing
+    them to whichever dep the parser emitted first named an innocent
+    third party."""
+    del deps
+    return _own_host.resolve_own_host(
+        manifest,
+        reason="placeholder for orphan-commit-dep finding host",
+        placeholder_name="<package.json>",
     )
 
 
