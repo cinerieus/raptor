@@ -17,12 +17,12 @@ copy by skipping known-large vendored / build-output paths.
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 from . import ResolverResult, _check_tool, _run
+from ._safe_io import copy_regular_file
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +74,18 @@ class GoResolver:
         # dir so the user's checkout is untouched.
         with tempfile.TemporaryDirectory(prefix="raptor-sca-go-") as tmp:
             tmp_path = Path(tmp)
+            # lstat-gated, size-bounded copies — a symlinked or
+            # special-file manifest in the scanned (hostile) tree is
+            # refused instead of followed / opened.
             for fname in ("go.mod", "go.sum"):
-                src = project_dir / fname
-                if src.exists():
-                    shutil.copy2(src, tmp_path / fname)
+                copy_regular_file(project_dir / fname, tmp_path / fname)
             _SKIP_DIRS = {"vendor", "node_modules", ".git", "testdata"}
             _MAX_FILES = 10_000
             _copied = 0
             for go_file in project_dir.rglob("*.go"):
+                # Cheap pre-filter keeps hostile symlink farms from
+                # producing one refusal warning per entry; the copy
+                # itself re-checks under O_NOFOLLOW (no TOCTOU).
                 if go_file.is_symlink():
                     continue
                 parts = go_file.relative_to(project_dir).parts
@@ -93,7 +97,7 @@ class GoResolver:
                 rel = go_file.relative_to(project_dir)
                 dest = tmp_path / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(go_file, dest)
+                copy_regular_file(go_file, dest)
 
             try:
                 proc = _run(
