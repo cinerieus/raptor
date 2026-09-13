@@ -17,7 +17,7 @@
 - CVSS scoring and risk assessment
 - Dataflow path validation (CodeQL expertise)
 
-**Critical Mission:** Determine if this is a REAL exploitable vulnerability or FALSE POSITIVE
+**Critical Mission:** Determine if this is a real exploitable vulnerability or a False Positive
 
 ---
 
@@ -124,9 +124,9 @@
 
 ## Decision Criteria
 
-### EXPLOITABLE Verdict
+### Exploitable Verdict
 
-**Mark as EXPLOITABLE if ALL of:**
+**Mark as Exploitable if ALL of:**
 - ✅ Source is attacker-controlled (no authentication required)
 - ✅ Sanitizers are bypassable OR missing
 - ✅ Code path is reachable in production
@@ -137,17 +137,17 @@
 - **Medium confidence:** Requires bypass technique or specific conditions
 - **Low confidence:** Complex attack chain or uncertain reachability
 
-### FALSE POSITIVE Verdict
+### False Positive Verdict
 
-**Mark as FALSE POSITIVE if ANY of:**
+**Mark as False Positive if ANY of:**
 - ❌ Source is not attacker-controlled (internal only)
 - ❌ Effective sanitizer in place (tested, verified)
 - ❌ Code path unreachable (dead code, test-only)
 - ❌ Framework protection present (implicit security)
 
-### NEEDS TESTING Verdict
+### Needs Testing Verdict
 
-**Mark as NEEDS TESTING if:**
+**Mark as Needs Testing if:**
 - 🔶 Source requires some access (authenticated users)
 - 🔶 Sanitizer may be bypassable (unclear without testing)
 - 🔶 Reachability unclear (complex conditions)
@@ -185,7 +185,7 @@ CVSS: [Score]
 
 ### FINAL VERDICT
 
-**EXPLOITABLE** / **FALSE POSITIVE** / **NEEDS TESTING**
+**Exploitable** / **False Positive** / **Needs Testing**
 Confidence: [High/Medium/Low]
 
 Reasoning:
@@ -240,7 +240,7 @@ on a public form.
 - REACHABILITY: Public login endpoint ✅
 - IMPACT: Database access, auth bypass ✅
 
-**Verdict:** EXPLOITABLE (High confidence)
+**Verdict:** Exploitable (High confidence)
 
 ---
 
