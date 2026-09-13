@@ -38,7 +38,11 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "smt": "check-oob",
         "cocci": None,
         "joern": True,
-        "codeql": "cpp/out-of-bounds-read",
+        # cpp-queries carries no out-of-bounds-read @id; the pack's
+        # OOB adjudicator is the invalid-pointer-dereference query
+        # (tagged cwe-119/125/193/787 — covers reads and writes past
+        # the allocation).
+        "codeql": "cpp/invalid-pointer-deref",
         "sinks": ["memcmp", "strlen", "strstr", "strcmp", "strncmp", "read", "fread"],
     },
     "CWE-787": {
@@ -104,7 +108,11 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "cocci": ["integer_overflow_alloc.cocci",
                   "alloc_narrow_count.cocci"],
         "joern": False,
-        "codeql": "cpp/integer-overflow",
+        # cpp-queries carries no bare integer-overflow @id; the CWE-190
+        # security query for overflow from untrusted input is
+        # cpp/integer-overflow-tainted (also tagged cwe-197/681, which
+        # covers the narrowing entries below that share it).
+        "codeql": "cpp/integer-overflow-tainted",
         "sinks": [],
         "dark_verify": True,
         "dark_verify_statuses": ("dark", "suspicious", "finding"),
@@ -113,7 +121,7 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "smt": "check-overflow",
         "cocci": None,
         "joern": False,
-        "codeql": "cpp/integer-overflow",
+        "codeql": "cpp/integer-overflow-tainted",
         "sinks": [],
     },
     # Injection
@@ -274,7 +282,14 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "smt": "check-null-propagation",
         "cocci": "missing_null_check.cocci",
         "joern": False,
-        "codeql": "cpp/null-dereference",
+        # cpp-queries carries no null-dereference @id (the
+        # so-named variants are experimental-tree, which the
+        # resolver never dispatches). Of the stock cwe-476-tagged
+        # queries, cpp/missing-null-test is the one that detects
+        # the dereference itself (returned pointer dereferenced
+        # without a null check); the others detect null-check
+        # INCONSISTENCY, not the deref.
+        "codeql": "cpp/missing-null-test",
         "sinks": [],
     },
     # Improper neutralization of escape/control sequences — the
@@ -440,7 +455,7 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "smt": "check-integer-narrowing",
         "cocci": "sign_extension_widen.cocci",
         "joern": False,
-        "codeql": "cpp/integer-overflow",
+        "codeql": "cpp/integer-overflow-tainted",
         "sinks": [],
     },
     # Signed/unsigned conversion — the 190/681 signedness family
@@ -449,7 +464,7 @@ CWE_TO_TOOL_DISPATCH: dict[str, dict[str, Any]] = {
         "smt": "check-integer-narrowing",
         "cocci": "sign_extension_widen.cocci",
         "joern": False,
-        "codeql": "cpp/integer-overflow",
+        "codeql": "cpp/integer-overflow-tainted",
         "sinks": [],
     },
     # Type confusion / strict-aliasing punning — no static dataflow
