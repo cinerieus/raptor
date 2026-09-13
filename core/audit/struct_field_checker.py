@@ -177,6 +177,19 @@ def _extract_struct_layouts(
             else:
                 elem_size = _TYPE_SIZES.get(base_type, 4)
 
+            # Natural alignment (LP64 System V assumption): each field
+            # aligns to min(element size, 8); an array aligns to its
+            # element. Without this, {int; char *; char[8]} placed the
+            # pointer at 4 and the array at 12 instead of the ABI's
+            # 8/16 — offsets consumed downstream as tool evidence
+            # attributed copies to the wrong field. No #pragma pack /
+            # __attribute__((packed)) handling: explicitly packed
+            # structs will still be laid out natural here. Struct tail
+            # padding is irrelevant to this path (only per-field
+            # offsets are consumed, never the struct's total size).
+            align = min(elem_size, 8) or 1
+            offset = -(-offset // align) * align
+
             total_size = elem_size * array_size if array_size else elem_size
 
             fields.append({

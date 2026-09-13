@@ -22,7 +22,7 @@ _SRC = (
     "};\n"
     "void f(char *src) {\n"
     "    pkt *p = (pkt *)malloc(0x20);\n"
-    "    memcpy((char *)p + 0xc, src, 64);\n"
+    "    memcpy((char *)p + 0x10, src, 64);\n"
     "}\n"
 )
 
@@ -57,14 +57,41 @@ class TestVarBinding:
 
 class TestLayoutExtraction:
     def test_pointer_field_star_on_name_counted(self):
-        # `char *name;` used to be skipped entirely: `tag` then sat at
-        # offset 4 instead of 12.
+        # `char *name;` used to be skipped entirely: `tag` then sat
+        # eight bytes short of its real offset.
         layouts = _extract_struct_layouts(_SRC)
         fields = {f["name"]: f for f in layouts["pkt"]}
-        assert fields["name"]["offset"] == 4
+        assert fields["name"]["offset"] == 8
         assert fields["name"]["size"] == 8
-        assert fields["tag"]["offset"] == 12
+        assert fields["tag"]["offset"] == 16
         assert fields["tag"]["size"] == 8
+
+    def test_natural_alignment_padding_applied(self):
+        # LP64 natural layout: the pointer after a 4-byte int aligns
+        # to 8 (4 bytes of padding), the byte array then starts at 16.
+        # Unpadded packing (name@4/tag@12) attributed copies landing
+        # at the ABI offsets to the wrong field.
+        layouts = _extract_struct_layouts(
+            "struct mix {\n"
+            "    int type;\n"
+            "    char *name;\n"
+            "    char tag[8];\n"
+            "};\n"
+        )
+        offsets = {f["name"]: f["offset"] for f in layouts["mix"]}
+        assert offsets == {"type": 0, "name": 8, "tag": 16}
+
+    def test_already_aligned_fields_unchanged(self):
+        # No mixed alignment -> no padding inserted.
+        layouts = _extract_struct_layouts(
+            "struct flat {\n"
+            "    int a;\n"
+            "    int b;\n"
+            "    char c[4];\n"
+            "};\n"
+        )
+        offsets = {f["name"]: f["offset"] for f in layouts["flat"]}
+        assert offsets == {"a": 0, "b": 4, "c": 8}
 
 
 class TestEndToEnd:
@@ -73,7 +100,7 @@ class TestEndToEnd:
         assert len(findings) == 1
         f = findings[0]
         assert f.field_name == "tag"
-        assert f.field_offset == 12
+        assert f.field_offset == 16
         assert f.field_size == 8
         assert f.copy_call == "memcpy"
         assert f.confidence == "high"
