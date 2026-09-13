@@ -40,6 +40,7 @@ from core.logging import get_logger
 from core.run.output import unique_run_suffix
 from core.run.safe_io import safe_run_mkdir
 from core.sandbox import SANDBOX_ENGAGE_EXIT_CODE, SandboxSetupError
+from core.sarif import emit as sarif_emit
 from core.sarif.parser import generate_scan_metrics, merge_sarif, validate_sarif
 from packages import semgrep as semgrep_pkg
 
@@ -2321,8 +2322,7 @@ def _stage_findings_to_sarif(
 ) -> dict:
     """SARIF doc for a generated-rule stage; same shape discipline as
     the graduated stage (distinct tool name, provenance in ruleId)."""
-    rule_defs: list[dict] = []
-    seen_rules: set = set()
+    rule_index = sarif_emit.RuleIndex()
     results: list[dict] = []
     for rule_id, f in findings:
         sarif_rule_id = (
@@ -2330,54 +2330,39 @@ def _stage_findings_to_sarif(
         )
         if not str(sarif_rule_id).startswith(rule_prefix):
             sarif_rule_id = f"{rule_prefix}:{sarif_rule_id}"
-        if sarif_rule_id not in seen_rules:
-            rule_def = {
-                "id": sarif_rule_id,
-                "name": sarif_rule_id,
-                "shortDescription": {"text": sarif_rule_id},
-                "defaultConfiguration": {"level": "warning"},
-            }
+        if sarif_rule_id not in rule_index:
+            rule_props = None
             for suffix, cwe in (cwe_by_suffix or {}).items():
                 if str(sarif_rule_id).endswith(suffix):
-                    rule_def["properties"] = {"cwe": cwe}
+                    rule_props = {"cwe": cwe}
                     break
-            rule_defs.append(rule_def)
-            seen_rules.add(sarif_rule_id)
-        results.append({
-            "ruleId": sarif_rule_id,
-            "level": f.get("level") or "warning",
-            "message": {
-                "text": f.get("message") or f"{rule_prefix} rule matched",
-            },
-            "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {
-                        "uri": f.get("file") or f.get("path") or "",
-                    },
-                    "region": {
-                        "startLine": f.get("line")
-                                     or f.get("start_line") or 1,
-                        "endLine": f.get("line_end")
-                                   or f.get("end_line")
-                                   or f.get("line")
-                                   or f.get("start_line") or 1,
-                    },
+            rule_index.add(sarif_emit.minimal_rule(
+                sarif_rule_id, properties=rule_props,
+            ))
+        results.append(sarif_emit.result(
+            sarif_rule_id,
+            f.get("message") or f"{rule_prefix} rule matched",
+            [sarif_emit.location(
+                f.get("file") or f.get("path") or "",
+                {
+                    "startLine": f.get("line")
+                                 or f.get("start_line") or 1,
+                    "endLine": f.get("line_end")
+                               or f.get("end_line")
+                               or f.get("line")
+                               or f.get("start_line") or 1,
                 },
-            }],
-            "properties": {"provenance": "mechanical-source-summary"},
-        })
-    return {
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": tool_name,
-                "informationUri": "https://github.com/anthropics",
-                "rules": rule_defs,
-            }},
-            "results": results,
-        }],
-    }
+            )],
+            level=f.get("level") or "warning",
+            properties={"provenance": "mechanical-source-summary"},
+        ))
+    return sarif_emit.document(
+        [sarif_emit.run(
+            tool_name, rule_index.rules(), results,
+            information_uri="https://github.com/anthropics",
+        )],
+        schema_uri=sarif_emit.SCHEMA_URI_SCHEMASTORE,
+    )
 
 
 def _graduated_findings_to_sarif(
@@ -2394,54 +2379,30 @@ def _graduated_findings_to_sarif(
     rule id (LLM-chosen kebab-case) is preserved in properties for
     forensics.
     """
-    rule_defs: list[dict] = []
-    seen_rules: set = set()
+    rule_index = sarif_emit.RuleIndex()
     results: list[dict] = []
     for rule_id, f in findings:
         sarif_rule_id = f"synthesized:{rule_id}"
-        if sarif_rule_id not in seen_rules:
-            rule_defs.append({
-                "id": sarif_rule_id,
-                "name": sarif_rule_id,
-                "shortDescription": {"text": sarif_rule_id},
-                "defaultConfiguration": {"level": "warning"},
-            })
-            seen_rules.add(sarif_rule_id)
-        results.append({
-            "ruleId": sarif_rule_id,
-            "level": f.get("level") or "warning",
-            "message": {
-                "text": f.get("message")
-                        or f"graduated rule {rule_id} matched",
-            },
-            "locations": [{
-                "physicalLocation": {
-                    "artifactLocation": {"uri": f.get("file", "")},
-                    "region": {"startLine": f.get("line", 0)},
-                },
-            }],
-            "properties": {
+        rule_index.add(sarif_emit.minimal_rule(sarif_rule_id))
+        results.append(sarif_emit.result(
+            sarif_rule_id,
+            f.get("message") or f"graduated rule {rule_id} matched",
+            [sarif_emit.location(
+                f.get("file", ""), {"startLine": f.get("line", 0)},
+            )],
+            level=f.get("level") or "warning",
+            properties={
                 "provenance": sarif_rule_id,
                 "semgrep_rule_id": f.get("rule_id", ""),
             },
-        })
-    return {
-        "$schema": (
-            "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/"
-            "master/Schemata/sarif-schema-2.1.0.json"
-        ),
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {
-                "driver": {
-                    "name": _GRADUATED_TOOL_NAME,
-                    "informationUri": "https://github.com/anthropics/raptor",
-                    "rules": rule_defs,
-                },
-            },
-            "results": results,
-        }],
-    }
+        ))
+    return sarif_emit.document(
+        [sarif_emit.run(
+            _GRADUATED_TOOL_NAME, rule_index.rules(), results,
+            information_uri="https://github.com/anthropics/raptor",
+        )],
+        schema_uri=sarif_emit.SCHEMA_URI_SCHEMATA,
+    )
 
 
 def _sarif_has_findings(sarif_path: Path) -> bool:
