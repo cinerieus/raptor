@@ -84,12 +84,20 @@ def cmd_gaps(args: argparse.Namespace) -> int:
             print(f"building checklist from {target_path} ...", file=sys.stderr)
             import subprocess
             env = dict(os.environ, CLAUDECODE="1")
-            cp = subprocess.run(
-                [sys.executable, str(_RAPTOR_DIR / "libexec" / "raptor-build-checklist"),
-                 str(target_path), str(out_dir)],
-                env=env, capture_output=True, text=True, timeout=300,
-                check=False,
-            )
+            try:
+                cp = subprocess.run(
+                    [sys.executable, str(_RAPTOR_DIR / "libexec" / "raptor-build-checklist"),
+                     str(target_path), str(out_dir)],
+                    env=env, capture_output=True, text=True, timeout=300,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                print(
+                    f"error: checklist build timed out after 300s for "
+                    f"{target_path}",
+                    file=sys.stderr,
+                )
+                return 1
             if cp.returncode != 0:
                 print(f"error: checklist build failed: {cp.stderr.strip()}", file=sys.stderr)
                 return 1
@@ -1500,12 +1508,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not checklist_path.exists():
         # The builder's contract is two positionals: <target> <output_dir>
         # (it has no --out flag).
-        ck = subprocess.run(
-            [str(_RAPTOR_DIR / "libexec" / "raptor-build-checklist"),
-             str(target_path), str(out_dir)],
-            capture_output=True, text=True, timeout=300,
-            check=False,
-        )
+        # This fires after lifecycle start: an uncaught TimeoutExpired
+        # here left the run wedged in status=running (unresumable,
+        # invisible to `fail`) with a raw traceback on the console.
+        try:
+            ck = subprocess.run(
+                [str(_RAPTOR_DIR / "libexec" / "raptor-build-checklist"),
+                 str(target_path), str(out_dir)],
+                capture_output=True, text=True, timeout=300,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            print("checklist build timed out after 300s", file=sys.stderr)
+            _lifecycle_fail(out_dir, "checklist build timed out")
+            return 1
         if ck.returncode != 0:
             print(f"checklist build failed: {ck.stderr.strip()}",
                   file=sys.stderr)
