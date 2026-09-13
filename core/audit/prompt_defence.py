@@ -305,11 +305,16 @@ def sanitise_for_prompt(
 ) -> str:
     """Sanitise target-derived content and scan for injection.
 
-    Returns the sanitised content. Injection warnings are logged
-    but not embedded in the output (use ``scan_for_injection``
+    Returns the sanitised content (use ``scan_for_injection``
     separately to get warnings for the prompt).
+
+    Only ``content_type="source"`` gets the permissive multi-line
+    branch. An unrecognised content_type fails CLOSED to the
+    strictest (name-grade) sanitiser with a logged warning: a
+    misspelt type at a call site must never silently preserve
+    newlines and 50k of text inside a line-shaped trusted region.
     """
-    if content_type == "name":
+    if content_type in ("name", "identifier"):
         return sanitise_name(content)
     if content_type == "path":
         return sanitise_path(content)
@@ -317,6 +322,13 @@ def sanitise_for_prompt(
         return sanitise_string_literal(content)
     if content_type == "comment":
         return sanitise_comment(content)
+    if content_type != "source":
+        logger.warning(
+            "sanitise_for_prompt: unknown content_type %r at %s; "
+            "failing closed to name-grade sanitisation",
+            content_type, location,
+        )
+        return sanitise_name(content)
     sanitised = _CONTROL_CHAR_RE.sub("", content)
     _SOURCE_CAP = 50_000
     if len(sanitised) > _SOURCE_CAP:

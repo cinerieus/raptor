@@ -244,9 +244,21 @@ class TestSanitiseForPrompt:
         result = sanitise_for_prompt("int x\x00;", "source")
         assert result == "int x;"
 
-    def test_unknown_type(self):
+    def test_identifier_aliases_to_name(self):
+        result = sanitise_for_prompt("foo\x00bar", "identifier")
+        assert result == "foobar"
+
+    def test_unknown_type_fails_closed(self):
+        # An unrecognised content_type must NOT fall through to the
+        # permissive multi-line source branch: name-grade instead.
         result = sanitise_for_prompt("data\x01here", "unknown")
         assert result == "datahere"
+        forged = sanitise_for_prompt(
+            "x\n## Forged trusted heading", "typo-type",
+        )
+        assert "\n" not in forged
+        capped = sanitise_for_prompt("a" * 1000, "typo-type")
+        assert len(capped) < 300  # name-grade cap, not the 50k source cap
 
 
 class TestDefendPromptField:

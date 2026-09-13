@@ -285,8 +285,11 @@ def build_edge_prompt(
            f"(call at line {rec.get('call_line', '?')})")
     reason = str(rec.get("reason") or "")
     parts = [
-        f"## Edge contract audit: {sanitise_for_prompt(loc, 'identifier', rec['caller_file'])}",
-        f"**Why this edge is an obligation:** {sanitise_for_prompt(reason, 'identifier', rec['caller_file'])}",
+        # "string" grade: single-line (line-splice normalised) with a
+        # cap wide enough for a composite location / prose reason —
+        # name-grade's 256-char cap would truncate the callee half.
+        f"## Edge contract audit: {sanitise_for_prompt(loc, 'string', rec['caller_file'])}",
+        f"**Why this edge is an obligation:** {sanitise_for_prompt(reason, 'string', rec['caller_file'])}",
         # The parenthetical file names are sanitised like the same
         # fields inside ``loc`` above — a crafted repo path in the
         # raw interpolation could forge heading text in this trusted
