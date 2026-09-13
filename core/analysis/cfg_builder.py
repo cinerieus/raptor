@@ -231,6 +231,13 @@ def _statement_expr_roots(stmt: ast.stmt) -> list[ast.AST]:
         return [stmt.target, stmt.iter]
     if isinstance(stmt, ast.Try):
         return []  # try has no statement-level expressions
+    if hasattr(ast, "Match") and isinstance(stmt, ast.Match):
+        # Only the subject is statement-level; case bodies become
+        # their own nodes. Without this the subject node inherits the
+        # case bodies' calls — a sanitizer call inside a case would be
+        # attributed to the subject, so the vertex cut removes the
+        # subject and severs the no-match fall-through with it.
+        return [stmt.subject]
     if isinstance(stmt, ast.With):
         roots: list[ast.AST] = []
         for item in stmt.items:
@@ -500,6 +507,31 @@ def _short_label(stmt: ast.stmt) -> str:
     return f"{kind} (line {stmt.lineno})"
 
 
+def _pattern_irrefutable(pattern: ast.pattern) -> bool:
+    """True when ``pattern`` matches ANY subject value.
+
+    ``case _:`` and bare captures (``case x:``) are ``MatchAs`` with
+    ``pattern=None``; ``case <p> as x`` is irrefutable iff ``<p>`` is;
+    a ``MatchOr`` is irrefutable when any alternative is. Everything
+    else (literals, classes, sequences, mappings) can fail to match.
+    """
+    if isinstance(pattern, ast.MatchAs):
+        return pattern.pattern is None or _pattern_irrefutable(pattern.pattern)
+    if isinstance(pattern, ast.MatchOr):
+        return any(_pattern_irrefutable(p) for p in pattern.patterns)
+    return False
+
+
+def _match_has_irrefutable_case(stmt: ast.Match) -> bool:
+    """True when some case of ``stmt`` is guaranteed to execute — an
+    irrefutable pattern with no ``if`` guard. Only then does the match
+    have no fall-through path."""
+    return any(
+        case.guard is None and _pattern_irrefutable(case.pattern)
+        for case in stmt.cases
+    )
+
+
 class _PythonCFGBuilder:
     """Stateful AST walker that produces a control-flow graph.
 
@@ -679,6 +711,14 @@ class _PythonCFGBuilder:
         for case in stmt.cases:
             case_out = self._build_stmts(case.body, [subject])
             exits.extend(case_out)
+        # When no case is irrefutable, execution can match NOTHING and
+        # fall straight through to the post-match code — the subject
+        # itself is an exit, mirroring _build_if's no-else handling.
+        # Omitting this edge makes a sanitizer inside a case body look
+        # like it lies on every path to a post-match sink, which is
+        # the false-suppression direction for the vertex-cut consumer.
+        if not _match_has_irrefutable_case(stmt):
+            exits.append(subject)
         return exits
 
     def _build_try(

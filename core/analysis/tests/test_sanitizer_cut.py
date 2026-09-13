@@ -188,6 +188,47 @@ class TestStraightLineSanitize:
         assert result.suppress is False
 
 
+class TestMatch:
+    def test_sanitizer_only_in_match_case_does_not_suppress(self):
+        """A ``match`` with no irrefutable case has a no-match
+        fall-through: at runtime no case may match and the post-match
+        sink is reached without crossing the case-body sanitizer."""
+        src = (
+            "def handle(x):\n"
+            "    match x:\n"
+            "        case 'a':\n"
+            "            y = html.escape(x)\n"
+            "    render(x)\n"
+        )
+        cfg = _cfg(src)
+        sink = _node_with_call(cfg, "render")
+        result = evaluate_finding(
+            cfg, [cfg.entry_node], sink,
+            cwe="CWE-79", language="python",
+        )
+        assert result.suppress is False
+
+    def test_every_case_sanitizes_with_wildcard_suppresses(self):
+        """With ``case _:`` some case always runs — when every case
+        body sanitizes, the cut is genuinely complete."""
+        src = (
+            "def handle(x):\n"
+            "    match x:\n"
+            "        case 'a':\n"
+            "            y = html.escape(x)\n"
+            "        case _:\n"
+            "            y = html.escape(x)\n"
+            "    render(y)\n"
+        )
+        cfg = _cfg(src)
+        sink = _node_with_call(cfg, "render")
+        result = evaluate_finding(
+            cfg, [cfg.entry_node], sink,
+            cwe="CWE-79", language="python",
+        )
+        assert result.suppress is True
+
+
 class TestLoops:
     def test_sanitizer_only_in_loop_body_does_not_suppress(self):
         """A ``for`` with a sanitizer inside doesn't help — the loop

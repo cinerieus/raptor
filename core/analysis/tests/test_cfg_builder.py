@@ -360,6 +360,80 @@ def test_return_terminates_flow():
 
 
 # ---------------------------------------------------------------------------
+# match statements
+# ---------------------------------------------------------------------------
+
+
+def test_match_without_wildcard_has_fallthrough_edge():
+    """A ``match`` with only refutable cases can match NOTHING — the
+    subject must flow directly to the post-match statement, or a
+    sanitizer inside a case body looks like it dominates the sink."""
+    src = (
+        "def f(x):\n"
+        "    match x:\n"
+        "        case 'a':\n"
+        "            y = clean(x)\n"
+        "    sink(x)\n"
+    )
+    cfg = _cfg(src)
+    subject = next(n for n in cfg.nodes() if n.label.startswith("match"))
+    sink = next(n for n in cfg.nodes() if "sink" in n.calls)
+    assert sink in cfg.successors(subject)
+
+
+def test_match_with_wildcard_has_no_fallthrough_edge():
+    """``case _:`` always matches — the subject's only successors are
+    the case bodies, mirroring if/else."""
+    src = (
+        "def f(x):\n"
+        "    match x:\n"
+        "        case 'a':\n"
+        "            y = clean(x)\n"
+        "        case _:\n"
+        "            y = clean(x)\n"
+        "    sink(x)\n"
+    )
+    cfg = _cfg(src)
+    subject = next(n for n in cfg.nodes() if n.label.startswith("match"))
+    sink = next(n for n in cfg.nodes() if "sink" in n.calls)
+    assert sink not in cfg.successors(subject)
+    assert len(list(cfg.successors(subject))) == 2
+
+
+def test_match_guarded_wildcard_still_falls_through():
+    """``case _ if cond:`` can fail its guard — irrefutability requires
+    the pattern to be guard-free."""
+    src = (
+        "def f(x):\n"
+        "    match x:\n"
+        "        case _ if x > 0:\n"
+        "            y = clean(x)\n"
+        "    sink(x)\n"
+    )
+    cfg = _cfg(src)
+    subject = next(n for n in cfg.nodes() if n.label.startswith("match"))
+    sink = next(n for n in cfg.nodes() if "sink" in n.calls)
+    assert sink in cfg.successors(subject)
+
+
+def test_match_bare_capture_counts_as_irrefutable():
+    """``case other:`` (a bare capture) always matches, like ``case _``."""
+    src = (
+        "def f(x):\n"
+        "    match x:\n"
+        "        case 'a':\n"
+        "            y = clean(x)\n"
+        "        case other:\n"
+        "            y = clean(other)\n"
+        "    sink(x)\n"
+    )
+    cfg = _cfg(src)
+    subject = next(n for n in cfg.nodes() if n.label.startswith("match"))
+    sink = next(n for n in cfg.nodes() if "sink" in n.calls)
+    assert sink not in cfg.successors(subject)
+
+
+# ---------------------------------------------------------------------------
 # Path-based source
 # ---------------------------------------------------------------------------
 
