@@ -291,3 +291,39 @@ class TestNonDictSummaries:
         mod.prepare_D(str(tmp_path))  # must not AttributeError
         err = capsys.readouterr().err
         assert "must be a dict" in err
+
+
+class TestBinaryDiscoveryFailuresAreLoud:
+    """A find timeout/failure must not masquerade as "no binary
+    found" attrition — the old contextlib.suppress(Exception) wrapped
+    the whole discovery body and the operator never learned discovery
+    itself failed."""
+
+    def test_timeout_warns_and_returns_empty(self, tmp_path, capsys,
+                                             monkeypatch):
+        import subprocess
+        mod = _load_helper()
+
+        def fake_run(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="find", timeout=30)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = mod._discover_executables(str(tmp_path))
+        assert result == {}
+        err = capsys.readouterr().err
+        assert "binary discovery timed out" in err
+
+    def test_oserror_warns_and_returns_empty(self, tmp_path, capsys,
+                                             monkeypatch):
+        import subprocess
+        mod = _load_helper()
+
+        def fake_run(*a, **kw):
+            raise OSError("find: command not found")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        result = mod._discover_executables(str(tmp_path))
+        assert result == {}
+        err = capsys.readouterr().err
+        assert "binary discovery failed" in err
+        assert "OSError" in err

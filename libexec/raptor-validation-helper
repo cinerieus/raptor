@@ -1515,7 +1515,12 @@ def _discover_executables(target):
         except Exception:  # noqa: BLE001, S110 — observability must never break the fail-closed path
             pass
     result = {}
-    with contextlib.suppress(Exception):
+    # Best-effort, but never SILENT: a swallowed discovery failure
+    # (find timeout on a big tree, missing binary, permission error)
+    # returns {} and every memory-corruption finding gets stamped
+    # "stage_e: skipped, no binary found" — the operator reads
+    # routine attrition where discovery itself failed.
+    try:
         proc = _sp.run(
             ["find", target, "-executable", "-type", "f"],
             capture_output=True, text=True, timeout=30, check=False, env=_env
@@ -1581,6 +1586,22 @@ def _discover_executables(target):
                     file=sys.stderr,
                 )
             result[name] = paths[0]
+    except _sp.TimeoutExpired:
+        print(
+            "  WARN: binary discovery timed out (find exceeded 30s on "
+            f"{target}) — Stage E will report 'no binary found' for "
+            "every finding; pass --binary or narrow the target",
+            file=sys.stderr,
+        )
+        return {}
+    except Exception as e:  # noqa: BLE001 — discovery is best-effort; failures degrade, loudly
+        print(
+            "  WARN: binary discovery failed "
+            f"({e.__class__.__name__}: {e}) — Stage E will report "
+            "'no binary found' for every finding",
+            file=sys.stderr,
+        )
+        return {}
     return result
 
 
