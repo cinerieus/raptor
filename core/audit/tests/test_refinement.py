@@ -354,3 +354,63 @@ class TestCollectToolResults:
         index = {"c.c:h": FakeRec()}
         results = collect_tool_results(o, evidence_index=index)
         assert "cpp/injection" in results[0]["result"]
+
+
+class TestDescribeToolResultHonesty:
+    """Tool-result rows must reflect the outcome's actual evidence —
+    never a hardcoded negative that contradicts the confirming
+    receipt the verdict carries."""
+
+    class _EmptyRec:
+        semgrep_hits: ClassVar[list] = []
+        codeql_alerts: ClassVar[list] = []
+
+        def all_joern_flows(self):
+            return []
+
+    def test_smt_confirming_receipt_reported(self):
+        o = FakeOutcome(
+            file="a.c", function="f",
+            tools_dispatched={"smt"},
+            evidence_tool="smt:disproof:sat",
+        )
+        results = collect_tool_results(
+            o, evidence_index={"a.c:f": self._EmptyRec()},
+        )
+        assert "smt:disproof:sat" in results[0]["result"]
+        assert "no confirmation" not in results[0]["result"]
+
+    def test_coccinelle_confirming_receipt_reported(self):
+        o = FakeOutcome(
+            file="a.c", function="f",
+            tools_dispatched={"coccinelle"},
+            evidence_tool="coccinelle:double-free",
+        )
+        results = collect_tool_results(
+            o, evidence_index={"a.c:f": self._EmptyRec()},
+        )
+        assert "coccinelle:double-free" in results[0]["result"]
+        assert results[0]["result"] != "no matches"
+
+    def test_coccinelle_without_receipt_not_a_definite_negative(self):
+        o = FakeOutcome(
+            file="a.c", function="f",
+            tools_dispatched={"coccinelle"},
+        )
+        results = collect_tool_results(
+            o, evidence_index={"a.c:f": self._EmptyRec()},
+        )
+        # "no matches" claims the tool ran and found nothing; without
+        # a per-function record the honest statement is weaker.
+        assert results[0]["result"] != "no matches"
+
+    def test_errored_tool_stated(self):
+        o = FakeOutcome(
+            file="a.c", function="f",
+            tools_dispatched={"smt"},
+        )
+        o.tools_errored = {"smt"}
+        results = collect_tool_results(
+            o, evidence_index={"a.c:f": self._EmptyRec()},
+        )
+        assert "error" in results[0]["result"].lower()

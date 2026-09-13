@@ -319,7 +319,9 @@ def collect_tool_results(
     key = f"{getattr(outcome, 'file', '')}:{getattr(outcome, 'function', '')}"
 
     for tool in sorted(dispatched):
-        result_text = _describe_tool_result(tool, key, evidence_index)
+        result_text = _describe_tool_result(
+            tool, key, evidence_index, outcome=outcome,
+        )
         results.append({"tool": tool, "result": result_text})
 
     return results
@@ -329,8 +331,24 @@ def _describe_tool_result(
     tool: str,
     key: str,
     evidence_index: Any = None,
+    outcome: Any = None,
 ) -> str:
-    """Describe what a specific tool found for a function."""
+    """Describe what a specific tool found for a function.
+
+    The description must reflect the outcome's ACTUAL evidence: a
+    hardcoded negative ("no matches") that contradicts the confirming
+    receipt the verdict carries steers the refinement LLM to walk back
+    a tool-confirmed hypothesis.
+    """
+    # The confirming receipt on the outcome is authoritative — it is
+    # the only per-function record for channels the evidence index
+    # does not carry (coccinelle, smt).
+    receipt = str(getattr(outcome, "evidence_tool", "") or "")
+    if receipt == tool or receipt.startswith(f"{tool}:"):
+        return f"confirmed the hypothesis ({receipt})"
+    if tool in (getattr(outcome, "tools_errored", None) or set()):
+        return "errored or timed out — did not meaningfully run"
+
     if evidence_index is None:
         return "dispatched but no result captured"
 
@@ -345,8 +363,11 @@ def _describe_tool_result(
             return f"matched {len(hits)} rule(s): {', '.join(rules)}"
         return "no matches"
 
-    if tool == "coccinelle":
-        return "no matches"
+    if tool in ("coccinelle", "smt"):
+        # No per-function record in the evidence index for these
+        # channels — "ran and found nothing" cannot be claimed, only
+        # the absence of a confirming receipt.
+        return "dispatched; no confirming output recorded"
 
     if tool == "codeql":
         alerts = getattr(rec, "codeql_alerts", None)
@@ -354,9 +375,6 @@ def _describe_tool_result(
             rules = [a.get("rule_id", "?") for a in alerts[:3]]
             return f"found {len(alerts)} alert(s): {', '.join(rules)}"
         return "no alerts for this function"
-
-    if tool == "smt":
-        return "dispatched, no confirmation"
 
     if tool == "joern":
         flows = rec.all_joern_flows() if hasattr(rec, "all_joern_flows") else []
