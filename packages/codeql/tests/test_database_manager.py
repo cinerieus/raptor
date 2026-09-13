@@ -851,3 +851,58 @@ class TestValidateDatabaseSizeFloor:
         # signature and must keep failing validation.
         db = self._make_db(tmp_path, 512)
         assert db_manager.validate_database(db) is False
+
+
+class TestCacheTtlKnob:
+    """Every TTL consumer derives from CODEQL_DB_CACHE_DAYS — the read
+    path must honour the same knob the auto-cleanup enforces."""
+
+    def test_ttl_helper_reads_config(self, monkeypatch):
+        from core.config import RaptorConfig
+        from packages.codeql.database_manager import DatabaseManager
+
+        monkeypatch.setattr(RaptorConfig, "CODEQL_DB_CACHE_DAYS", 21,
+                            raising=False)
+        assert DatabaseManager._cache_ttl_days() == 21
+
+    def _mgr_with_cached_db(self, tmp_path, monkeypatch, age_days):
+        from datetime import datetime, timedelta, timezone
+
+        from packages.codeql import database_manager as dm
+
+        mgr = dm.DatabaseManager(db_root=tmp_path / "dbs")
+        repo = tmp_path / "repo"
+        repo.mkdir(exist_ok=True)
+        (repo / "a.c").write_text("int x;\n")
+        repo_hash = mgr.compute_repo_hash(repo)
+        db_dir = mgr.get_database_dir(repo_hash, "cpp")
+        db_dir.mkdir(parents=True, exist_ok=True)
+        created = (datetime.now(timezone.utc)
+                   - timedelta(days=age_days)).isoformat()
+        meta = dm.DatabaseMetadata(
+            repo_hash=repo_hash, repo_path=str(repo), language="cpp",
+            created_at=created, codeql_version="v", build_command="",
+            build_system="none", file_count=1, success=True,
+            duration_seconds=0.1, errors=[],
+            database_path=str(db_dir),
+        )
+        monkeypatch.setattr(mgr, "load_metadata", lambda *a, **k: meta)
+        monkeypatch.setattr(
+            mgr, "validate_database", lambda *a, **k: True)
+        return mgr, repo
+
+    def test_get_cached_database_honours_raised_knob(
+            self, tmp_path, monkeypatch):
+        """A DB older than the old hardcoded 7 days but inside the
+        operator's raised TTL is served; past a lowered TTL it is
+        not (both directions)."""
+        from core.config import RaptorConfig
+
+        mgr, repo = self._mgr_with_cached_db(
+            tmp_path, monkeypatch, age_days=10)
+        monkeypatch.setattr(RaptorConfig, "CODEQL_DB_CACHE_DAYS", 30,
+                            raising=False)
+        assert mgr.get_cached_database(repo, "cpp") is not None
+        monkeypatch.setattr(RaptorConfig, "CODEQL_DB_CACHE_DAYS", 3,
+                            raising=False)
+        assert mgr.get_cached_database(repo, "cpp") is None

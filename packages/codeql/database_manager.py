@@ -603,11 +603,17 @@ class DatabaseManager:
         except Exception as e:  # noqa: BLE001 — best-effort; never fail the run
             logger.error("Failed to save metadata: %s", e)
 
+    @staticmethod
+    def _cache_ttl_days() -> int:
+        """Operator TTL knob, one source of truth for every read /
+        evict / cleanup path (RaptorConfig.CODEQL_DB_CACHE_DAYS)."""
+        return getattr(RaptorConfig, "CODEQL_DB_CACHE_DAYS", 7)
+
     def get_cached_database(
         self,
         repo_path: Path,
         language: str,
-        max_age_days: int = 7
+        max_age_days: int | None = None
     ) -> Path | None:
         """
         Check if valid cached database exists.
@@ -616,10 +622,17 @@ class DatabaseManager:
             repo_path: Repository path
             language: Programming language
             max_age_days: Maximum age of cached database in days
+                (default: the operator TTL knob
+                RaptorConfig.CODEQL_DB_CACHE_DAYS — the read path must
+                honour the same TTL the auto-cleanup enforces, or a
+                raised knob still serves nothing past the old
+                hardcoded 7 days and a lowered one serves stale DBs)
 
         Returns:
             Path to cached database or None
         """
+        if max_age_days is None:
+            max_age_days = self._cache_ttl_days()
         repo_hash = self.compute_repo_hash(repo_path)
         db_path = self.get_database_dir(repo_hash, language)
         metadata = self.load_metadata(repo_hash, language)
@@ -1082,7 +1095,9 @@ class DatabaseManager:
 
         # Stale eviction independent of force — handles the case where
         # canonical exists but is older than the TTL.
-        self._evict_stale_canonical(repo_hash, language, max_age_days=7)
+        self._evict_stale_canonical(
+            repo_hash, language, max_age_days=self._cache_ttl_days(),
+        )
 
         # Buildless default for C/C++: never execute an untrusted
         # repo's build system unless the operator explicitly opted in.
@@ -1815,17 +1830,20 @@ class DatabaseManager:
         except Exception:  # noqa: BLE001 — best-effort; never fail the run
             return 0
 
-    def cleanup_old_databases(self, days: int = 7, dry_run: bool = False) -> list[str]:
+    def cleanup_old_databases(self, days: int | None = None, dry_run: bool = False) -> list[str]:
         """
         Clean up databases older than specified days.
 
         Args:
-            days: Age threshold in days
+            days: Age threshold in days (default: the operator TTL
+                knob RaptorConfig.CODEQL_DB_CACHE_DAYS)
             dry_run: If True, only report what would be deleted
 
         Returns:
             List of deleted database paths
         """
+        if days is None:
+            days = self._cache_ttl_days()
         # Debug, not info: the auto-cleanup path runs this on every
         # process start and it's usually a no-op — the per-deletion
         # lines below surface actual reclaims at INFO.
