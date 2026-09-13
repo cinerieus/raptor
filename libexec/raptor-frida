@@ -114,6 +114,7 @@ abs_target() {
 TARGET=""
 OUT=""
 PASS_ARGS=()
+TAIL_ARGS=()
 PROJECT_FLAG=""
 i=0
 ARGS=("$@")
@@ -124,7 +125,11 @@ while [ $i -lt ${#ARGS[@]} ]; do
             # Everything after -- is positional: stop extracting
             # wrapper flags (a --target/--out/--project after -- must
             # pass through verbatim, matching the short-circuit loop).
-            PASS_ARGS+=("${ARGS[@]:$i}")
+            # Kept in a separate tail so wrapper-appended flags
+            # (--out below) land BEFORE the separator — appended
+            # after it they would parse as positionals and make the
+            # documented -- form unusable.
+            TAIL_ARGS=("${ARGS[@]:$i}")
             break
             ;;
         --target)
@@ -236,6 +241,8 @@ else
 fi
 
 PASS_ARGS+=("--out" "$OUT")
+# Re-attach the verbatim post--- tail AFTER every wrapper-owned flag.
+PASS_ARGS+=(${TAIL_ARGS[@]+"${TAIL_ARGS[@]}"})
 
 # ─── signal trap: forward to the child, decide disposition later ───
 # The trap must NOT write the lifecycle disposition: the child's exit

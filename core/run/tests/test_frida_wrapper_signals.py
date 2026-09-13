@@ -198,6 +198,35 @@ class TestDashDashPassthrough:
             "lifecycle bypassed: --out after -- was consumed"
         )
 
+    def test_wrapper_out_lands_before_separator(self, tmp_path):
+        """The wrapper's own --out must be inserted BEFORE the
+        operator's `--` tail: appended after it, the CLI reads
+        `--out DIR` as positional payload and the documented
+        separator form is unusable."""
+        root = _make_fake_tree(tmp_path, "raptor-frida")
+        argv_log = tmp_path / "argv.log"
+        env = _stub_python(tmp_path, (
+            f'printf \'%s\\n\' "$@" > "{argv_log}"\n'
+            "exit 0\n"
+        ))
+        res = subprocess.run(
+            ["bash", str(root / "libexec" / "raptor-frida"),
+             "--target", "someprocess", "--template", "syscalls",
+             "--", "positional-payload"],
+            env=env, cwd=str(tmp_path), capture_output=True,
+            text=True, check=False, timeout=60,
+        )
+        assert res.returncode == 0, res.stderr
+        argv = argv_log.read_text().splitlines()
+        # The stub captures the sandbox wrapper's argv; the inner CLI
+        # argv follows "packages.frida.cli". Inside it, the wrapper's
+        # --out must precede the operator's -- separator.
+        cli = argv[argv.index("packages.frida.cli") + 1:]
+        sep = cli.index("--")
+        assert "--out" in cli[:sep], cli
+        assert cli[sep + 1:] == ["positional-payload"], cli
+
+
 
 class TestPatchVerifyDisposition:
     def test_sigterm_with_verdict_exit_completes(self, tmp_path):
