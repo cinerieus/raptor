@@ -3032,9 +3032,14 @@ def _do_merge(project, merge_type, yes) -> None:
             for msg in failed_deletes:
                 print(f"  {cmd_type}: warning — failed to delete {msg}")
 
+        # Documented convention (merge.py `_finding_key`): "N findings
+        # (M vulns)". Pre-fix the override relabelled the LOGICAL-vuln
+        # count as "findings" whenever the counts differed — exactly
+        # the case where the distinction matters.
         vuln_count = stats.get("unique_vulns", stats["unique_findings"])
+        findings_label = f"{stats['unique_findings']} findings"
         if vuln_count != stats["unique_findings"]:
-            findings_label = f"{vuln_count} findings"
-        else:
-            findings_label = f"{stats['unique_findings']} findings"
+            findings_label = (
+                f"{stats['unique_findings']} findings ({vuln_count} vulns)"
+            )
         print(f"  {cmd_type}: merged {stats['runs_merged']} runs ({findings_label})")

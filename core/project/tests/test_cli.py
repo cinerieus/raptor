@@ -209,6 +209,49 @@ class TestProjectFindingsScaE2E(unittest.TestCase):
             self.assertIn("Slopsquat", out)
 
 
+class TestDoMergeLabel(unittest.TestCase):
+    """The merge summary line follows merge.py's documented
+    "N findings (M vulns)" convention — the physical-finding count is
+    always the one labelled "findings"."""
+
+    def _run(self, tmp: Path, name: str, findings) -> Path:
+        d = tmp / name
+        d.mkdir(parents=True)
+        (d / ".raptor-run.json").write_text(json.dumps({
+            "version": 2, "command": "scan", "status": "completed",
+            "project": None, "project_source": "none",
+        }), encoding="utf-8")
+        (d / "findings.json").write_text(
+            json.dumps({"findings": findings}), encoding="utf-8")
+        return d
+
+    def test_vuln_count_never_labelled_findings(self):
+        from core.project.project import Project
+        with TemporaryDirectory() as td:
+            tmp = Path(td)
+            out = tmp / "proj-out"
+            out.mkdir()
+            # Same logical vuln (file, function, type) at two lines:
+            # 2 physical findings, 1 vuln.
+            self._run(out, "scan-1", [{
+                "file": "a.py", "function": "f",
+                "vuln_type": "sql_injection", "line": 5,
+            }])
+            self._run(out, "scan-2", [{
+                "file": "a.py", "function": "f",
+                "vuln_type": "sql_injection", "line": 9,
+            }])
+            project = Project(name="mergeme", target=str(tmp / "code"),
+                              output_dir=str(out))
+            from core.project.cli import _do_merge as do_merge
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                do_merge(project, "scan", yes=True)
+            output = buf.getvalue()
+            self.assertIn("2 findings (1 vulns)", output)
+            self.assertNotIn("(1 findings)", output)
+
+
 class TestCLI(unittest.TestCase):
 
     def test_help(self):
