@@ -95,6 +95,24 @@ class TestBuildTaintPairs:
         del ctx["entry_points"][0]["name"]
         assert build_taint_pairs(ctx, _checklist()) == []
 
+    def test_string_rows_are_skipped_not_fatal(self):
+        """Shape-drifted string elements in entry_points/sink_details
+        (an observed LLM output shape) must not abort pairing — the
+        well-formed rows still pair."""
+        ctx = _context_map()
+        ctx["entry_points"].insert(0, "main @ entry.c:70")
+        ctx["sink_details"].insert(0, "memcpy at entry.c:25")
+        ctx["sinks"].insert(0, "entry.c:25")
+        ctx["sources"].insert(0, "fread @ entry.c:70")
+        pairs = build_taint_pairs(ctx, _checklist())
+        assert [(ep.get("id"), s.get("id")) for ep, s, _m, _c in pairs] \
+            == [("EP-001", "SINK-001"), ("EP-001", "SINK-002")]
+
+    def test_scalar_sections_yield_no_pairs(self):
+        ctx = _context_map()
+        ctx["entry_points"] = "main"
+        assert build_taint_pairs(ctx, _checklist()) == []
+
     def test_skips_sinks_without_resolvable_call(self):
         ctx = _context_map()
         ctx["sink_details"] = [

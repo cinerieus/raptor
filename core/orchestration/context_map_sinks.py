@@ -46,6 +46,7 @@ from core.inventory.sink_discovery import (
     discover_sinks_for_target,
 )
 from core.json import load_json
+from core.orchestration.llm_json import dict_rows
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -166,7 +167,9 @@ def _merge_discovered_sinks(
     Only adds sinks not already present (by file+line match).
     """
     sink_details = context_map.get("sink_details")
-    if sink_details is None:
+    if not isinstance(sink_details, list):
+        # None, or an LLM-shape-drifted scalar/string: the merge below
+        # appends, so normalise to a list rather than crash the stage.
         sink_details = []
         context_map["sink_details"] = sink_details
 
@@ -209,7 +212,11 @@ def _annotate_entry_points(
     result: SinkDiscoveryResult,
 ) -> int:
     """Add reachable_sinks to entry points that can reach dangerous sinks."""
-    entry_points = context_map.get("entry_points", [])
+    # dict_rows: LLM output routinely renders entry_points as a list
+    # of strings (or a scalar) — a bare .get() iteration crashed on
+    # the first ep.get(), silently dropping the whole stage under the
+    # shim's except-Exception wrapper.
+    entry_points = dict_rows(context_map, "entry_points")
     if not entry_points:
         return 0
 
@@ -308,7 +315,7 @@ def _populate_sinks_array(
     Deduplicates by (file, function, target).
     """
     sinks = context_map.get("sinks")
-    if sinks is None:
+    if not isinstance(sinks, list):
         sinks = []
         context_map["sinks"] = sinks
 
@@ -357,7 +364,9 @@ def _sink_detail_index(
 ) -> tuple:
     """(sink_details list, {(file, name)} and {(file, line)} dedup sets)."""
     sink_details = context_map.get("sink_details")
-    if sink_details is None:
+    if not isinstance(sink_details, list):
+        # None, or an LLM-shape-drifted scalar/string: the merge below
+        # appends, so normalise to a list rather than crash the stage.
         sink_details = []
         context_map["sink_details"] = sink_details
     by_name: set[tuple] = set()
@@ -380,6 +389,9 @@ def _append_flat_sink(
 ) -> None:
     """Append to the flat ``sinks`` array with dedup."""
     sinks = context_map.setdefault("sinks", [])
+    if not isinstance(sinks, list):
+        sinks = []
+        context_map["sinks"] = sinks
     for s in sinks:
         if isinstance(s, dict) and (
             s.get("file", ""), s.get("function", ""), s.get("target", ""),

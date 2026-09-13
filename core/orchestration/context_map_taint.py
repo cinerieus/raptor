@@ -26,6 +26,8 @@ import logging
 import re
 from typing import Any
 
+from core.orchestration.llm_json import dict_rows
+
 logger = logging.getLogger(__name__)
 
 MAX_PAIRS = 500
@@ -80,11 +82,11 @@ def build_taint_pairs(
     """
     calls = _call_index(checklist)
     pairs = []
-    for ep in context_map.get("entry_points") or []:
+    for ep in dict_rows(context_map, "entry_points"):
         source_method = ep.get("name")
         if not source_method or not ep.get("id"):
             continue
-        for sink in context_map.get("sink_details") or []:
+        for sink in dict_rows(context_map, "sink_details"):
             if not sink.get("id"):
                 continue
             sink_call = _sink_call_name(sink, calls)
@@ -100,14 +102,14 @@ def build_taint_pairs(
 
 
 def _clear_prior_annotations(context_map: dict[str, Any]) -> None:
-    for ep in context_map.get("entry_points") or []:
+    for ep in dict_rows(context_map, "entry_points"):
         for key in _EP_KEYS:
             ep.pop(key, None)
-    for sink in list(context_map.get("sink_details") or []) + list(
-            context_map.get("sinks") or []):
+    for sink in (dict_rows(context_map, "sink_details")
+                 + dict_rows(context_map, "sinks")):
         for key in _SINK_KEYS:
             sink.pop(key, None)
-    for src in context_map.get("sources") or []:
+    for src in dict_rows(context_map, "sources"):
         src.pop("has_taint_flow", None)
     context_map.pop("taint_summary", None)
 
@@ -118,7 +120,7 @@ def _mirror_to_sources(context_map: dict[str, Any], ep: dict[str, Any]) -> None:
     The understand bridge reads ``has_taint_flow`` from the top-level
     ``sources`` array (the attack-surface schema), not entry_points.
     """
-    for src in context_map.get("sources") or []:
+    for src in dict_rows(context_map, "sources"):
         m = _SOURCE_LOC_RE.search(src.get("entry") or "")
         if not m:
             continue
@@ -129,7 +131,7 @@ def _mirror_to_sources(context_map: dict[str, Any], ep: dict[str, Any]) -> None:
 def _mirror_to_sinks(context_map: dict[str, Any], sink: dict[str, Any]) -> None:
     """Copy taint_reached_from to the matching top-level sinks entry."""
     location = f"{sink.get('file')}:{sink.get('line')}"
-    for s in context_map.get("sinks") or []:
+    for s in dict_rows(context_map, "sinks"):
         if s.get("location") == location:
             s["taint_reached_from"] = list(sink.get("taint_reached_from") or [])
 
@@ -202,11 +204,11 @@ def enrich_with_taint_flows(
         _mirror_to_sinks(context_map, sink)
 
     eps_confirmed = [
-        ep["id"] for ep in context_map.get("entry_points") or []
+        ep["id"] for ep in dict_rows(context_map, "entry_points")
         if ep.get("has_taint_flow")
     ]
     sinks_confirmed = [
-        s["id"] for s in context_map.get("sink_details") or []
+        s["id"] for s in dict_rows(context_map, "sink_details")
         if s.get("taint_reached_from")
     ]
     context_map["taint_summary"] = {

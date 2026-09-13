@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from core.json import load_json, save_json
+from core.orchestration.llm_json import list_at
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def enrich_attack_paths(
     for path_entry in data:
         if not isinstance(path_entry, dict):
             continue
-        for step in path_entry.get("steps", []):
+        for step in list_at(path_entry, "steps"):
             if not isinstance(step, dict):
                 continue
             func = step.get("function", "")
@@ -224,7 +225,9 @@ def normalize_audit_findings(findings: list[dict[str, Any]]) -> list[dict[str, A
             out.setdefault("origin", "audit_import")
 
         evidence_tool = out.get("evidence_tool", "")
-        tool_prefix = evidence_tool.split(":")[0] if evidence_tool else ""
+        tool_prefix = (evidence_tool.split(":")[0]
+                       if isinstance(evidence_tool, str) and evidence_tool
+                       else "")
         confidence = EVIDENCE_TOOL_CONFIDENCE.get(tool_prefix, "low")
         out.setdefault("confidence", confidence)
 
@@ -512,7 +515,7 @@ def enrich_with_summaries(
     for path_entry in data:
         if not isinstance(path_entry, dict):
             continue
-        for step in path_entry.get("steps", []):
+        for step in list_at(path_entry, "steps"):
             if not isinstance(step, dict):
                 continue
             func = step.get("function", "")

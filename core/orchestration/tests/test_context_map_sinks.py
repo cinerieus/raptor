@@ -77,6 +77,14 @@ class TestMergeDiscoveredSinks:
         added = _merge_discovered_sinks(context_map, result)
         assert added == 1  # Only io.popen added, os.execute deduplicated
 
+    def test_scalar_sink_details_section_is_replaced(self):
+        # A shape-drifted (non-list) sink_details must not crash the
+        # append-style merge; it is normalised to a fresh list.
+        context_map = {"sink_details": "memcpy everywhere"}
+        added = _merge_discovered_sinks(context_map, _sample_result())
+        assert added == 2
+        assert isinstance(context_map["sink_details"], list)
+
     def test_creates_sink_details_if_missing(self):
         context_map = {}
         result = _sample_result()
@@ -119,6 +127,26 @@ class TestAnnotateEntryPoints:
 
         ep2 = context_map["entry_points"][2]
         assert "reachable_sinks" not in ep2
+
+    def test_string_entry_points_do_not_kill_the_stage(self):
+        """LLM output routinely renders entry_points as strings; one
+        malformed element must not abort the whole annotation pass."""
+        result = _sample_result()
+        context_map = {
+            "entry_points": [
+                "handler.lua: run_cmd",  # shape-drifted row
+                {"file": "src/handler.lua", "name": "run_cmd"},
+            ],
+        }
+        enriched = _annotate_entry_points(context_map, result)
+        assert enriched == 1
+        assert context_map["entry_points"][1]["reachable_sinks"] == [
+            "os.execute"]
+
+    def test_scalar_entry_points_section_is_skipped(self):
+        result = _sample_result()
+        context_map = {"entry_points": "run_cmd"}
+        assert _annotate_entry_points(context_map, result) == 0
 
     def test_no_entry_points(self):
         context_map = {}
