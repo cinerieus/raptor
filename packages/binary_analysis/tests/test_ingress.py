@@ -175,3 +175,56 @@ def test_libfuzzer_entry_is_the_only_direct_campaign_boundary(tmp_path: Path) ->
     assert suitability["strategy"] == "direct_harness"
     assert suitability["direct_campaign_recommended"] is True
     assert suitability["should_run_fuzz_plan"] is True
+
+
+def test_export_base_name_fallback_binds_and_keeps_first_match(tmp_path: Path) -> None:
+    """Exports not found by exact name bind through the base-name
+    index (sym.DecodePacket ~ DecodePacket). With several dotted names
+    sharing a base, the FIRST function in inventory order wins —
+    pinned so the index rewrite of the old linear scan can never
+    silently change which function an export binds to."""
+    binary = _write_binary(tmp_path / "codec.dll", _pe_fixture())
+    manifest = _manifest(binary, target_kind="pe-dll", exports=["DecodePacket"])
+    context = {
+        "interesting_functions": [
+            {
+                "id": "BFN-401000",
+                "name": "sym.DecodePacket",
+                "address": "0x401000",
+            },
+            {
+                "id": "BFN-402000",
+                "name": "dbg.DecodePacket",
+                "address": "0x402000",
+            },
+        ],
+        "surface_details": [],
+        "sources": [],
+    }
+
+    ingress, _ = recover_external_ingress(manifest, context)
+
+    exported = next(item for item in ingress if item["kind"] == "exported_api")
+    assert exported["bound_function_id"] == "BFN-401000"
+    assert exported["bound_function_name"] == "sym.DecodePacket"
+
+
+def test_unbound_export_still_surfaces(tmp_path: Path) -> None:
+    """An export with no matching function (exact or base) still
+    yields an ingress candidate with empty binding fields."""
+    binary = _write_binary(tmp_path / "codec.dll", _pe_fixture())
+    manifest = _manifest(binary, target_kind="pe-dll", exports=["NoSuchFn"])
+    context = {
+        "interesting_functions": [{
+            "id": "BFN-401000",
+            "name": "Other",
+            "address": "0x401000",
+        }],
+        "surface_details": [],
+        "sources": [],
+    }
+
+    ingress, _ = recover_external_ingress(manifest, context)
+
+    exported = next(item for item in ingress if item["kind"] == "exported_api")
+    assert exported["bound_function_id"] == ""

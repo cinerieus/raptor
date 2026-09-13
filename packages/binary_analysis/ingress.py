@@ -141,18 +141,21 @@ def recover_external_ingress(
         if isinstance(item, dict) and item.get("name")
     }
 
+    # Base-name fallback index, built once. Pre-fix every export not
+    # found by exact name linearly rescanned all interesting functions
+    # (2000+ PE-DLL exports x 10k functions = ~20M splits/compares —
+    # a multi-minute pure-CPU stall in recover_external_ingress).
+    # setdefault keeps the FIRST function per base name, matching the
+    # old scan's first-in-iteration-order semantics exactly.
+    functions_by_base: dict[str, dict[str, Any]] = {}
+    for function_name, item in functions.items():
+        functions_by_base.setdefault(function_name.split(".")[-1], item)
+
     def bind_function(name: str) -> tuple[str, str, str]:
         exact = functions.get(name)
         if exact is None:
             base = name.rsplit(".", maxsplit=1)[-1]
-            exact = next(
-                (
-                    item
-                    for function_name, item in functions.items()
-                    if function_name.split(".")[-1] == base
-                ),
-                None,
-            )
+            exact = functions_by_base.get(base)
         if exact is None:
             return "", "", ""
         return (
