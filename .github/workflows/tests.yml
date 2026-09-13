@@ -687,6 +687,35 @@ jobs:
         env:
           SANDBOX_FILES: ${{ needs.changes.outputs.sandbox_files }}
 
+      # Darwin-emulation gate: the same sandbox files again with
+      # RAPTOR_TEST_EMULATE_PLATFORM=darwin (root conftest):
+      # sys.platform is patched to "darwin" PRE-collection, pytest's
+      # basetemp is relocated under a darwin-shaped
+      # /private/var/folders path, and every *_native-marked test is
+      # deselected (emulation never stacks on real kernel behaviour).
+      # Linux-authored assertions against platform-resolved values or
+      # the Linux tmp layout fail HERE, in the cheap Linux lane,
+      # instead of on the macOS runner — which keeps catching what
+      # only a real Darwin kernel can: the darwin_native tests
+      # themselves. Budget: ~45s serial measured all-green over the
+      # full sandbox file list (including the gate's own nested-pytest
+      # contract tests), so it rides in this job like the
+      # slow/integration step below.
+      - name: Run sandbox tests (emulated darwin platform)
+        env:
+          SANDBOX_FILES: ${{ needs.changes.outputs.sandbox_files }}
+          RAPTOR_TEST_EMULATE_PLATFORM: darwin
+        run: |
+          source $VENV_PATH/bin/activate
+          set -f
+          rc=0
+          python -m pytest $SANDBOX_FILES || rc=$?
+          # Exit 5 = "no tests collected" — legitimate when path
+          # filtering narrows SANDBOX_FILES to files that are entirely
+          # *_native-marked (all deselected under emulation).
+          if [ "$rc" -eq 5 ]; then exit 0; fi
+          exit "$rc"
+
       # Second invocation: the sandbox/exploit-feasibility slow +
       # integration tier. The root pytest.ini addopts deselect these
       # markers, so before this step the tier's only CI execution was
