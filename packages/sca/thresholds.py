@@ -16,14 +16,9 @@ import sys
 from dataclasses import dataclass
 from typing import TextIO, TYPE_CHECKING
 
-from .kinds import (
-    HYGIENE_PREFIX,
-    LICENSE_PREFIX,
-    SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT,
-    SUPPLY_CHAIN_PREFIX,
-    VULNERABLE_DEPENDENCY,
-)
 from .findings import severity_rank
+from .kinds import SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT
+from .rows import FindingRow
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -82,33 +77,30 @@ def evaluate(
 
     fails: list[str] = []
     for row in rows:
-        if not isinstance(row, dict):
+        fr = FindingRow.from_row(row)
+        if fr is None:
             # Hand-edited or third-party-tool findings.json may contain
             # non-dict elements; skip rather than crash.
             continue
-        if row.get("suppressed") and not cfg.include_suppressed:
+        if fr.suppressed and not cfg.include_suppressed:
             continue
-        vuln_type = row.get("vuln_type", "")
-        sev = row.get("severity", "info")
+        sev = fr.severity
         rank = severity_rank(sev)
-        desc = row.get("description") or row.get("id") or "(no description)"
-        if vuln_type == VULNERABLE_DEPENDENCY:
+        desc = fr.description or fr.id or "(no description)"
+        if fr.is_vulnerable_dependency:
             if sev_floor is not None and rank >= sev_floor:
                 fails.append(f"[{sev}] {desc}")
                 continue
-            sca = row.get("sca", {})
-            if not isinstance(sca, dict):
-                sca = {}
-            if cfg.fail_on_kev and sca.get("in_kev"):
+            if cfg.fail_on_kev and fr.sca.get("in_kev"):
                 fails.append(f"[KEV] {desc}")
-        elif vuln_type.startswith(SUPPLY_CHAIN_PREFIX):
+        elif fr.is_supply_chain:
             if sc_floor is not None and rank >= sc_floor:
                 fails.append(f"[supply-chain {sev}] {desc}")
             # Drift-specific gates layer on top of (and may fire
             # independently of) the supply-chain severity floor —
             # operators may want to gate on drift without gating on
             # other supply-chain signals.
-            if vuln_type == SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT:
+            if fr.vuln_type == SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT:
                 if cfg.fail_on_capability_drift:
                     fails.append(f"[capability-drift] {desc}")
                 if cfg.max_added_capability_buckets is not None:
@@ -123,11 +115,9 @@ def evaluate(
                     # ``added_buckets``. Treat anything we can't
                     # count as zero added buckets rather than crash
                     # the build gate.
-                    sca_block = row.get("sca")
-                    ev = (sca_block.get("evidence")
-                          if isinstance(sca_block, dict) else None)
+                    ev = fr.sca.get("evidence")
                     if not isinstance(ev, dict):
-                        ev = row.get("evidence")
+                        ev = fr.raw.get("evidence")
                     if not isinstance(ev, dict):
                         ev = {}
                     raw_added = ev.get("added_buckets")
@@ -138,10 +128,10 @@ def evaluate(
                             f"max {cfg.max_added_capability_buckets}] "
                             f"{desc}"
                         )
-        elif vuln_type.startswith(HYGIENE_PREFIX):
+        elif fr.is_hygiene:
             if hyg_floor is not None and rank >= hyg_floor:
                 fails.append(f"[hygiene {sev}] {desc}")
-        elif vuln_type.startswith(LICENSE_PREFIX):
+        elif fr.is_license:
             # License findings had no gate branch at all — a policy
             # violation could never fail a build regardless of the
             # configured floors. Same floor-per-class shape as the

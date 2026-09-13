@@ -40,8 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from .kinds import VULNERABLE_DEPENDENCY
 from .parsers._npm_alias import split_npm_alias
+from .rows import FindingRow
 from .versions import VersionError
 from .versions import compare as version_compare
 
@@ -687,13 +687,14 @@ def _plan_targets(
     so they can land independently if the chosen target differs.
     """
     plans: dict[tuple[str, str, str], _PlanEntry] = {}
-    for row in rows:
-        if row.get("vuln_type") != VULNERABLE_DEPENDENCY:
+    for raw in rows:
+        row = FindingRow.from_row(raw)
+        if row is None or not row.is_vulnerable_dependency:
             continue
-        sca = row.get("sca") or {}
-        adv = sca.get("advisory") or {}
-        adv_id = adv.get("id") if isinstance(adv, dict) else None
-        aliases = adv.get("aliases") if isinstance(adv, dict) else []
+        sca = row.sca
+        adv = row.advisory
+        adv_id = adv.get("id")
+        aliases = adv.get("aliases")
         ids_for_filter = {adv_id, *(a for a in (aliases or [])
                                      if isinstance(a, str))} - {None}
         if advisory_filter is not None and not (
@@ -704,7 +705,7 @@ def _plan_targets(
         name = sca.get("name")
         installed = sca.get("version")
         fix = sca.get("fixed_version")
-        manifest = row.get("file")
+        manifest = row.file
         if not (ecosystem and name and installed and fix and manifest):
             continue
         if not allow_major and _crosses_major(ecosystem, installed, fix):
@@ -870,11 +871,13 @@ def _materialise_changes(
 
 def _pin_styles_by_finding(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], str]:
     out: dict[tuple[str, str, str], str] = {}
-    for row in rows:
-        if row.get("vuln_type") != VULNERABLE_DEPENDENCY:
+    for raw in rows:
+        row = FindingRow.from_row(raw)
+        if row is None or not row.is_vulnerable_dependency:
             continue
-        sca = row.get("sca") or {}
-        key = (sca.get("ecosystem"), sca.get("name"), str(Path(row.get("file"))) if row.get("file") else None)
+        sca = row.sca
+        key = (sca.get("ecosystem"), sca.get("name"),
+               str(Path(row.file)) if row.file else None)
         if all(key) and "pin_style" in sca:
             out[key] = sca["pin_style"]      # type: ignore[index]
     return out

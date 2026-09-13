@@ -30,9 +30,11 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+
+from core.cve import EpssClient, KevClient
 
 from packages.sca.diff import (
     compute_delta,
@@ -197,9 +199,9 @@ def _build_rows(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
             OsvResult(dep_key=dep_requests.key(),
                       advisories=[adv_requests]),
         ],
-        kev=_FixedKev({"CVE-2021-23337"}),
-        epss=_FixedEpss({"CVE-2021-23337": 0.97,
-                         "CVE-2018-18074": 0.12}),
+        kev=cast("KevClient", _FixedKev({"CVE-2021-23337"})),
+        epss=cast("EpssClient", _FixedEpss({"CVE-2021-23337": 0.97,
+                                            "CVE-2018-18074": 0.12})),
         reachability=reachability,
     )
     assert len(vulns) == 2

@@ -35,13 +35,8 @@ from typing import Any, TYPE_CHECKING
 from core.json import dumps_artifact, load_json
 from core.security.log_sanitisation import escape_nonprintable
 
-from .kinds import (
-    HYGIENE_PREFIX,
-    LICENSE_PREFIX,
-    SUPPLY_CHAIN_PREFIX,
-    VULNERABLE_DEPENDENCY,
-)
 from .findings import severity_rank
+from .rows import FindingRow
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -183,6 +178,8 @@ def compute_delta(
     a_full = _index_by_canonical_key(list(rows_a))
     b_full = _index_by_canonical_key(list(rows_b))
 
+    # Buckets carry the ORIGINAL row dicts (``FindingRow.raw``) — the
+    # JSON delta output re-emits them verbatim, so unknown keys survive.
     new: list[dict[str, Any]] = []
     resolved: list[dict[str, Any]] = []
     suppression_added: list[dict[str, Any]] = []
@@ -192,23 +189,23 @@ def compute_delta(
     for key, row in b_full.items():
         if key in a_full:
             continue
-        if row.get("suppressed") and not include_suppressed:
+        if row.suppressed and not include_suppressed:
             continue
-        new.append(row)
+        new.append(row.raw)
 
     for key, row in a_full.items():
         if key in b_full:
             continue
-        if row.get("suppressed") and not include_suppressed:
+        if row.suppressed and not include_suppressed:
             continue
-        resolved.append(row)
+        resolved.append(row.raw)
 
     for key in a_full.keys() & b_full.keys():
-        a_sup = bool(a_full[key].get("suppressed"))
-        b_sup = bool(b_full[key].get("suppressed"))
+        a_sup = a_full[key].suppressed
+        b_sup = b_full[key].suppressed
         if a_sup != b_sup:
             target = suppression_added if b_sup else suppression_lifted
-            target.append(b_full[key])
+            target.append(b_full[key].raw)
             continue
         # Same suppression state on both sides → persistent. Skip
         # suppressed rows from the bucket unless ``include_suppressed``
@@ -217,7 +214,7 @@ def compute_delta(
         # the operator's accepted-risk pile and clutters the count.
         if a_sup and not include_suppressed:
             continue
-        persistent.append(b_full[key])
+        persistent.append(b_full[key].raw)
 
     return DeltaResult(
         new=_sorted(new),
@@ -290,7 +287,7 @@ def _load_rows(path_str: str) -> list[dict[str, Any]] | None:
     return data
 
 
-def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
+def _canonical_key(row: FindingRow) -> tuple[str, ...] | None:
     """Identity for cross-run comparison.
 
     Vulnerable_dependency: ``(eco, name, primary_cve_or_osvid)`` — the
@@ -303,12 +300,10 @@ def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
     these are project-level concerns about a dep, not about its
     version.
     """
-    vuln_type = row.get("vuln_type", "")
-    sca = row.get("sca") or {}
-    eco = sca.get("ecosystem") or ""
-    name = sca.get("name") or ""
-    if vuln_type == VULNERABLE_DEPENDENCY:
-        adv = sca.get("advisory") or {}
+    eco = row.sca.get("ecosystem") or ""
+    name = row.sca.get("name") or ""
+    if row.is_vulnerable_dependency:
+        adv = row.advisory
         cve = next(
             (a for a in (adv.get("aliases") or [])
              if isinstance(a, str) and a.upper().startswith("CVE-")),
@@ -318,11 +313,11 @@ def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
         if not adv_key:
             return None
         return ("vuln", eco, name, adv_key)
-    if vuln_type.startswith(HYGIENE_PREFIX):
-        return ("hygiene", vuln_type, eco, name)
-    if vuln_type.startswith(SUPPLY_CHAIN_PREFIX):
-        return ("supply", vuln_type, eco, name)
-    if vuln_type.startswith(LICENSE_PREFIX):
+    if row.is_hygiene:
+        return ("hygiene", row.vuln_type, eco, name)
+    if row.is_supply_chain:
+        return ("supply", row.vuln_type, eco, name)
+    if row.is_license:
         # Pre-fix license rows had no canonical key, so they were
         # invisibly dropped from every diff bucket — new license
         # violations in a PR never surfaced; persistent license
@@ -331,27 +326,28 @@ def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
         # since license policy is a project-level concern about a
         # dep, not version-specific (an SPDX change between
         # versions is a separate finding anyway).
-        return ("license", vuln_type, eco, name)
+        return ("license", row.vuln_type, eco, name)
     return None
 
 
 def _index_by_canonical_key(
     rows: Iterable[dict[str, Any]],
-) -> dict[tuple[str, ...], dict[str, Any]]:
+) -> dict[tuple[str, ...], FindingRow]:
     """Return ``{canonical_key: row}`` for every row that has a key.
 
     Suppression state is *part of the row*, not a filter — callers
     decide whether to skip suppressed rows when consuming the index.
     """
-    out: dict[tuple[str, ...], dict[str, Any]] = {}
-    for row in rows:
-        if not isinstance(row, dict):
+    out: dict[tuple[str, ...], FindingRow] = {}
+    for raw in rows:
+        row = FindingRow.from_row(raw)
+        if row is None:
             continue
         key = _canonical_key(row)
         if key is None:
             continue
         existing = out.get(key)
-        if existing is None or (existing.get("suppressed") and not row.get("suppressed")):
+        if existing is None or (existing.suppressed and not row.suppressed):
             out[key] = row
     return out
 

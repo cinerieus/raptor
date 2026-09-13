@@ -1066,11 +1066,13 @@ def _json_default(obj: Any) -> Any:
 # Severity helpers (re-exported for the report layer)
 # ---------------------------------------------------------------------------
 
-def severity_rank(severity: Severity) -> int:
+def severity_rank(severity: str) -> int:
     """Return the rank for a severity string. Case-insensitive — LLM
     verdicts and hand-edited findings frequently capitalise (``Critical``,
     ``HIGH``); a case-sensitive lookup would silently treat them as 0
-    and let CI gates pass when they shouldn't.
+    and let CI gates pass when they shouldn't. Typed ``str`` (not the
+    ``Severity`` literal) for the same reason: read-side values are
+    untrusted row content, and unknown labels rank 0.
     """
     if not severity:
         return 0

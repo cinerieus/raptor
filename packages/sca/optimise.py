@@ -38,6 +38,7 @@ from .kinds import (
     HYGIENE_PREFIX,
     SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT,
 )
+from .rows import FindingRow
 from .update import (
     UpgradeChange,
     _change_to_dict,
@@ -183,9 +184,9 @@ def main(argv: Sequence[str]) -> int:
 
     # ---- Phase 3a: detect GHA-action-ref drift (independent of pins) -------
     has_gha_drift = any(
-        isinstance(r, dict)
-        and r.get("vuln_type") == SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT
-        for r in findings_rows
+        fr is not None
+        and fr.vuln_type == SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT
+        for fr in map(FindingRow.from_row, findings_rows)
     )
     do_hash_pin = has_gha_drift and not args.no_hash_pin
 
