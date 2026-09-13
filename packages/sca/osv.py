@@ -67,6 +67,7 @@ from packages.osv import OsvRecord
 from packages.osv import parse_record as _shared_parse_record
 from packages.osv.client import OSV_BASE_URL
 
+from .naming import fold_name
 from .models import (
     Advisory,
     AffectedRange,
@@ -122,12 +123,12 @@ def _to_osv_ecosystem(ecosystem: str) -> str:
 
 
 def _canonical_name(ecosystem: str, name: str) -> str:
-    """Match the canonicalisation OSV expects per ecosystem."""
-    if ecosystem == "PyPI":
-        return re.sub(r"[-_.]+", "-", name).lower()
-    if ecosystem in ("npm", "Cargo"):
-        return name.lower()
-    return name
+    """Match the canonicalisation OSV expects per ecosystem.
+
+    Beyond the shared rule, OSV case-folds crates.io names — the
+    registry walk deliberately keeps Cargo case-sensitive, so the
+    fold is an OSV-boundary opt-in, not part of the shared rule."""
+    return fold_name(name, ecosystem, extra_lower=("Cargo",))
 
 
 def _has_corridor(dep: Dependency) -> bool:

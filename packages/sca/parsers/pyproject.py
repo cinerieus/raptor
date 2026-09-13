@@ -23,11 +23,11 @@ or ``path`` keys override pin style without a string spec.
 from __future__ import annotations
 
 import logging
-import re
 import sys
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 from .requirements import _spec_bounds
 
@@ -249,7 +249,7 @@ def _from_pep508(
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(req.name),
+        name=pep503_name(req.name),
         version=version,
         declared_in=path,
         scope=scope,
@@ -295,7 +295,7 @@ def _from_poetry(
         version_floor, version_ceiling = _poetry_bounds(pin_style, version)
         return Dependency(
             ecosystem=ECOSYSTEM,
-            name=_normalise_name(name),
+            name=pep503_name(name),
             version=version,
             declared_in=path,
             scope=scope,
@@ -316,7 +316,7 @@ def _from_poetry(
     version_floor, version_ceiling = _poetry_bounds(pin_style, version)
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=path,
         scope=scope,
@@ -426,12 +426,8 @@ def _confidence_for_poetry(
     return Confidence("high", reason="Poetry tool table")
 
 
-def _normalise_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{_normalise_name(name)}"
+    base = f"pkg:pypi/{pep503_name(name)}"
     if version:
         return f"{base}@{version}"
     return base

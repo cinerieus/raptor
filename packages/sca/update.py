@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .naming import pep503_name
 from .parsers._npm_alias import split_npm_alias
 from .rows import FindingRow
 from .versions import VersionError
@@ -1424,7 +1425,7 @@ def _rewrite_requirements_txt(
     commented, but the version is upgraded so an operator following
     the recipe gets the patched version.
     """
-    norm = _normalise_pypi_name(plan.name)
+    norm = pep503_name(plan.name)
     out_lines: list[str] = []
     rewrote = False
     declined = False
@@ -1480,7 +1481,7 @@ def _rewrite_requirements_txt(
         if not m:
             out_lines.append(raw)
             continue
-        if _normalise_pypi_name(m.group(1)) != norm:
+        if pep503_name(m.group(1)) != norm:
             out_lines.append(raw)
             continue
         if comment_prefix and not plan.installed:
@@ -1521,10 +1522,6 @@ def _rewrite_requirements_txt(
                                  "(target outside the declared bounds)")
         return text, False, "no matching line"
     return "".join(out_lines), True, None
-
-
-def _normalise_pypi_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -2101,7 +2098,7 @@ def _rewrite_pyproject_toml(
     so range bounds survive around the new ``==target`` pin (same
     corridor semantics as the requirements.txt rewriter).
     """
-    norm = _normalise_pypi_name(plan.name)
+    norm = pep503_name(plan.name)
 
     # 1. Poetry-flavoured ``name = "..."`` form.
     poetry_re = re.compile(
@@ -2112,7 +2109,7 @@ def _rewrite_pyproject_toml(
 
     def _poetry_sub(m: re.Match) -> str:
         nonlocal poetry_hit
-        if _normalise_pypi_name(m.group(3)) != norm:
+        if pep503_name(m.group(3)) != norm:
             return m.group(0)
         # Poetry specs are semver (caret/tilde/range), so _bump_npm_spec's
         # floor_raise handles the library posture: caret/tilde/range forms
@@ -2133,7 +2130,7 @@ def _rewrite_pyproject_toml(
 
     def _pep508_sub(m: re.Match) -> str:
         nonlocal pep508_declined
-        if _normalise_pypi_name(m.group(1)) != norm:
+        if pep503_name(m.group(1)) != norm:
             return m.group(0)
         spec_and_marker = m.group(2)
         marker_sep = spec_and_marker.find(";")

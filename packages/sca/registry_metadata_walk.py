@@ -47,6 +47,7 @@ from core.http import HttpClient, HttpError
 from core.json import TTL_FOREVER, JsonCache
 
 from .models import Confidence, Dependency, PinStyle
+from .naming import fold_name as _norm_name
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -463,18 +464,6 @@ def _lower_bound(spec: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Name normalisation
 # ---------------------------------------------------------------------------
-
-def _norm_name(name: str, ecosystem: str) -> str:
-    """Per-ecosystem canonical name. PEP 503 for PyPI; lower-case for
-    npm scoped names. Cargo / Maven are case-sensitive at registry
-    level so we leave them as-is.
-    """
-    if ecosystem == "PyPI":
-        return re.sub(r"[-_.]+", "-", name).lower()
-    if ecosystem == "npm":
-        return name.lower()
-    return name
-
 
 # ---------------------------------------------------------------------------
 # Per-ecosystem fetchers

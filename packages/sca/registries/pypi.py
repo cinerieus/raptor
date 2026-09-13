@@ -21,6 +21,7 @@ from packaging.version import InvalidVersion, Version
 
 from core.json import MISSING, JsonCache
 
+from ..naming import pep503_name
 from ._negative_cache import log_fetch_failure, should_negative_cache
 from ._url import (
     UnsafeUrlComponentError,
@@ -186,7 +187,7 @@ class PyPIClient:
         the same TTL so workspace-internal / private package names
         don't re-query on every detector call.
         """
-        canon = _canonical_name(name)
+        canon = pep503_name(name)
         try:
             url = self._build_url(canon)
         except UnsafeUrlComponentError:
@@ -235,7 +236,7 @@ class PyPIClient:
         Cached separately from the aggregate metadata; same TTL.
         Same negative-caching policy as ``get_metadata``.
         """
-        canon = _canonical_name(name)
+        canon = pep503_name(name)
         try:
             base = self._build_url(canon).rsplit("/", 1)[0]
             url = f"{base}/{quote_segment(version)}/json"
@@ -273,7 +274,7 @@ class PyPIClient:
         return data
 
     def list_versions(self, name: str) -> list[str]:
-        canon = _canonical_name(name)
+        canon = pep503_name(name)
         try:
             url = self._build_url(canon)
         except UnsafeUrlComponentError:
@@ -304,12 +305,6 @@ class PyPIClient:
         if self._cache is not None:
             self._cache.put(cache_key, versions, ttl_seconds=self._ttl)
         return versions
-
-
-def _canonical_name(name: str) -> str:
-    """PEP 503 normalisation."""
-    import re
-    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _extract_versions(data: dict) -> list[str]:

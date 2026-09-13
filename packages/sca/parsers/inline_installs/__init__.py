@@ -68,6 +68,7 @@ from pathlib import Path
 from core.json.jsonc import load_jsonc
 
 from ...models import Confidence, Dependency, PinStyle
+from ...naming import fold_name
 from .. import register
 from ._managers import (
     _MANAGERS,
@@ -294,7 +295,7 @@ def _make_dep(
     version_floor: str | None = None,
     version_ceiling: str | None = None,
 ) -> Dependency:
-    canon = _canonicalise_name(name, ecosystem)
+    canon = fold_name(name, ecosystem)
     purl_base = (
         f"pkg:{purl_type}/{purl_namespace}/{canon}"
         if purl_namespace else f"pkg:{purl_type}/{canon}"
@@ -322,16 +323,6 @@ def _make_dep(
         version_floor=version_floor,
         version_ceiling=version_ceiling,
     )
-
-
-def _canonicalise_name(name: str, ecosystem: str) -> str:
-    if ecosystem == "PyPI":
-        return re.sub(r"[-_.]+", "-", name).lower()
-    if ecosystem == "npm":
-        # npm names are case-sensitive but conventionally lower-case;
-        # scope and slash are preserved.
-        return name.lower()
-    return name
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +407,7 @@ def _extract_apt_via_core_dockerfile(
 
 def _apt_package_to_dep(ap, declared_in: Path,
                         base_image: str | None = None) -> Dependency:
-    canon = _canonicalise_name(ap.name, "Debian")
+    canon = fold_name(ap.name, "Debian")
     purl_base = f"pkg:deb/debian/{canon}"
     purl = f"{purl_base}@{ap.version}" if ap.version else purl_base
     # Attribute the apt package to the Debian suite of the base image

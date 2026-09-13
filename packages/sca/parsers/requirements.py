@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 
 logger = logging.getLogger(__name__)
@@ -442,7 +443,7 @@ def _parse_requirement_line(
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=declared_in,
         scope="main",
@@ -493,7 +494,7 @@ def _from_url_spec(
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=declared_in,
         scope="main",
@@ -596,11 +597,6 @@ def _spec_bounds(spec) -> tuple[str | None, str | None]:
     return floor, ceiling
 
 
-def _normalise_name(name: str) -> str:
-    """PEP 503 normalisation: lower-case + dashes/underscores/dots collapsed."""
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _confidence(
     pin_style: PinStyle, version: str | None, editable: bool
 ) -> Confidence:
@@ -622,7 +618,7 @@ def _confidence(
 
 
 def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{_normalise_name(name)}"
+    base = f"pkg:pypi/{pep503_name(name)}"
     if version:
         return f"{base}@{version}"
     return base

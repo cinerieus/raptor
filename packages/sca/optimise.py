@@ -34,6 +34,7 @@ from typing import Any, TYPE_CHECKING
 
 from core.json import load_json, save_json
 
+from .naming import pep503_name
 from .kinds import (
     HYGIENE_PREFIX,
     SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT,
@@ -635,10 +636,6 @@ def _materialise_pin_changes(
 # Bare-name pinning (fallback when the standard rewriter misses)
 # ---------------------------------------------------------------------------
 
-def _normalise_pypi_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _pin_bare_name(
     manifest: Path, text: str, plan: _PlanEntry,
 ) -> tuple[str, bool, str | None]:
@@ -659,7 +656,7 @@ def _pin_bare_requirements(
     text: str, plan: _PlanEntry,
 ) -> tuple[str, bool, str | None]:
     """Pin ``name`` (bare, no version) → ``name==target``."""
-    norm = _normalise_pypi_name(plan.name)
+    norm = pep503_name(plan.name)
     out_lines: list[str] = []
     rewrote = False
     for raw in text.splitlines(keepends=True):
@@ -673,7 +670,7 @@ def _pin_bare_requirements(
         comment_tail = "".join(comment_split[1:])  # separator + comment text
 
         m = re.match(r"^([A-Za-z0-9_\-.]+)\s*$", line_value)
-        if m and _normalise_pypi_name(m.group(1)) == norm:
+        if m and pep503_name(m.group(1)) == norm:
             pinned = f"{m.group(1)}=={plan.target}{comment_tail}"
             out_lines.append(raw.replace(stripped, pinned))
             rewrote = True
@@ -713,7 +710,7 @@ def _pin_bare_pyproject(
     text: str, plan: _PlanEntry,
 ) -> tuple[str, bool, str | None]:
     """Pin a bare dep name in pyproject.toml (PEP 621 or Poetry)."""
-    norm = _normalise_pypi_name(plan.name)
+    norm = pep503_name(plan.name)
 
     # PEP 621 list form: "name" or 'name' as a bare string in
     # [project.dependencies] or [project.optional-dependencies.*]
@@ -725,7 +722,7 @@ def _pin_bare_pyproject(
             r"""^(['"])([A-Za-z0-9_\-.]+)\s*(['"])\s*,?\s*$""",
             stripped,
         )
-        if m and _normalise_pypi_name(m.group(2)) == norm:
+        if m and pep503_name(m.group(2)) == norm:
             q = m.group(1)
             new_val = f"{q}{m.group(2)}=={plan.target}{q}"
             if stripped.endswith(","):

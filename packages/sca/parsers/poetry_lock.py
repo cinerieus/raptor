@@ -32,11 +32,11 @@ pass flip rows that also appear in pyproject.toml.
 from __future__ import annotations
 
 import logging
-import re
 import sys
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -130,7 +130,7 @@ def _build_dep(pkg: dict[str, Any], path: Path) -> Dependency | None:
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=path,
         scope=scope,
@@ -169,12 +169,8 @@ def _confidence(
     return Confidence("high", reason=base_reason)
 
 
-def _normalise_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{_normalise_name(name)}"
+    base = f"pkg:pypi/{pep503_name(name)}"
     if version:
         return f"{base}@{version}"
     return base

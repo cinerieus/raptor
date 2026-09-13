@@ -34,6 +34,7 @@ import sys
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -137,7 +138,7 @@ def _build_dep(
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=path,
         scope=scope,
@@ -190,13 +191,8 @@ def _classify_fallback(
     return PinStyle.UNKNOWN, None, None, None
 
 
-def _normalise_name(name: str) -> str:
-    """PEP 503 normalisation, same as the requirements parser."""
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{_normalise_name(name)}"
+    base = f"pkg:pypi/{pep503_name(name)}"
     if version:
         return f"{base}@{version}"
     return base

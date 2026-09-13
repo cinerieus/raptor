@@ -30,10 +30,10 @@ from __future__ import annotations
 
 import json as _json
 import logging
-import re
 from typing import Any, TYPE_CHECKING
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ def _build_dep(
 
     return Dependency(
         ecosystem=ECOSYSTEM,
-        name=_normalise_name(name),
+        name=pep503_name(name),
         version=version,
         declared_in=path,
         scope=scope,
@@ -134,12 +134,8 @@ def _strip_eq(value: Any) -> str | None:
     return v or None
 
 
-def _normalise_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
 def _build_purl(name: str, version: str | None) -> str:
-    base = f"pkg:pypi/{_normalise_name(name)}"
+    base = f"pkg:pypi/{pep503_name(name)}"
     if version:
         return f"{base}@{version}"
     return base
