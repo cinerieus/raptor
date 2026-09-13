@@ -33,6 +33,27 @@ import core.startup.process_init  # noqa: E402,F401
 from core.json import dumps_display  # noqa: E402
 
 
+def _resolve_out_dir(out_arg: str | None,
+                     raptor_dir: Path) -> Path | None:
+    """Output dir for synthesis artifacts.
+
+    RAPTOR-side default, never inside the target repo: a hostile repo
+    could pre-plant `out` as a symlink and steer the artifact writes
+    anywhere, and run output must not pollute the scanned tree
+    (run-lifecycle output doctrine). A symlinked default refuses
+    (returns None after printing the error); an explicit --out is the
+    operator's assertion and passes through.
+    """
+    if out_arg:
+        return Path(out_arg)
+    out_dir = raptor_dir / "out" / "checker-synthesis"
+    if out_dir.is_symlink() or out_dir.parent.is_symlink():
+        print(f"error: default output dir {out_dir} is a symlink; "
+              "refusing (pass --out explicitly)", file=sys.stderr)
+        return None
+    return out_dir
+
+
 def main() -> int:
     import argparse
     import logging
@@ -55,7 +76,8 @@ def main() -> int:
     parser.add_argument("--repo", required=True,
                         help="Root of the target repository")
     parser.add_argument("--out", default=None,
-                        help="Output directory (default: <repo>/out/checker-synthesis)")
+                        help="Output directory (default: "
+                             "<raptor>/out/checker-synthesis)")
     parser.add_argument("--no-refine", action="store_true",
                         help="Single-shot synthesis (skip iterative FP elimination)")
     parser.add_argument("--max-iterations", type=int, default=5,
@@ -85,13 +107,18 @@ def main() -> int:
         print(f"error: repo not found: {repo_root}", file=sys.stderr)
         return 1
 
-    out_dir = Path(args.out) if args.out else repo_root / "out" / "checker-synthesis"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
+    # Validate BEFORE creating any output directory — nothing should
+    # touch the filesystem for an invocation that is about to refuse.
     if ".." in args.file.split("/") or os.path.isabs(args.file):
         print(f"error: --file must be a repo-relative path without '..' "
               f"segments, got '{args.file}'", file=sys.stderr)
         return 1
+
+    out_dir = _resolve_out_dir(args.out,
+                               Path(__file__).resolve().parents[1])
+    if out_dir is None:
+        return 1
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     snippet = args.snippet
     if not snippet:
