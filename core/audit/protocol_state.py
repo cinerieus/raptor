@@ -441,8 +441,9 @@ def _classify_rhs(rhs: str) -> str:
         return "unknown"
     # "0" deliberately absent: the numeric-literal fullmatch below
     # already classifies it literal_const, which is what the old
-    # inline conditional here resolved to.
-    if rhs in ("NULL", "nullptr", "NULL;"):
+    # inline conditional here resolved to.  No semicolon variants:
+    # the sole producer splits the statement on ";" before calling.
+    if rhs in ("NULL", "nullptr"):
         return "literal_null"
     if re.fullmatch(r"\d+[uUlL]*", rhs.rstrip(";")):
         return "literal_const"
