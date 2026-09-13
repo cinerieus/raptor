@@ -4,6 +4,7 @@ GH Archive Collector.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from ..clients.gharchive import GHArchiveClient
 from ..schema.common import EvidenceSource, VerificationInfo
@@ -41,6 +42,79 @@ def _gharchive_day(timestamp: str) -> str:
         )
         raise ValueError(msg)
     return digits[:8]
+
+
+def _parse_query_timestamp(timestamp: str) -> tuple[datetime, bool]:
+    """Parse a caller-supplied recover_* timestamp.
+
+    Returns ``(dt, day_only)`` where ``day_only`` is True when the
+    caller gave date granularity only. Accepts the documented shapes:
+    ISO forms ("2024-01-15T10:30:00Z", "2024-01-15 10:30:00",
+    "2024-01-15") and digit-only forms ("20240115", "202401151030",
+    "20240115103000"). Naive values are taken as UTC (GH Archive is
+    UTC throughout). Raises ValueError on anything else — a query
+    timestamp that cannot be parsed must fail loudly, not miss rows.
+    """
+    ts = timestamp.strip()
+    if ts.isdigit():
+        formats = {8: "%Y%m%d", 12: "%Y%m%d%H%M", 14: "%Y%m%d%H%M%S"}
+        fmt = formats.get(len(ts))
+        if fmt is None:
+            msg = (
+                f"digit-only timestamp {timestamp!r} must be 8 (YYYYMMDD), "
+                "12 (YYYYMMDDHHMM) or 14 (YYYYMMDDHHMMSS) digits"
+            )
+            raise ValueError(msg)
+        return (
+            datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc),
+            len(ts) == 8,
+        )
+    parsed = parse_datetime_strict(ts)
+    if parsed is None:  # unreachable for str input; narrows the type
+        msg = f"Unable to parse timestamp: {timestamp!r}"
+        raise ValueError(msg)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    # Date-only ISO form ("2024-01-15"): day granularity.
+    return parsed.astimezone(timezone.utc), len(ts) == 10 and ts.count("-") == 2
+
+
+def _timestamp_matches(timestamp: str, row_created_at: object) -> bool:
+    """True when a BigQuery row's ``created_at`` falls at the caller's
+    recovery timestamp.
+
+    The BigQuery client returns TIMESTAMP columns as tz-aware
+    ``datetime`` objects, which stringify as "2025-07-13 20:30:24+00:00"
+    — the previous substring probe (``timestamp in str(created_at)``)
+    could therefore never match the documented call shapes
+    ("2025-07-13T20:30:24Z", "202401151030") on the live transport.
+    Compare parsed datetimes at explicit granularity instead: whole day
+    for date-only queries, exact minute otherwise (the finest filter
+    the 12-digit collect_events contract offers; recover_* callers
+    additionally match discriminating payload fields).
+
+    An unparseable ROW skips that row (malformed archive data must not
+    abort recovery); an unparseable QUERY timestamp raises.
+    """
+    query_dt, day_only = _parse_query_timestamp(timestamp)
+    if isinstance(row_created_at, datetime):
+        row_dt = row_created_at
+    elif isinstance(row_created_at, str):
+        try:
+            row_dt = parse_datetime_strict(row_created_at)
+        except ValueError:
+            return False
+    else:
+        return False
+    if row_dt.tzinfo is None:
+        row_dt = row_dt.replace(tzinfo=timezone.utc)
+    row_dt = row_dt.astimezone(timezone.utc)
+
+    if day_only:
+        return row_dt.date() == query_dt.date()
+    return row_dt.replace(second=0, microsecond=0) == query_dt.replace(
+        second=0, microsecond=0,
+    )
 
 
 class GHArchiveCollector:
@@ -94,8 +168,7 @@ class GHArchiveCollector:
         rows = self.client.query_events(repo=repo, event_type="PushEvent", from_date=date)
 
         for row in rows:
-            row_ts = str(row.get("created_at", ""))
-            if timestamp not in row_ts:
+            if not _timestamp_matches(timestamp, row.get("created_at")):
                 continue
 
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
@@ -143,8 +216,7 @@ class GHArchiveCollector:
         rows = self.client.query_events(repo=repo, event_type="PushEvent", from_date=date)
 
         for row in rows:
-            row_ts = str(row.get("created_at", ""))
-            if timestamp not in row_ts:
+            if not _timestamp_matches(timestamp, row.get("created_at")):
                 continue
 
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
@@ -200,9 +272,10 @@ class GHArchiveCollector:
         for row in rows:
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
             item = payload.get(payload_key, {})
-            row_ts = str(row.get("created_at", ""))
 
-            if item.get("number") == number and timestamp in row_ts:
+            if item.get("number") == number and _timestamp_matches(
+                timestamp, row.get("created_at"),
+            ):
                 state = item.get("state", "open")
                 if item.get("merged"):
                     state = "merged"
