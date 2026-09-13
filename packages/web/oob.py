@@ -150,6 +150,10 @@ class OobListener:
         self._hits: dict[str, list[OobHit]] = {}
         self._expectations: list[OobExpectation] = []
         self._unknown_token_requests = 0
+        # callback_base is evaluated per mint (one canary per fuzz
+        # cell); the wildcard-bind warning is per-listener advice, not
+        # per-canary — warn once.
+        self._warned_wildcard_callback = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -210,12 +214,16 @@ class OobListener:
     @property
     def callback_base(self) -> str:
         host = self._callback_host or self._bind_host
-        if host in ("0.0.0.0", "::") and self._callback_host is None:  # noqa: S104
+        if (
+            host in ("0.0.0.0", "::") and self._callback_host is None  # noqa: S104
+            and not self._warned_wildcard_callback
+        ):
             # Wildcard bind with no operator-asserted callback host:
             # minted canaries would tell the target to fetch from ITS
             # OWN loopback/interface, so the listener could never see a
             # genuine callback. Mint them anyway (local targets still
-            # work) but say so loudly.
+            # work) but say so loudly — once, not per minted canary.
+            self._warned_wildcard_callback = True
             logger.warning(
                 "OOB callback host defaults to the bind interface %s — "
                 "remote targets cannot reach it; pass an externally "

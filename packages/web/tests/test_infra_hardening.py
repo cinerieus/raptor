@@ -278,6 +278,17 @@ def test_wildcard_bind_without_callback_host_warns(caplog):
     assert any("bind interface" in record.message for record in caplog.records)
 
 
+def test_wildcard_bind_warning_fires_once_not_per_mint(caplog):
+    from packages.web.oob import OobContext, OobListener
+
+    listener = OobListener(bind_host="0.0.0.0")
+    with caplog.at_level("WARNING", logger="raptor"):
+        for i in range(5):
+            listener.mint(OobContext(url=f"http://t/{i}", param="u", kind="ssrf"))
+    warnings = [r for r in caplog.records if "bind interface" in r.message]
+    assert len(warnings) == 1, "per-listener advice must not repeat per canary"
+
+
 # -- ffuf summary raw channel -------------------------------------------------------
 
 
