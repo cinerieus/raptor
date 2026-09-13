@@ -206,7 +206,11 @@ def _annotation_contract(
         return None
     tail = callee.rsplit(".", 1)[-1]
     try:
-        from core.annotations.storage import iter_all_annotations
+        from core.annotations.provenance import is_human_grade
+        from core.annotations.storage import (
+            annotation_file_mtime,
+            iter_all_annotations,
+        )
         scanned = 0
         for ann in iter_all_annotations(Path(base)):
             scanned += 1
@@ -218,10 +222,20 @@ def _annotation_contract(
             prose = ann.body or ""
             if _RETURN_SIGNAL_PROSE_RE.search(prose) \
                     or _MUST_CHECK_PROSE_RE.search(prose):
+                # Registry grade is human-grade-gated (the
+                # consistency_prepass sibling gate): agent-written
+                # prose is hint-tier by the annotation doctrine, so
+                # it binds the contract at detection grade only.
+                human = is_human_grade(
+                    ann.metadata or {},
+                    note_mtime=annotation_file_mtime(
+                        Path(base), ann.file or "",
+                    ),
+                )
                 return ContractEvidence(
                     source="annotation",
                     provenance="annotation",
-                    grade=GRADE_REGISTRY,
+                    grade=GRADE_REGISTRY if human else GRADE_DETECTION,
                     detail=_contract_from_prose(prose),
                 )
     except Exception:

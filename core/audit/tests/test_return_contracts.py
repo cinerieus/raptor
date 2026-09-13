@@ -76,7 +76,13 @@ class TestLearnedSources:
             file="src/db.c", function="db_reserve",
             body="Returns -1 on failure; the return value must be "
                  "checked before use.",
-            metadata={"status": "suspicious", "source": "human"},
+            # Registry grade requires a human-grade note: source=human
+            # with an interactive-TTY stamp (a fresh stamp-less note
+            # cannot use the legacy grandfather clause).
+            metadata={
+                "status": "suspicious", "source": "human",
+                "provenance": "interactive-tty",
+            },
         ))
         ctx = RoleContext(annotations_dir=base)
         ev = bind_return_contract("db_reserve", language="c", context=ctx)
@@ -208,3 +214,49 @@ class TestWurWrappedDeclarator:
         names = harvest_wur_declarations({"api.h": header})
         assert "foo" in names
         assert "bar" not in names
+
+
+class TestAnnotationProvenanceGate:
+    """Registry-grade contract authority requires a human-grade
+    annotation (the consistency_prepass sibling gate) — agent-written
+    prose is hint-tier by doctrine."""
+
+    def _bind(self, tmp_path, metadata):
+        from core.annotations.models import Annotation
+        from core.annotations.storage import write_annotation
+
+        base = tmp_path / "annotations"
+        write_annotation(base, Annotation(
+            file="src/db.c", function="db_reserve",
+            body="Returns -1 on failure; the return value must be "
+                 "checked before use.",
+            metadata=metadata,
+        ))
+        ctx = RoleContext(annotations_dir=base)
+        return bind_return_contract("db_reserve", language="c", context=ctx)
+
+    def test_agent_annotation_is_detection_grade(self, tmp_path):
+        ev = self._bind(tmp_path, {
+            "status": "suspicious", "source": "agent",
+        })
+        assert ev is not None
+        assert ev.source == "annotation"
+        assert ev.grade == GRADE_DETECTION
+
+    def test_non_tty_human_stamp_is_detection_grade(self, tmp_path):
+        # The laundering shape: source=human contradicted by a
+        # non-tty stamp demotes.
+        ev = self._bind(tmp_path, {
+            "status": "suspicious", "source": "human",
+            "provenance": "non-tty",
+        })
+        assert ev is not None
+        assert ev.grade == GRADE_DETECTION
+
+    def test_stamped_human_annotation_is_registry_grade(self, tmp_path):
+        ev = self._bind(tmp_path, {
+            "status": "suspicious", "source": "human",
+            "provenance": "interactive-tty",
+        })
+        assert ev is not None
+        assert ev.grade == GRADE_REGISTRY
