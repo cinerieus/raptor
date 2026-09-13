@@ -874,6 +874,60 @@ class TestConstraintWiring:
         assert not (out / "constraints.json").exists()
 
 
+class TestExtractAndPropagate:
+    """The propagation-result consumption seam in _extract_and_propagate."""
+
+    def _outcome_with_constraint(self):
+        return ReviewOutcome(
+            file="src/auth.c",
+            function="check_pw",
+            status="suspicious",
+            body="needs bounds check",
+            review_result={
+                "constraints": [
+                    {
+                        "kind": "parameter",
+                        "target": "len",
+                        "rule": "len must be <= 1024",
+                    },
+                ],
+            },
+        )
+
+    def test_depth_limited_status_lands_on_constraint(self):
+        """A depth-limited hop must mark the constraint, not fall
+        through as an ordinary unresolved result."""
+        from core.audit.orchestrator import _extract_and_propagate
+        from core.audit.propagation import PropagationConfig
+
+        constraints = _extract_and_propagate(
+            self._outcome_with_constraint(),
+            [],
+            {"files": []},
+            set(),
+            PropagationConfig(max_depth=0),
+        )
+        assert len(constraints) == 1
+        assert constraints[0].status == "depth_limited"
+        assert constraints[0].depth_reached == 0
+
+    def test_unresolved_constraint_stays_open(self):
+        """An unresolved hop (no inventory, no resolvers) leaves the
+        constraint open — nothing is derived, nothing is demoted."""
+        from core.audit.orchestrator import _extract_and_propagate
+        from core.audit.propagation import PropagationConfig
+
+        constraints = _extract_and_propagate(
+            self._outcome_with_constraint(),
+            [],
+            {"files": []},
+            set(),
+            PropagationConfig(max_depth=5),
+        )
+        assert len(constraints) == 1
+        assert constraints[0].status == "open"
+
+
 @pytest.mark.slow
 class TestPrefilterWiring:
     """Test that the prefilter is wired into the orchestrator loop."""

@@ -26976,12 +26976,14 @@ def _extract_and_propagate(
                 elif result.resolved and result.resolution == "depth_limited":
                     c.status = "depth_limited"
                     c.depth_reached = prop_config.max_depth
-                elif not result.resolved:
-                    derived = getattr(result, "derived_constraints", [])
-                    for dc in derived:
-                        constraints = merge_constraint(constraints, dc)
-                    new_open = list(open_constraints(derived))
-                    next_pending.extend(new_open)
+                # "confirmed" resolutions stay evidence-only (see the
+                # consumption contract in core/audit/propagation.py) —
+                # consuming them as a verdict change would be a new
+                # promotion path outside the tool-verdict chokepoints.
+                # Unresolved results carry only advisory
+                # callers_scheduled; no resolver derives child
+                # constraints, so there is nothing to feed later
+                # rounds and the loop drains in a single pass today.
             except Exception:
                 logger.debug(
                     "propagation failed for %s:%s",

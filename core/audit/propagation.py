@@ -16,6 +16,19 @@ DB build.
 
 Constraints persist across runs with freshness checks (same staleness
 model as annotations).
+
+Consumption contract: the orchestrator consumes ``resolution ==
+"refuted"`` (closes the constraint) and ``resolution ==
+"depth_limited"`` (marks the constraint and records the depth
+reached).  ``resolution == "confirmed"`` is counted in tier telemetry
+and carried on the result (including any ``finding`` payload) but
+deliberately does NOT change any constraint or review-outcome status:
+minting or promoting a finding from a propagation confirmation would
+be a new verdict-flip path outside the existing tool-verdict
+chokepoints, so the confirmed signal stays evidence-only until such a
+chokepoint consumes it.  ``callers_scheduled`` (heuristic tier) is
+likewise advisory: no resolver derives child constraints, so an
+unresolved hop ends propagation for that constraint.
 """
 
 from __future__ import annotations
@@ -77,6 +90,9 @@ class PropagationResult:
     """Result of propagating one constraint one hop."""
 
     constraint: Constraint
+    # resolved=True marks a terminal disposition for this hop
+    # ("confirmed" | "refuted" | "depth_limited"); resolved=False is a
+    # passthrough ("inconclusive" or heuristic caller scheduling).
     resolved: bool = False
     resolution: str = ""          # "confirmed" | "refuted" | "depth_limited"
     resolver_used: str = ""       # "codeql" | "coccinelle" | "semgrep" | "heuristic" | "llm"
@@ -865,9 +881,12 @@ def _tick_tier(
     tc = tier_counters[tier]
     if result.resolved and result.resolution == "confirmed":
         tc.confirmed += 1
-    elif result.resolved:
+    elif result.resolved and result.resolution == "refuted":
         tc.refuted += 1
     else:
+        # Passthroughs and depth-limited results are inconclusive for
+        # tier telemetry — depth limiting is terminal but proves
+        # nothing about the constraint either way.
         tc.inconclusive += 1
 
 
@@ -911,9 +930,15 @@ def propagate_one_hop(
         probe = probe_beyond_ceiling(
             constraint, ceiling_callers, config.inventory, entry_points,
         )
+        # resolved=True: depth limiting is a terminal disposition for
+        # this hop.  The consumer keys the constraint's depth_limited
+        # status transition off ``resolved and resolution ==
+        # "depth_limited"`` — an unresolved-shaped result is
+        # indistinguishable from a heuristic passthrough and the
+        # depth signal would never land.
         return PropagationResult(
             constraint=constraint,
-            resolved=False,
+            resolved=True,
             resolution="depth_limited",
             depth_probe=probe,
         )

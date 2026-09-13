@@ -346,7 +346,11 @@ class TestPropagateOneHop:
             config=config,
             current_depth=0,
         )
-        assert not result.resolved
+        # The consumer keys the depth-limited status transition off
+        # resolved AND resolution — an unresolved-shaped result is
+        # indistinguishable from a heuristic passthrough and the
+        # depth signal never lands.
+        assert result.resolved
         assert result.resolution == "depth_limited"
         assert result.depth_probe is not None
 
@@ -388,6 +392,7 @@ class TestPropagateOneHop:
             config=config,
             current_depth=5,
         )
+        assert result.resolved
         assert result.resolution == "depth_limited"
 
 
