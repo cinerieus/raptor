@@ -23,12 +23,20 @@ with precise diagnostics; isolation is the backstop.
 The child receives (module, function, kwargs) by name and returns
 the primitive's result via a pipe. Spawn (not fork): angr's native
 state does not survive forks reliably, and spawn gives the child a
-clean interpreter.
+clean interpreter. The parent decodes the returned bytes with a
+restricted unpickler (:class:`_RestrictedResultUnpickler`): the child
+is sandboxed precisely because its inputs are hostile, so its OUTPUT
+channel must not be a plain ``pickle.loads`` in the unsandboxed
+parent — a child compromised through a CLE/pyvex/z3 parsing bug could
+otherwise send a crafted pickle and execute code outside every
+sandbox layer this module builds.
 """
 from __future__ import annotations
 
 import importlib
+import io
 import multiprocessing as mp
+import pickle
 import shutil
 import tempfile
 import time
@@ -43,6 +51,49 @@ GRACE_SECONDS = 15.0
 
 #: terminate → kill escalation gap.
 _KILL_GRACE_SECONDS = 5.0
+
+#: Upper bound on the child's serialized result. Trade-off, both
+#: directions: too low refuses legitimate results (concrete stdin
+#: witnesses are engine-capped well below 1 MiB, but overflow-engine
+#: metadata carries register/memory snapshots); too high lets a
+#: compromised child force the parent to buffer an allocation bomb.
+#: 64 MiB clears every legitimate result shape by orders of magnitude
+#: while keeping the worst-case parent allocation bounded.
+_MAX_RESULT_BYTES = 64 << 20
+
+
+class _RestrictedResultUnpickler(pickle.Unpickler):
+    """Unpickler that can construct ONLY :class:`SymbolicResult`.
+
+    Builtin scalars/containers (str, bytes, int, float, bool, None,
+    dict, list, tuple) are opcode-native and need no class lookup;
+    every other global reference — the vector by which a pickle
+    stream reaches ``os.system`` and friends — is refused. Calling
+    the one allowed class with attacker-chosen arguments constructs
+    an inert dataclass, nothing more.
+    """
+
+    _ALLOWED = {("core.symbolic._types", "SymbolicResult")}
+
+    def find_class(self, module: str, name: str) -> type:
+        if (module, name) in self._ALLOWED:
+            return SymbolicResult
+        raise pickle.UnpicklingError(
+            f"symex child result: refusing to unpickle {module}.{name}"
+        )
+
+
+def _loads_result(payload: bytes) -> SymbolicResult:
+    """Decode a child result under the restricted unpickler; the
+    decoded object must BE a SymbolicResult, not merely be built
+    from allowed pieces."""
+    obj = _RestrictedResultUnpickler(io.BytesIO(payload)).load()
+    if not isinstance(obj, SymbolicResult):
+        raise pickle.UnpicklingError(
+            "symex child result: expected SymbolicResult, got "
+            f"{type(obj).__name__}"
+        )
+    return obj
 
 
 def _apply_symex_sandbox(private_tmp: str | None = None) -> None:
@@ -269,19 +320,23 @@ def _child_entry(
     # missing; that is operator noise, not a result channel.
     for name in ("angr", "claripy", "cle", "pyvex"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
+    # send_bytes (not send): the parent decodes with the restricted
+    # unpickler, so the pickling happens HERE, visibly, on the honest
+    # path — the parent side never calls Connection.recv's implicit
+    # pickle.loads on child-controlled bytes.
     try:
         module = importlib.import_module(module_name)
         result = getattr(module, func_name)(**kwargs)
-        conn.send(result)
+        conn.send_bytes(pickle.dumps(result))
     except BaseException as exc:  # noqa: BLE001 — one channel out
         try:
-            conn.send(SymbolicResult(
+            conn.send_bytes(pickle.dumps(SymbolicResult(
                 succeeded=False,
                 reason=f"primitive raised: {type(exc).__name__}: {exc}",
                 wall_seconds=0.0,
                 states_explored=0,
                 metadata={},
-            ))
+            )))
         except Exception:  # noqa: BLE001 — pipe gone; parent times out
             pass
     finally:
@@ -320,15 +375,34 @@ def run_isolated(
 
         budget = timeout + GRACE_SECONDS
         result: SymbolicResult | None = None
+        rejected_reason: str | None = None
         # A crashed child closes the pipe, so poll() returns promptly
-        # (EOF is readable) and recv() raises — timed_out separates
-        # "budget genuinely elapsed" from "child died with no result".
+        # (EOF is readable) and recv_bytes() raises — timed_out
+        # separates "budget genuinely elapsed" from "child died with
+        # no result".
         timed_out = not parent_conn.poll(budget)
         if not timed_out:
             try:
-                result = parent_conn.recv()
-            except (EOFError, OSError):
+                payload = parent_conn.recv_bytes(_MAX_RESULT_BYTES)
+            except EOFError:
                 result = None
+            except OSError:
+                # Oversized message (recv_bytes' maxlength) or a torn
+                # transport — either way the child produced no
+                # decodable result; fail closed with the cap named.
+                rejected_reason = (
+                    "child result payload unreadable or over the "
+                    f"{_MAX_RESULT_BYTES}-byte cap — refused"
+                )
+            else:
+                try:
+                    result = _loads_result(payload)
+                except Exception as exc:  # noqa: BLE001 — hostile bytes
+                    rejected_reason = (
+                        "restricted result decoder refused the child's "
+                        f"payload ({type(exc).__name__}: "
+                        f"{str(exc)[:200]})"
+                    )
         parent_conn.close()
 
         proc.join(timeout=0.5)
@@ -344,6 +418,17 @@ def run_isolated(
 
     if result is not None:
         return result
+    if rejected_reason is not None:
+        # A payload the restricted decoder refused is a HOSTILE-CHILD
+        # signal (or a result-shape bug), never laundered into a
+        # timeout or crash report.
+        return SymbolicResult(
+            succeeded=False,
+            reason=rejected_reason,
+            wall_seconds=time.monotonic() - t0,
+            states_explored=0,
+            metadata={"isolated": True, "rejected_payload": True},
+        )
     if timed_out:
         return SymbolicResult(
             succeeded=False,

@@ -280,3 +280,117 @@ def test_budget_overrun_still_reported_as_kill(monkeypatch):
     assert r.succeeded is False
     assert r.metadata.get("killed") is True
     assert "budget" in r.reason
+
+
+# ---------------------------------------------------------------------------
+# Restricted result decoding (the child's ONE channel into the parent)
+# ---------------------------------------------------------------------------
+# The child is sandboxed because its inputs are hostile binaries; a
+# plain pickle.loads on its output would hand a compromised child code
+# execution in the unsandboxed parent — strictly more power than the
+# filesystem/network vectors Landlock closes. The parent therefore
+# decodes with an unpickler that can construct only SymbolicResult.
+
+
+def _benign_result() -> "object":
+    """Child payload: a representative legitimate result (bytes witness
+    + nested builtin metadata, the richest shape engines produce)."""
+    from core.symbolic._types import SymbolicResult
+    return SymbolicResult(
+        succeeded=True,
+        reason="found reaching input",
+        wall_seconds=0.25,
+        concrete_input=b"\x00AAAA\xff",
+        states_explored=7,
+        metadata={"target_address": 0x401000,
+                  "register_snapshot": {"rip": "0x41414141"},
+                  "paths": [{"constraints": ["a<b"], "branch_count": 2}]},
+    )
+
+
+def _wrong_type_result() -> dict:
+    """Child payload for the shape-check direction: allowed pieces,
+    wrong top-level type."""
+    return {"succeeded": True, "reason": "not a SymbolicResult"}
+
+
+class _NotAResult:
+    """Child payload whose class the restricted decoder must refuse."""
+
+
+def _foreign_class_result() -> "_NotAResult":
+    return _NotAResult()
+
+
+def test_legit_result_round_trips_through_restricted_decoder():
+    from core.symbolic._isolate import run_isolated
+    r = run_isolated(
+        "core.symbolic.tests.test_isolate", "_benign_result", {},
+        timeout=60.0,
+    )
+    expected = _benign_result()
+    assert r == expected
+
+
+def test_restricted_decoder_refuses_code_execution_pickle(tmp_path: Path):
+    """A crafted pickle whose REDUCE target is a real callable must be
+    refused at find_class time — before the callable runs."""
+    import pickle
+
+    from core.symbolic._isolate import _loads_result
+
+    canary = tmp_path / "pwned"
+
+    class _Evil:
+        def __reduce__(self):
+            return (os.mkdir, (str(canary),))
+
+    payload = pickle.dumps(_Evil())
+    with pytest.raises(pickle.UnpicklingError, match="refusing to unpickle"):
+        _loads_result(payload)
+    assert not canary.exists(), (
+        "the malicious pickle's callable RAN — the decoder is not "
+        "restricting globals")
+
+
+def test_wrong_type_payload_rejected_end_to_end():
+    from core.symbolic._isolate import run_isolated
+    r = run_isolated(
+        "core.symbolic.tests.test_isolate", "_wrong_type_result", {},
+        timeout=60.0,
+    )
+    assert r.succeeded is False
+    assert r.metadata.get("rejected_payload") is True
+    assert "refused" in r.reason
+
+
+def test_foreign_class_payload_rejected_end_to_end():
+    from core.symbolic._isolate import run_isolated
+    r = run_isolated(
+        "core.symbolic.tests.test_isolate", "_foreign_class_result", {},
+        timeout=60.0,
+    )
+    assert r.succeeded is False
+    assert r.metadata.get("rejected_payload") is True
+
+
+def test_oversized_payload_rejected(monkeypatch):
+    """Cap direction: a payload over _MAX_RESULT_BYTES is refused
+    (the round-trip test above covers the under-cap direction)."""
+    import core.symbolic._isolate as iso
+    monkeypatch.setattr(iso, "_MAX_RESULT_BYTES", 4096)
+    r = iso.run_isolated(
+        "core.symbolic.tests.test_isolate", "_benign_result", {},
+        timeout=60.0,
+    )
+    # _benign_result pickles far under 4096 bytes — grow it instead.
+    assert r.succeeded is True  # sanity: small result still fits
+
+    monkeypatch.setattr(iso, "_MAX_RESULT_BYTES", 16)
+    r = iso.run_isolated(
+        "core.symbolic.tests.test_isolate", "_benign_result", {},
+        timeout=60.0,
+    )
+    assert r.succeeded is False
+    assert r.metadata.get("rejected_payload") is True
+    assert "cap" in r.reason
