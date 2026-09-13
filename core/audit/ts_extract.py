@@ -11,7 +11,10 @@ value_space_checker, dispatch_completeness, sibling_analysis.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 from typing import TYPE_CHECKING
@@ -419,22 +422,50 @@ def _classify_return_value(node, lang: str, src: bytes) -> str:
     return "other"
 
 
+# Every extract_* API parses its input; the consumers named in the
+# module docstring each call a different API on the SAME source, so an
+# uncached parse ran 4-6 times per file per run. Keyed on (path,
+# content hash) so edited source re-parses; bounded LRU because
+# consumers work file-at-a-time.
+_PARSE_CACHE: OrderedDict[tuple[str, str], tuple[Any, str, bytes]] = (
+    OrderedDict()
+)
+_PARSE_CACHE_MAX = 16
+_PARSE_CACHE_LOCK = threading.Lock()
+
+
 def _parse_file(file_path: str, source: str):
-    """Parse a file with tree-sitter. Returns (tree, lang, src_bytes) or None."""
+    """Parse a file with tree-sitter. Returns (tree, lang, src_bytes) or None.
+
+    Parses ANY supported language, including Python — callers that
+    prefer stdlib ast for .py (more precise) must branch before
+    calling this. Successful parses are cached per (path, content
+    hash); the cache is transparent to consumers.
+    """
     lang = language_for_file(file_path)
     if lang is None:
         return None
-    # Python: use stdlib ast (more precise). Only fall through for
-    # non-Python or when callers explicitly request tree-sitter.
     parser = _get_parser(lang)
     if parser is None:
         return None
     src = source.encode("utf-8", errors="replace")
+    key = (file_path, hashlib.sha256(src).hexdigest())
+    with _PARSE_CACHE_LOCK:
+        cached = _PARSE_CACHE.get(key)
+        if cached is not None:
+            _PARSE_CACHE.move_to_end(key)
+            return cached
     try:
         tree = parser.parse(src)
     except Exception:  # noqa: BLE001 — unparseable source: no extraction
         return None
-    return tree, lang, src
+    result = (tree, lang, src)
+    with _PARSE_CACHE_LOCK:
+        _PARSE_CACHE[key] = result
+        _PARSE_CACHE.move_to_end(key)
+        while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+            _PARSE_CACHE.popitem(last=False)
+    return result
 
 
 def _iter_functions(tree, lang: str, src: bytes, _file_path: str):

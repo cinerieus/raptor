@@ -700,3 +700,72 @@ class TestDeepNesting:
         lits = extract_string_literals("deep.c", src)
         assert lits is not None
         assert any(lit.value == "deep" for lit in lits)
+
+
+class TestParseCache:
+    """Each extract_* API used to re-parse the same source; the keyed
+    cache must make repeated extracts parse once, transparently."""
+
+    @requires_ts("go")
+    def test_repeated_extracts_parse_once(self, monkeypatch):
+        import core.audit.ts_extract as tse
+        tse._PARSE_CACHE.clear()
+        calls = {"n": 0}
+        real_get_parser = tse._get_parser
+
+        class CountingParser:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def parse(self, src):
+                calls["n"] += 1
+                return self._inner.parse(src)
+
+        def counting_get_parser(lang):
+            p = real_get_parser(lang)
+            return CountingParser(p) if p is not None else None
+
+        monkeypatch.setattr(tse, "_get_parser", counting_get_parser)
+        src = (
+            "func handle(p string) string {\n"
+            "\tx := decode(p)\n"
+            "\tx = check(x)\n"
+            "\treturn x\n"
+            "}\n"
+        )
+        try:
+            assert tse.extract_call_chains("a.go", src) is not None
+            assert tse.extract_function_returns("a.go", src) is not None
+            assert tse.extract_string_literals("a.go", src) is not None
+            assert calls["n"] == 1
+        finally:
+            tse._PARSE_CACHE.clear()
+
+    @requires_ts("go")
+    def test_changed_source_reparses(self, monkeypatch):
+        import core.audit.ts_extract as tse
+        tse._PARSE_CACHE.clear()
+        calls = {"n": 0}
+        real_get_parser = tse._get_parser
+
+        class CountingParser:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def parse(self, src):
+                calls["n"] += 1
+                return self._inner.parse(src)
+
+        monkeypatch.setattr(
+            tse, "_get_parser",
+            lambda lang: (
+                CountingParser(real_get_parser(lang))
+                if real_get_parser(lang) is not None else None
+            ),
+        )
+        try:
+            tse.extract_call_chains("a.go", "func a() {\n}\n")
+            tse.extract_call_chains("a.go", "func b() {\n}\n")
+            assert calls["n"] == 2
+        finally:
+            tse._PARSE_CACHE.clear()
