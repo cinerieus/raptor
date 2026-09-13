@@ -542,3 +542,26 @@ class TestCheckBudget:
             tmp_path, "src/ssl_sess.c", "ssl_session_cache_add", HYP,
         )
         assert res.outcome == "confirmed"
+
+
+class TestPackCollectionVerbsCache:
+    def test_pack_read_once_per_process(self, tmp_path, monkeypatch):
+        # The pack JSON was re-read and re-parsed on every check call.
+        import core.audit.resource_bounds as rb
+        import core.audit.vocab_packs as vp
+
+        pack_dir = tmp_path / "packs"
+        pack_dir.mkdir()
+        (pack_dir / "linux_kernel.json").write_text(
+            '{"collection_inserts": ["list_add"],'
+            ' "collection_removes": ["list_del"]}',
+        )
+        monkeypatch.setattr(vp, "_PACK_DIR", pack_dir)
+        monkeypatch.setattr(vp, "is_kernel_tree", lambda p: True)
+        rb._pack_collection_cache.clear()
+
+        first = rb._pack_collection_verbs(tmp_path)
+        assert first == (frozenset({"list_add"}), frozenset({"list_del"}))
+        # Cache must serve the second call — the file is gone.
+        (pack_dir / "linux_kernel.json").unlink()
+        assert rb._pack_collection_verbs(tmp_path) == first

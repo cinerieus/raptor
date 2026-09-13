@@ -245,19 +245,28 @@ def _inconclusive(reason: str, detail: str = "") -> BoundEvidence:
 # ── vocabulary (seeds < pack < learned) ─────────────────────────────
 
 
+# Parsed-pack memo (the vocab_packs._pack_cache pattern): the pack
+# ships with the repo and is immutable for the process lifetime, so
+# one read serves every check call. Failures stay uncached (retried).
+_pack_collection_cache: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+
+
 def _pack_collection_verbs(
     target_path: Path | None,
 ) -> tuple[frozenset[str], frozenset[str]]:
     """Channel-local read of the vocab pack's ``collection_inserts`` /
     ``collection_removes`` keys (data-file-only extension — the pack
     loader tolerates unknown keys and DomainVocabulary carries no
-    collection classes by design)."""
+    collection classes by design). Memoised per pack name."""
     if target_path is None:
         return frozenset(), frozenset()
     try:
         from .vocab_packs import _PACK_DIR, is_kernel_tree
         if not is_kernel_tree(target_path):
             return frozenset(), frozenset()
+        cached = _pack_collection_cache.get("linux_kernel")
+        if cached is not None:
+            return cached
         raw = json.loads(
             (_PACK_DIR / "linux_kernel.json").read_text(encoding="utf-8"),
         )
@@ -268,7 +277,9 @@ def _pack_collection_verbs(
         vals = raw.get(key) or []
         return frozenset(n for n in vals if isinstance(n, str) and n)
 
-    return _names("collection_inserts"), _names("collection_removes")
+    result = _names("collection_inserts"), _names("collection_removes")
+    _pack_collection_cache["linux_kernel"] = result
+    return result
 
 
 def learned_collection_pairs(
