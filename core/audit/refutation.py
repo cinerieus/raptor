@@ -25,6 +25,7 @@ import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -886,8 +887,6 @@ _TEARDOWN_DISCHARGEABLE_CWES = frozenset({
     "CWE-415", "CWE-416",
 })
 
-from pathlib import Path
-
 # Go internal-concurrency witness (goconc): the Go analog of the
 # race-protection discharge.  The C witness bails on Go sources, so a
 # race-family self-refutation on a Go function always floored even
@@ -1660,8 +1659,6 @@ def _record_floor_dominance(
         )
         return False
     try:
-        from pathlib import Path
-
         from core.analysis.reach_chokepoint import record_suppression
 
         line = getattr(outcome, "line", 0) or 0
