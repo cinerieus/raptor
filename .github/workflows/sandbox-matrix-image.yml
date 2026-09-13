@@ -64,16 +64,20 @@ on:
           Package cleanup instead of a build+publish. 'list-versions'
           enumerates every version of the GHCR package and deletes
           nothing (the safe default of the cleanup job);
-          'delete-all-versions' deletes every version, emptying the
-          package — e.g. to retire a wrongly-public package before a
-          fresh publish. 'none' is a normal build+publish dispatch.
+          'delete-package' deletes the versions it can (audited one by
+          one) and then the package itself — GHCR refuses to delete
+          the last tagged version of a container package, so emptying
+          a tagged package REQUIRES whole-package deletion. Use it to
+          retire a wrongly-public package; the next normal dispatch
+          recreates it and the visibility gate then governs. 'none' is
+          a normal build+publish dispatch.
         required: false
         default: 'none'
         type: choice
         options:
           - none
           - list-versions
-          - delete-all-versions
+          - delete-package
   schedule:
     # Weekly rebuild (Wed 04:00 UTC) so the ubuntu:24.04 base picks up
     # security patches even when the inputs don't change. One hour
@@ -231,27 +235,31 @@ jobs:
           done < /tmp/prune.tsv
 
   # Operator-dispatched package cleanup (never fires on push/schedule,
-  # and 'delete-all-versions' must be selected explicitly — the default
+  # and 'delete-package' must be selected explicitly — the default
   # dispatch input is a normal publish and the cleanup default is a
-  # list-only dry run). The CI created this package, so the CI can
-  # retire it: a workflow-created GHCR package grants the repo's
-  # workflow token admin access, and while the whole-package DELETE
-  # endpoint refuses GITHUB_TOKEN, per-VERSION deletion is the
-  # documented-supported path (the untagged prune above rides the same
-  # grant) — deleting every version empties the package, e.g. before a
-  # fresh publish replaces a package that surfaced public.
+  # list-only dry run). The CI created this package, so the CI attempts
+  # to retire it: a workflow-created GHCR package grants the repo's
+  # workflow token admin access. Per-VERSION deletion is the
+  # documented-safe path (the untagged prune above rides the same
+  # grant), but GHCR refuses to delete the LAST TAGGED version of a
+  # container package — emptying a tagged package therefore REQUIRES a
+  # terminal whole-package DELETE, whose GITHUB_TOKEN authority is
+  # less certain (historically PAT-only): the job attempts it and
+  # fails loud with the named PAT/UI remedy if refused. Use case:
+  # retiring a package that surfaced public so the next publish
+  # recreates it under the visibility gate.
   cleanup:
     if: |
       github.event_name == 'workflow_dispatch' &&
       (github.event.inputs.cleanup == 'list-versions' ||
-       github.event.inputs.cleanup == 'delete-all-versions')
+       github.event.inputs.cleanup == 'delete-package')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       packages: write             # per-version DELETE rides this grant
     steps:
-      - name: List package versions (and delete when explicitly confirmed)
+      - name: List package versions (and delete the package when explicitly confirmed)
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
@@ -273,13 +281,34 @@ jobs:
           while IFS=$'\t' read -r id created tags; do
             echo "   id=${id}  created=${created}  tags=${tags:-<untagged>}"
           done < /tmp/versions.tsv
-          if [ "${MODE}" != "delete-all-versions" ]; then
-            echo "== list-only mode: nothing deleted. Re-dispatch with cleanup=delete-all-versions to empty the package."
+          if [ "${MODE}" != "delete-package" ]; then
+            echo "== list-only mode: nothing deleted. Re-dispatch with cleanup=delete-package to retire the package."
             exit 0
           fi
+          # Per-version deletion first — the audited, documented-safe
+          # path (the untagged prune step rides the same grant). GHCR
+          # refuses to delete the LAST TAGGED version of a container
+          # package ("delete the package instead"), so that refusal is
+          # the EXPECTED handoff to the terminal whole-package DELETE,
+          # not an error; any other refusal stays fail-loud.
           while IFS=$'\t' read -r id created tags; do
             echo "== deleting version ${id} (tags: ${tags:-<untagged>})"
-            gh api -X DELETE "${base}/versions/${id}" \
-              || { echo "::error::failed to delete version ${id} — the workflow token may lack the delete grant on this package, or GHCR refused (it can refuse the last remaining version or heavily-downloaded public packages); finish the cleanup manually in the package settings."; exit 1; }
+            if ! err="$(gh api -X DELETE "${base}/versions/${id}" 2>&1)"; then
+              if printf '%s' "${err}" | grep -qi "last tagged version\|delete the package instead"; then
+                echo "== version ${id} is the last tagged version — GHCR requires whole-package deletion from here (expected)"
+                break
+              fi
+              echo "::error::failed to delete version ${id} (${err}) — the workflow token may lack the delete grant on this package; finish the cleanup manually in the package settings."
+              exit 1
+            fi
           done < /tmp/versions.tsv
-          echo "== deleted ${n} version(s); the package is now empty. Dispatch this workflow normally (cleanup=none) to publish afresh."
+          # Terminal whole-package DELETE. Version deletion is the
+          # documented-safe GITHUB_TOKEN path; whole-package authority
+          # is less certain (historically PAT-only) — attempt it and
+          # fail loud with the named remedy if refused.
+          echo "== deleting the package ${pkg} itself"
+          if ! err="$(gh api -X DELETE "${base}" 2>&1)"; then
+            echo "::error::whole-package DELETE refused (${err}). The workflow token may not hold this authority — delete the package once via its settings page (Danger Zone), or use an owner PAT with the delete:packages scope. Versions already deleted above stay deleted."
+            exit 1
+          fi
+          echo "== package ${pkg} deleted. The next normal dispatch (cleanup=none) recreates it; the publish job's visibility gate then governs and fails loud if it recreates public."
