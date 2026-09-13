@@ -2317,10 +2317,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         prior_claims_per_function=int(
             run_cfg.get("prior_claims_per_function", 3)
         ),
-        max_workers=(
-            args.max_workers if args.max_workers is not None
-            else int(run_cfg.get("max_workers") or 0)
-        ),
+        max_workers=_resume_max_workers(args.max_workers, run_cfg),
     )
 
     print(f"\nResuming audit of {target_path}", flush=True)
@@ -2374,6 +2371,19 @@ def _apply_supervisor_bound(
         flush=True,
     )
     return bound.bound_s
+
+
+def _resume_max_workers(cli_value: int | None, run_cfg: dict) -> int:
+    """Worker count for a resume segment: an explicit --max-workers on
+    the resume invocation wins for THIS segment only; otherwise the
+    original run's persisted value applies; otherwise 0 (transport-
+    derived auto)."""
+    if cli_value is not None:
+        return cli_value
+    try:
+        return int(run_cfg.get("max_workers") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _max_workers_arg(value: str) -> int:

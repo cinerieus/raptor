@@ -86,3 +86,47 @@ class TestReachesOrchestratorConfig:
             mode=ReviewMode.ENSEMBLE,
         )
         assert config.max_workers == 0
+
+
+class TestResumeResolution:
+    def test_cli_override_wins_for_segment(self):
+        mod = _load_cli()
+        assert mod._resume_max_workers(4, {"max_workers": 12}) == 4
+
+    def test_persisted_value_applies_without_override(self):
+        mod = _load_cli()
+        assert mod._resume_max_workers(None, {"max_workers": 12}) == 12
+
+    def test_defaults_to_auto_when_unpersisted(self):
+        mod = _load_cli()
+        assert mod._resume_max_workers(None, {}) == 0
+        assert mod._resume_max_workers(None, {"max_workers": None}) == 0
+        assert mod._resume_max_workers(None, {"max_workers": "bogus"}) == 0
+
+
+class TestRunConfigPersistence:
+    def test_run_config_carries_max_workers(self, tmp_path):
+        from types import SimpleNamespace
+        mod = _load_cli()
+        args = SimpleNamespace(
+            scope=None, scope_floor=True, pin=None, strategy=None,
+            budget=None, model=None, max_cost=None, max_time=None,
+            review_passes=1, batch_sloc_threshold=None,
+            include_kinds=None, adversarial=False, rank_gaps=False,
+            edges=False, max_propagation_depth=None, subsystem_depth=0,
+            no_validate=False, no_binary_oracle=False,
+            annotations_dir=None, codeql_db=None, dynamic=False,
+            no_dynamic=False, no_verdict_reuse=False, pre_scan=False,
+            no_caller_contract_context=False,
+            no_caller_contract_demotion=False, schedule="cost",
+            no_on_demand_synthesis=False, no_vendored_triage=False,
+            probe_determine_value=False, no_environment_breaker=False,
+            deepen_reserve=None, prior_journal=None, prior_claims=3,
+            max_workers=6,
+        )
+        cfg = mod._run_config_from_args(args, tmp_path)
+        assert cfg["max_workers"] == 6
+        # Round trip through the resume resolution: the persisted
+        # value drives the next segment unless overridden.
+        assert mod._resume_max_workers(None, cfg) == 6
+        assert mod._resume_max_workers(2, cfg) == 2
