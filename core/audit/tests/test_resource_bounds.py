@@ -521,3 +521,24 @@ class TestCallerWalkDeadline:
         )
         assert witness is None
         assert receipts == []
+
+
+class TestCheckBudget:
+    def test_zero_budget_bails_inconclusive(self, tmp_path):
+        # budget_s was accepted-and-deleted: the walk ran deadline-free
+        # regardless. A zero budget must stop before adjudicating and
+        # degrade to inconclusive (never refuted/confirmed on no work).
+        _write(tmp_path, "src/ssl_sess.c", CVE_2024_2511)
+        res = run_resource_bounds_check(
+            tmp_path, "src/ssl_sess.c", "ssl_session_cache_add", HYP,
+            budget_s=0.0,
+        )
+        assert res.outcome == "inconclusive"
+        assert "budget" in res.reason
+
+    def test_no_budget_unchanged(self, tmp_path):
+        _write(tmp_path, "src/ssl_sess.c", CVE_2024_2511)
+        res = run_resource_bounds_check(
+            tmp_path, "src/ssl_sess.c", "ssl_session_cache_add", HYP,
+        )
+        assert res.outcome == "confirmed"

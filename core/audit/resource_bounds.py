@@ -68,6 +68,7 @@ REASON_GUARD_UNDECIDED = "guard-undecided"
 REASON_CENSUS_DEGRADED = "census-degraded"
 REASON_LANGUAGE_UNSUPPORTED = "language-unsupported"
 REASON_HYPOTHESIS_UNBINDABLE = "hypothesis-unbindable"
+REASON_BUDGET_EXHAUSTED = "budget-exhausted"
 
 INCONCLUSIVE_REASONS = frozenset({
     REASON_VOCAB_UNBOUND,
@@ -1082,9 +1083,14 @@ def run_resource_bounds_check(
     budget_s: float | None = None,
 ) -> BoundEvidence:
     """Adjudicate one resource-bounds hypothesis. See module docstring
-    for verdict semantics. ``budget_s`` is accepted for signature
-    stability (the phase-2 Joern cross-file leg's clamp)."""
-    del budget_s  # phase-2 Joern leg parameter
+    for verdict semantics. ``budget_s`` bounds the site walk: on
+    exhaustion the check degrades to the best verdict already earned,
+    or inconclusive when no site was adjudicated — never to
+    refuted/confirmed on work not done."""
+    deadline = (
+        None if budget_s is None
+        else time.monotonic() + max(0.0, float(budget_s))
+    )
     try:
         from .fail_open_lang import language_for_path
         language = language_for_path(file_path)
@@ -1154,6 +1160,14 @@ def run_resource_bounds_check(
 
     best: BoundEvidence | None = None
     for site in sites:
+        if deadline is not None and time.monotonic() >= deadline:
+            if best is not None:
+                return best
+            return _inconclusive(
+                REASON_BUDGET_EXHAUSTED,
+                f"budget of {budget_s}s exhausted before adjudicating "
+                f"{function_name}",
+            )
         res = _adjudicate_site(
             site, source, file_path, function_name, language,
             segment_lines=segment_lines,
