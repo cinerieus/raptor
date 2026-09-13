@@ -77,11 +77,19 @@ class DescribeReport:
     # tarball/zip (extracted on the fly into a temp dir before
     # inference). None when the target was a plain directory.
     archive_label: str | None = None
+    # Full path of that original archive. The renderers use it for
+    # the "to start analysis" pointer: for a cache-miss archive the
+    # ``target_shape.target_path`` extraction dir is DELETED by the
+    # CLI right after rendering, so a command referencing it would
+    # point at a path that no longer exists — analysis commands
+    # accept the archive itself.
+    archive_path: Path | None = None
 
 
 def build_describe_report(
     target_path: Path,
     archive_label: str | None = None,
+    archive_path: Path | None = None,
 ) -> DescribeReport:
     """Compose the substrates: target shape (#17 catalog +
     language/build detectors), tool readiness, catalog
@@ -89,7 +97,8 @@ def build_describe_report(
 
     ``archive_label`` is the original archive basename when the
     caller extracted an archive to ``target_path`` before
-    calling here. None for plain-directory targets.
+    calling here; ``archive_path`` its full path. None for
+    plain-directory targets.
     """
     shape = infer_target_shape(target_path)
     checks = check_tool_readiness(shape)
@@ -101,6 +110,7 @@ def build_describe_report(
         target_type_defaults=preview,
         estimate_summary=estimate,
         archive_label=archive_label,
+        archive_path=archive_path,
     )
 
 
@@ -395,12 +405,17 @@ def format_text(report: DescribeReport) -> str:
     # ``--repo`` value substituted with the resolved target path
     # so operators can copy the line directly (rather than the
     # pre-fix ``<target>`` placeholder which forced them to
-    # substitute by hand).
+    # substitute by hand). For archive targets, point at the
+    # archive itself (analysis commands extract archives
+    # themselves): a cache-miss extraction dir is deleted the
+    # moment the report is printed, so a command naming it would
+    # fail with "path does not exist".
+    analysis_target = report.archive_path or s.target_path
     lines.append("")
     lines.append("For host-level setup, run `raptor doctor`.")
     lines.append(
         f"To start analysis, run `raptor.py agentic --repo "
-        f"{s.target_path}` (runs sandboxed)."
+        f"{analysis_target}` (runs sandboxed)."
     )
 
     return "\n".join(lines)
@@ -465,6 +480,10 @@ def format_json(report: DescribeReport) -> str:
         ),
         "estimate_summary": report.estimate_summary,
         "archive_label": report.archive_label,
+        "archive_path": (
+            str(report.archive_path)
+            if report.archive_path is not None else None
+        ),
         # Signal-based recommendations — sibling to the catalog's
         # static "pipeline_names" (in target_type_defaults) but
         # derived from THIS tree's detected signals. RAPTOR

@@ -79,6 +79,11 @@ def describe_main(
         )
         report = build_describe_report(
             target_path, archive_label=archive_label,
+            # Full archive path: renderers point "start analysis" at
+            # the archive itself, because for a cache miss the
+            # extraction dir below is deleted in this function's
+            # ``finally`` before the operator can act on it.
+            archive_path=(raw_path if archive_label else None),
         )
         if json_output:
             stdout.write(format_json(report))

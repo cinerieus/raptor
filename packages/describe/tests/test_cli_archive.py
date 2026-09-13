@@ -317,3 +317,64 @@ class TestRaptorDescribeArchiveE2E:
         )
         assert result.returncode == 0, result.stderr
         assert "Source: archive proj.tar.gz" in result.stdout
+
+
+class TestArchiveAnalysisPointer:
+    """The copy-pastable "To start analysis" command must reference a
+    path that still exists once the report is printed."""
+
+    def test_start_analysis_line_points_at_archive_not_tmpdir(
+        self, tmp_path,
+    ):
+        """Cache-miss archive describe extracts into a temp dir that
+        the CLI deletes right after rendering — the recommended
+        command must name the ARCHIVE (analysis commands extract
+        archives themselves), never the doomed extraction dir."""
+        src = tmp_path / "proj"
+        _make_c_daemon_source(src)
+        archive = tmp_path / "proj.tar.gz"
+        _make_tarball(src, archive)
+
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        rc = describe_main(
+            str(archive), json_output=False,
+            stdout=out_buf, stderr=err_buf,
+        )
+        assert rc == 0, err_buf.getvalue()
+        out = out_buf.getvalue()
+        line = next(
+            ln for ln in out.splitlines() if "To start analysis" in ln
+        )
+        assert f"--repo {archive}" in line
+        # The path in the recommended command exists after describe.
+        repo_arg = line.split("--repo ", 1)[1].split("`", 1)[0].strip()
+        assert Path(repo_arg).exists(), (
+            f"recommended --repo path is gone: {repo_arg}"
+        )
+
+    def test_directory_target_still_points_at_directory(self, tmp_path):
+        src = tmp_path / "proj"
+        _make_c_daemon_source(src)
+        out_buf = io.StringIO()
+        rc = describe_main(
+            str(src), json_output=False,
+            stdout=out_buf, stderr=io.StringIO(),
+        )
+        assert rc == 0
+        out = out_buf.getvalue()
+        assert f"--repo {src.resolve()}" in out
+
+    def test_archive_path_surfaces_in_json(self, tmp_path):
+        src = tmp_path / "proj"
+        _make_c_daemon_source(src)
+        archive = tmp_path / "proj.tar.gz"
+        _make_tarball(src, archive)
+        out_buf = io.StringIO()
+        rc = describe_main(
+            str(archive), json_output=True,
+            stdout=out_buf, stderr=io.StringIO(),
+        )
+        assert rc == 0
+        doc = json.loads(out_buf.getvalue())
+        assert doc["archive_path"] == str(archive.resolve())
