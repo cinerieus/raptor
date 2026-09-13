@@ -2468,6 +2468,63 @@ class TestQuarantineStalePrior:
         assert prior.contracts[0].state == "stale"
 
 
+class TestCollectSecurityContextTexts:
+    """Recursive, capped source collection for the security-context
+    marker scan — the top-level-only iterdir() shape silently lost
+    the context on every target that keeps sources in subdirs."""
+
+    def test_nested_sources_collected(self, tmp_path: Path) -> None:
+        from core.concepts.study import (
+            _collect_security_context_texts,
+            infer_security_context,
+        )
+
+        sub = tmp_path / "src" / "net"
+        sub.mkdir(parents=True)
+        (sub / "server.c").write_text(
+            "s = accept(fd, NULL, NULL);\nrecv(s, buf, n, 0);\n",
+            encoding="utf-8",
+        )
+        texts = _collect_security_context_texts(tmp_path)
+        assert "src/net/server.c" in texts
+        sc = infer_security_context(texts)
+        assert sc is not None
+        assert sc.attack_surface == "network"
+
+    def test_same_basename_does_not_collapse(self, tmp_path: Path) -> None:
+        from core.concepts.study import _collect_security_context_texts
+
+        for d in ("a", "b"):
+            (tmp_path / d).mkdir()
+            (tmp_path / d / "util.c").write_text(f"int {d};\n")
+        texts = _collect_security_context_texts(tmp_path)
+        assert set(texts) == {"a/util.c", "b/util.c"}
+
+    def test_cap_bounds_the_scan(self, tmp_path: Path, monkeypatch) -> None:
+        import core.concepts.study as study_mod
+
+        monkeypatch.setattr(
+            study_mod, "_SECURITY_CONTEXT_MAX_FILES", 3)
+        for i in range(6):
+            (tmp_path / f"f{i}.c").write_text(f"int x{i};\n")
+        texts = study_mod._collect_security_context_texts(tmp_path)
+        assert len(texts) == 3
+        # Deterministic sample: sorted order, not directory order.
+        assert set(texts) == {"f0.c", "f1.c", "f2.c"}
+
+    def test_under_cap_reads_everything(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import core.concepts.study as study_mod
+
+        monkeypatch.setattr(
+            study_mod, "_SECURITY_CONTEXT_MAX_FILES", 10)
+        for i in range(4):
+            (tmp_path / f"f{i}.c").write_text(f"int x{i};\n")
+        texts = study_mod._collect_security_context_texts(tmp_path)
+        assert len(texts) == 4
+
+
 class TestStampRelatedStrategies:
     def test_stamps_unstamped_concepts_from_text(self):
         from core.concepts.model import Concept, DomainModel, Evidence

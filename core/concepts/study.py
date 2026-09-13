@@ -3233,6 +3233,58 @@ _LOCAL_SOCKET_MARKERS = frozenset({
 })
 
 
+# Caps for the security-context marker scan. Both directions matter
+# for each: too low and a large target's marker-bearing files (socket
+# setup, capability checks) fall outside the sample, silently losing
+# the severity-context prompt section; too high and every study pass
+# walks/reads an unbounded amount of tree for a coarse five-field
+# heuristic (a study-list source_root of "/" must stay cheap). 200
+# files of markers saturates the classifier's thresholds (>=2 kernel
+# hits, any-of for the rest); 1000 directories reaches the source
+# dirs of every real layout seen so far.
+_SECURITY_CONTEXT_MAX_FILES = 200
+_SECURITY_CONTEXT_MAX_DIRS = 1000
+
+
+def _collect_security_context_texts(src_root: Path) -> dict[str, str]:
+    """Gather C source texts for ``infer_security_context``.
+
+    Recursive with file AND directory caps — the previous top-level
+    ``iterdir()`` scan missed every target that keeps sources in
+    subdirectories (the common layout), so ``security_context`` was
+    silently None and the severity-context prompt section never
+    rendered. The walk is top-down with sorted entries (deterministic
+    sample under the caps), skips dot-directories (VCS internals
+    carry no markers), and does not follow directory symlinks. Keys
+    are root-relative so same-named files in different directories
+    don't collapse.
+    """
+    source_texts: dict[str, str] = {}
+    dirs_seen = 0
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirs_seen += 1
+        if dirs_seen > _SECURITY_CONTEXT_MAX_DIRS:
+            break
+        dirnames[:] = sorted(
+            d for d in dirnames if not d.startswith(".")
+        )
+        for name in sorted(filenames):
+            if not name.endswith((".c", ".h")):
+                continue
+            fp = Path(dirpath) / name
+            try:
+                if not fp.is_file():
+                    continue
+                source_texts[str(fp.relative_to(src_root))] = (
+                    fp.read_text(encoding="utf-8", errors="replace")
+                )
+            except (OSError, ValueError):
+                continue
+            if len(source_texts) >= _SECURITY_CONTEXT_MAX_FILES:
+                return source_texts
+    return source_texts
+
+
 def infer_security_context(
     source_texts: dict[str, str],
 ) -> SecurityContext | None:
@@ -3840,15 +3892,7 @@ def run_study(
     try:
         src_root = Path(source_root) if source_root else None
         if src_root and src_root.is_dir():
-            source_texts = {}
-            for fp in src_root.iterdir():
-                if fp.is_file() and fp.suffix in (".c", ".h"):
-                    try:
-                        source_texts[fp.name] = fp.read_text(
-                            encoding="utf-8", errors="replace",
-                        )
-                    except OSError:
-                        pass
+            source_texts = _collect_security_context_texts(src_root)
             if source_texts:
                 sc = infer_security_context(source_texts)
                 if sc and on_progress:
