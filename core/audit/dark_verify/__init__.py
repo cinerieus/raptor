@@ -17,9 +17,14 @@ Anti-hallucination design:
     param_types / return_type (type spellings), Java imports
     (dotted names). Free-form code never reaches the harness.
   - The harness generates the test from a fixed template.
-  - The import/source path is validated against the finding's file,
-    and the witness is bound to the finding's FUNCTION — a response
-    naming any other function is rejected, never executed.
+  - The import/source path is validated against the finding's file
+    in EVERY language lane — Python's module path, the compiled
+    lanes' spliced source, Java's class stem, and the require-shaped
+    lanes (JS/TS/Ruby/PHP/Lua/Perl/Go), where a require_path /
+    use_module / import_path override must resolve to the finding's
+    file. The witness is likewise bound to the finding's FUNCTION —
+    a response naming any other function or module is rejected,
+    never executed.
   - The return value / crash signal is captured independently and
     authenticated: the harness embeds a per-execution token
     (generated in-process after the LLM response is parsed) in its

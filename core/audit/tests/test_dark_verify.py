@@ -4289,12 +4289,12 @@ class TestValidateSpecLoadPaths:
         assert "require_path" in err
 
     @pytest.mark.parametrize("field,language,file,value", [
-        ("require_path", "ruby", "a.rb", "lib/auth"),
-        ("require_path", "javascript", "a.js", "./parser"),
-        ("require_path", "lua", "a.lua", "lib.auth"),
+        ("require_path", "ruby", "lib/auth.rb", "lib/auth"),
+        ("require_path", "javascript", "parser.js", "./parser"),
+        ("require_path", "lua", "lib/auth.lua", "lib.auth"),
         ("use_path", "rust", "a.rs", "std::collections::HashMap"),
-        ("use_module", "perl", "A.pm", "MathUtil"),
-        ("import_path", "go", "a.go", "github.com/user/repo/pkg"),
+        ("use_module", "perl", "MathUtil.pm", "MathUtil"),
+        ("import_path", "go", "pkg/a.go", "github.com/user/repo/pkg"),
     ])
     def test_legitimate_values_pass(self, field, language, file, value):
         assert validate_spec(self._spec({field: value}, language, file)) is None
@@ -4305,14 +4305,14 @@ class TestValidateSpecLoadPaths:
         root = tmp_path / "root"
         root.mkdir()
         (root / "esc").symlink_to(outside)
-        spec = self._spec({"require_path": "esc/mod"})
+        spec = self._spec({"require_path": "esc/mod"}, file="esc/mod.rb")
         assert validate_spec(spec) is None  # lexically clean
         err = validate_spec(spec, root)
         assert err is not None
         assert "escapes target root" in err
 
     def test_confined_require_path_passes_with_root(self, tmp_path):
-        spec = self._spec({"require_path": "lib/auth"})
+        spec = self._spec({"require_path": "lib/auth"}, file="lib/auth.rb")
         assert validate_spec(spec, tmp_path) is None
 
     def test_execute_witness_rejects_traversal_require_path(self, tmp_path):
@@ -4322,6 +4322,72 @@ class TestValidateSpecLoadPaths:
         r = execute_witness(spec, tmp_path)
         assert r.verdict == "error"
         assert "spec validation failed" in r.match_detail
+
+
+class TestModuleBindingToFindingFile:
+    """The module reference must resolve to the finding's FILE: a
+    witness pointed at a lookalike in-tree module exporting a
+    same-named function would execute the wrong code and mint
+    confirmed/refuted for the original finding."""
+
+    @staticmethod
+    def _spec(field, value, language, file):
+        return DarkWitnessSpec(
+            finding_key="f1", file=file, function="check",
+            language=language, lang_config={field: value},
+        )
+
+    @pytest.mark.parametrize("field,language,file,wrong", [
+        ("require_path", "javascript", "src/auth.js", "./src/lookalike"),
+        ("require_path", "typescript", "src/auth.ts", "./src/lookalike"),
+        ("require_path", "ruby", "lib/auth.rb", "lib/lookalike"),
+        ("require_path", "php", "src/auth.php", "src/lookalike.php"),
+        ("require_path", "lua", "lib/auth.lua", "lib.lookalike"),
+        ("use_module", "perl", "lib/Auth.pm", "lib::Lookalike"),
+        ("import_path", "go", "pkg/auth/a.go", "example.com/m/pkg/other"),
+    ])
+    def test_wrong_module_rejected(self, field, language, file, wrong):
+        err = validate_spec(self._spec(field, wrong, language, file))
+        assert err is not None
+        assert "not bound to the finding's file" in err
+
+    @pytest.mark.parametrize("field,language,file,value", [
+        ("require_path", "javascript", "src/auth.js", "./src/auth"),
+        ("require_path", "javascript", "src/auth/index.js", "./src/auth"),
+        ("require_path", "typescript", "src/auth.ts", "./src/auth"),
+        ("require_path", "ruby", "lib/auth.rb", "lib/auth"),
+        ("require_path", "ruby", "lib/auth.rb", "lib/auth.rb"),
+        ("require_path", "php", "src/auth.php", "src/auth.php"),
+        ("require_path", "lua", "lib/auth.lua", "lib.auth"),
+        ("require_path", "lua", "lib/auth/init.lua", "lib.auth"),
+        ("use_module", "perl", "lib/Auth.pm", "lib::Auth"),
+        ("import_path", "go", "pkg/auth/a.go", "example.com/m/pkg/auth"),
+        ("import_path", "go", "pkg/auth/a.go", "pkg/auth"),
+    ])
+    def test_bound_module_accepted(self, field, language, file, value):
+        assert validate_spec(self._spec(field, value, language, file)) is None
+
+    def test_empty_override_uses_derived_default(self):
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="lib/auth.rb", function="check",
+            language="ruby", lang_config={},
+        )
+        assert validate_spec(spec) is None
+
+    def test_wrong_module_witness_errors_not_verdicts(self, tmp_path):
+        src = tmp_path / "lib"
+        src.mkdir()
+        (src / "auth.rb").write_text("def check; end\n", encoding="utf-8")
+        (src / "lookalike.rb").write_text(
+            "def check; true; end\n", encoding="utf-8",
+        )
+        spec = DarkWitnessSpec(
+            finding_key="f1", file="lib/auth.rb", function="check",
+            language="ruby", lang_config={"require_path": "lib/lookalike"},
+        )
+        r = execute_witness(spec, tmp_path)
+        assert r.verdict == "error"
+        assert r.verdict not in ("confirmed", "refuted")
 
 
 # -- scripting-language string args render as data, never code ----------------

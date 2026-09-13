@@ -561,6 +561,92 @@ def validate_spec(
         if err:
             return err
 
+    return _module_binding_error(spec, lang)
+
+
+def _module_binding_error(spec: DarkWitnessSpec, lang: str) -> str | None:
+    """Bind require/use/import module overrides to the finding's FILE.
+
+    Python (validate_import_path), C/C++/Rust (compiled against
+    spec.file), and Java (class-stem check above) already tie the load
+    target to the finding's file. The require-shaped languages only
+    charset/containment-checked the LLM-supplied module reference — a
+    witness pointing require_path at a lookalike module exporting a
+    same-named function would execute the WRONG code and mint a
+    confirmed/refuted verdict for the original finding. Accept an
+    override only when it is the harness-derived default or resolves
+    (require semantics, including index/init entry files) to the
+    finding's file; anything else is rejected, never executed.
+    """
+    lc = spec.lang_config
+    file = spec.file.replace("\\", "/")
+
+    def _reject(field: str, value: str) -> str:
+        return (
+            f"{field} {value!r} not bound to the finding's file "
+            f"{spec.file!r}"
+        )
+
+    if lang in ("javascript", "typescript"):
+        rp = lc.get("require_path", "")
+        if not rp:
+            return None
+        exts = (
+            (".js", ".mjs", ".cjs") if lang == "javascript"
+            else (".ts", ".tsx", ".mts", ".cts", ".js")
+        )
+        stem = file
+        for ext in exts:
+            if file.endswith(ext):
+                stem = file[: -len(ext)]
+                break
+        cand = rp[2:] if rp.startswith("./") else rp
+        if cand not in (file, stem) and not any(
+            file == f"{cand}/index{ext}" for ext in exts
+        ):
+            return _reject("require_path", rp)
+    elif lang == "ruby":
+        rp = lc.get("require_path", "")
+        if not rp:
+            return None
+        stem = file[:-3] if file.endswith(".rb") else file
+        if rp not in (file, stem):
+            return _reject("require_path", rp)
+    elif lang == "php":
+        rp = lc.get("require_path", "")
+        if rp and rp != file:
+            return _reject("require_path", rp)
+    elif lang == "lua":
+        rp = lc.get("require_path", "")
+        if not rp:
+            return None
+        stem = file[:-4] if file.endswith(".lua") else file
+        derived = stem.replace("/", ".")
+        if rp != derived and file != rp.replace(".", "/") + "/init.lua":
+            return _reject("require_path", rp)
+    elif lang == "perl":
+        um = lc.get("use_module", "")
+        if not um:
+            return None
+        # The harness puts ONLY the target root on @INC, so the one
+        # module reference that loads spec.file is the file-derived
+        # spelling ("lib/Auth.pm" -> "lib::Auth"). A bare suffix form
+        # would let a root-level lookalike shadow the finding's file.
+        rel = um.replace("::", "/")
+        if file not in (rel + ".pm", rel + ".pl"):
+            return _reject("use_module", um)
+    elif lang == "go":
+        ip = lc.get("import_path", "")
+        if not ip:
+            return None
+        pkg_dir = str(PurePosixPath(file).parent)
+        if pkg_dir in (".", ""):
+            # Root-package finding: the import path is the module path
+            # itself, which is not derivable from spec.file alone.
+            return None
+        if ip != pkg_dir and not ip.endswith("/" + pkg_dir):
+            return _reject("import_path", ip)
+
     return None
 
 
