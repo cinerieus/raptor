@@ -3995,6 +3995,33 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                     fd_target = os.readlink(f"/proc/self/fd/{fd}")
                 except OSError:
                     fd_target = ""
+                    # No procfs (macOS): resolve via F_GETPATH, pinned
+                    # by dev/ino identity against the descriptor (the
+                    # _reopen_write_only pattern) so a rename between
+                    # the fcntl and the stat cannot smuggle a
+                    # different file past the policy compare. Without
+                    # this, EVERY regular-file/dir fd on darwin fell
+                    # through to the anonymous-inode refusal — a
+                    # false "unresolvable" diagnosis that made
+                    # pass_fds_declared=True the de-facto workaround
+                    # (weakening the audit this gate provides).
+                    # Unpinnable fds still refuse below (fail closed).
+                    _getpath = getattr(_fcntl, "F_GETPATH", None)
+                    if _getpath is not None:
+                        try:
+                            _raw = _fcntl.fcntl(fd, _getpath,
+                                                bytes(1024))
+                            _cand = _raw.split(b"\x00", 1)[0].decode(
+                                sys.getfilesystemencoding(),
+                                "surrogateescape")
+                            _st_path = os.lstat(_cand)
+                            _st_fd = os.fstat(fd)
+                            if ((_st_fd.st_dev, _st_fd.st_ino)
+                                    == (_st_path.st_dev,
+                                        _st_path.st_ino)):
+                                fd_target = _cand
+                        except OSError:
+                            pass
                 if not fd_target.startswith("/") or fd_target.endswith(
                         " (deleted)"):
                     return (f"anonymous or unlinked inode "
