@@ -234,6 +234,179 @@ class TestFailRunAndExit:
 
 
 # ---------------------------------------------------------------------------
+# _cli_entry lifecycle backstop
+# ---------------------------------------------------------------------------
+
+
+class TestCliEntryBackstop:
+    """Uncaught exceptions and Ctrl-C at the entry point must close the
+    lifecycle — pre-fix only SandboxSetupError was handled and the run
+    marker stayed at "running" forever on a direct invocation."""
+
+    def test_uncaught_exception_stamps_failed_and_reraises(
+            self, tmp_path):
+        agentic = _import_agentic()
+        calls = []
+        with patch.object(agentic, "main",
+                          side_effect=RuntimeError("phase exploded")), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run",
+                      side_effect=lambda out_dir, reason: calls.append(
+                          (out_dir, reason))), \
+                pytest.raises(RuntimeError):
+            agentic._cli_entry()
+        assert calls and calls[0][0] == tmp_path
+        assert "RuntimeError" in calls[0][1]
+
+    def test_keyboard_interrupt_cancels_and_exits_130(self, tmp_path):
+        agentic = _import_agentic()
+        calls = []
+        with patch.object(agentic, "main",
+                          side_effect=KeyboardInterrupt), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.cancel_run",
+                      side_effect=lambda out_dir: calls.append(out_dir)), \
+                pytest.raises(SystemExit) as exc:
+            agentic._cli_entry()
+        assert exc.value.code == 130
+        assert calls == [tmp_path]
+
+    def test_nonzero_system_exit_stamps_failed(self, tmp_path):
+        # A bare sys.exit(N) deep in a phase is not an Exception — it
+        # sailed through the handler chain with the marker "running".
+        agentic = _import_agentic()
+        calls = []
+        with patch.object(agentic, "main",
+                          side_effect=SystemExit(3)), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run",
+                      side_effect=lambda out_dir, reason: calls.append(
+                          (out_dir, reason))), \
+                pytest.raises(SystemExit) as exc:
+            agentic._cli_entry()
+        assert exc.value.code == 3
+        assert calls and "3" in calls[0][1]
+
+    def test_zero_system_exit_never_stamps(self, tmp_path):
+        agentic = _import_agentic()
+        with patch.object(agentic, "main",
+                          side_effect=SystemExit(0)), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run") as fail_run, \
+                pytest.raises(SystemExit) as exc:
+            agentic._cli_entry()
+        assert exc.value.code == 0
+        assert not fail_run.called
+
+    def test_backstop_never_clobbers_a_specific_reason(self, tmp_path):
+        # _fail_run_and_exit stamps a precise reason then sys.exit(1);
+        # the SystemExit backstop must not overwrite it with the
+        # generic "exited with code 1".
+        import json
+        agentic = _import_agentic()
+        from core.run.metadata import RUN_METADATA_FILE
+        (tmp_path / RUN_METADATA_FILE).write_text(json.dumps({
+            "status": "failed", "extra": {"error": "specific reason"},
+        }), encoding="utf-8")
+        with patch.object(agentic, "main",
+                          side_effect=SystemExit(1)), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run") as fail_run, \
+                pytest.raises(SystemExit):
+            agentic._cli_entry()
+        assert not fail_run.called
+
+    def test_base_exception_stamps_failed_and_reraises(self, tmp_path):
+        agentic = _import_agentic()
+
+        class Escape(BaseException):
+            pass
+
+        calls = []
+        with patch.object(agentic, "main", side_effect=Escape("gone")), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run",
+                      side_effect=lambda out_dir, reason: calls.append(
+                          reason)), \
+                pytest.raises(Escape):
+            agentic._cli_entry()
+        assert calls == ["uncaught Escape: gone"]
+
+    def test_raising_dunder_str_still_stamps(self, tmp_path):
+        # A hostile/broken __str__ on the escaping exception must not
+        # defeat the marker write.
+        agentic = _import_agentic()
+
+        class Hostile(Exception):
+            def __str__(self):
+                raise RuntimeError("nope")
+
+        calls = []
+        with patch.object(agentic, "main", side_effect=Hostile()), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", tmp_path), \
+                patch("core.run.fail_run",
+                      side_effect=lambda out_dir, reason: calls.append(
+                          reason)), \
+                pytest.raises(Hostile):
+            agentic._cli_entry()
+        assert calls == ["uncaught Hostile"]
+
+    def test_unarmed_backstop_never_touches_a_marker(self):
+        # Failure BEFORE start_run (argparse, git init): there is no
+        # run to close; the backstop must stay quiet.
+        agentic = _import_agentic()
+        with patch.object(agentic, "main",
+                          side_effect=RuntimeError("pre-lifecycle")), \
+                patch.object(agentic, "_LIFECYCLE_OUT_DIR", None), \
+                patch("core.run.fail_run") as fail_run, \
+                pytest.raises(RuntimeError):
+            agentic._cli_entry()
+        assert not fail_run.called
+
+    def test_clean_return_exits_zero_without_backstop(self):
+        agentic = _import_agentic()
+        with patch.object(agentic, "main", return_value=0), \
+                patch("core.run.fail_run") as fail_run, \
+                patch("core.run.cancel_run") as cancel_run, \
+                pytest.raises(SystemExit) as exc:
+            agentic._cli_entry()
+        assert exc.value.code == 0
+        assert not fail_run.called and not cancel_run.called
+
+    def test_subprocess_crash_leaves_no_running_marker(self, tmp_path):
+        # End-to-end shape of the original defect: a direct invocation
+        # whose pipeline raises after start_run must leave the marker
+        # terminal, not "running".
+        import json
+        out = tmp_path / "agentic_run"
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(_RAPTOR_ROOT)!r})\n"
+            "import raptor_agentic as ra\n"
+            "from pathlib import Path\n"
+            f"out = Path({str(out)!r})\n"
+            "def boom():\n"
+            "    out.mkdir(parents=True, exist_ok=True)\n"
+            "    from core.run import start_run\n"
+            "    start_run(out, 'agentic', target=str(out))\n"
+            "    ra._LIFECYCLE_OUT_DIR = out\n"
+            "    raise RuntimeError('phase exploded')\n"
+            "ra.main = boom\n"
+            "ra._cli_entry()\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=_RAPTOR_ROOT, capture_output=True, text=True,
+            timeout=120,
+        )
+        assert proc.returncode != 0
+        marker = json.loads(
+            (out / ".raptor-run.json").read_text(encoding="utf-8"))
+        assert marker["status"] == "failed"
+        assert "RuntimeError" in marker.get("extra", {}).get("error", "")
+
+
+# ---------------------------------------------------------------------------
 # sys.path bootstrap
 # ---------------------------------------------------------------------------
 

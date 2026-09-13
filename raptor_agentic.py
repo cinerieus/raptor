@@ -94,6 +94,13 @@ def _count_dropped_suppressions(path: Path) -> int:
     return count
 
 
+#: Run dir of THIS process's lifecycle-stamped run, set right after
+#: ``start_run`` succeeds. The ``_cli_entry`` backstop uses it to close
+#: the lifecycle on uncaught exceptions / Ctrl-C — direct
+#: ``python3 raptor_agentic.py`` invocations have no wrapper to do it.
+_LIFECYCLE_OUT_DIR: Path | None = None
+
+
 def _fail_run_and_exit(out_dir: Path, reason: str) -> NoReturn:
     """Stamp the run failed, then hard-exit.
 
@@ -2541,6 +2548,11 @@ Examples:
             print(f"✗ {e}", file=sys.stderr)
             sys.exit(1)
         logger.debug("Run metadata: %s", e)  # Optional — don't fail the pipeline
+    # Arm the entry-point backstop: from here on an uncaught exception
+    # or Ctrl-C must close the lifecycle instead of leaving the marker
+    # at "running" forever (see _cli_entry).
+    global _LIFECYCLE_OUT_DIR
+    _LIFECYCLE_OUT_DIR = out_dir
 
     logger.info("=" * 70)
     logger.info("RAPTOR AGENTIC WORKFLOW STARTED")
@@ -5068,7 +5080,56 @@ def _postprocess_findings(results) -> None:
     check_self_contradiction(by_id)
 
 
-if __name__ == "__main__":
+def _safe_exc_detail(e: BaseException) -> str:
+    """Reason string for the backstop.
+
+    A raising ``__str__`` on the escaping exception must not defeat
+    the marker write — fall back to the bare type name.
+    """
+    try:
+        return f"uncaught {type(e).__name__}: {e}"
+    except Exception:  # noqa: BLE001 — hostile/broken __str__
+        return f"uncaught {type(e).__name__}"
+
+
+def _backstop_lifecycle(kind: str, detail: str) -> None:
+    """Close this process's lifecycle marker from the entry point.
+
+    Only fires when ``main`` armed ``_LIFECYCLE_OUT_DIR`` (start_run
+    succeeded) AND the marker still reads "running" — a phase that
+    already closed the run with a specific reason (e.g.
+    ``_fail_run_and_exit`` before its ``sys.exit(1)``) must not have
+    it clobbered by the generic backstop text. Best-effort — a marker
+    failure must never mask the original exception.
+    """
+    if _LIFECYCLE_OUT_DIR is None:
+        return
+    with contextlib.suppress(Exception):
+        from core.run.metadata import RUN_METADATA_FILE, STATUS_RUNNING
+        meta = load_json(Path(_LIFECYCLE_OUT_DIR) / RUN_METADATA_FILE)
+        if (isinstance(meta, dict)
+                and meta.get("status") not in (None, STATUS_RUNNING)):
+            return
+        if kind == "cancelled":
+            from core.run import cancel_run
+            cancel_run(_LIFECYCLE_OUT_DIR)
+        else:
+            from core.run import fail_run
+            fail_run(_LIFECYCLE_OUT_DIR, detail)
+
+
+def _cli_entry() -> NoReturn:
+    """Entry point with the lifecycle backstop.
+
+    Pre-fix only SandboxSetupError was handled: any other uncaught
+    exception (a phase raising), a bare ``sys.exit(N)``, a
+    non-Exception ``BaseException``, or a Ctrl-C propagated out with
+    the run marker still at "running" — /project status, the live-run
+    contention gate, and stale-run tooling then treated the dir as a
+    live run forever. Mirror raptor.py's wrapper: fail_run on crash
+    or nonzero exit, cancel_run on interrupt (the lifecycle vocabulary
+    for an operator-stopped run), keeping the established exit codes.
+    """
     try:
         sys.exit(main())
     except SandboxSetupError as e:
@@ -5078,4 +5139,29 @@ if __name__ == "__main__":
             f"\nRAPTOR: run aborted — sandbox isolation could not engage.\n{e}",
             file=sys.stderr,
         )
+        _backstop_lifecycle(
+            "failed", "sandbox isolation could not engage")
         sys.exit(SANDBOX_ENGAGE_EXIT_CODE)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user", file=sys.stderr)
+        _backstop_lifecycle("cancelled", "")
+        sys.exit(130)
+    except SystemExit as e:
+        # A bare sys.exit(N) deep in a phase (ours or a library's)
+        # otherwise sailed through this handler chain with the marker
+        # still "running". SystemExit(0)/None is the success path —
+        # untouched; the running-only guard in the backstop keeps
+        # already-stamped specific reasons (e.g. _fail_run_and_exit)
+        # from being overwritten by this generic one.
+        if e.code is not None and e.code != 0:
+            _backstop_lifecycle("failed", f"exited with code {e.code!r}")
+        raise
+    except BaseException as e:
+        # Exception AND the non-Exception BaseExceptions (GeneratorExit,
+        # BaseExceptionGroup, ...) — anything escaping closes the marker.
+        _backstop_lifecycle("failed", _safe_exc_detail(e))
+        raise
+
+
+if __name__ == "__main__":
+    _cli_entry()
