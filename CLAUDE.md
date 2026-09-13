@@ -170,7 +170,7 @@ Commands run via `python3 raptor.py` (scan, agentic, codeql, fuzz, web) manage l
 
 ### Coverage tracking
 
-The coverage tracking plugin (`plugins/coverage/`) tracks which source files the LLM reads during analysis via a PostToolUse hook. Loaded automatically by the launcher. The hook resolves THIS SESSION's live run via the session run ledger — project, `--out`, and standalone runs all get read-coverage (a project is no longer required) — logging file paths to a `.reads-manifest` in that run directory, converted to a `coverage-read.json` record when the run completes. Zero overhead when no run is active.
+The coverage tracking plugin (`plugins/coverage/`) tracks which source files the LLM reads during analysis via a PostToolUse hook. Loaded automatically by the launcher. The hook resolves THIS SESSION's live run via the session run ledger — project, `--out`, and standalone runs all get read-coverage (a project is no longer required) — logging file paths to a `.reads-manifest` in that run directory, converted to a `coverage-read.json` record when the run completes. No run-side effect when no run is active (the async hook exits early after failing to resolve a live run).
 
 ---
 

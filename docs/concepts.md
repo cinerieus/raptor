@@ -254,7 +254,8 @@ cheaper without sacrificing accuracy.  Inspect with `/scorecard`.
 
 The coverage plugin (`plugins/coverage/`) records which source files the LLM
 reads during analysis via a `PostToolUse` hook.  It runs automatically when a
-run is active and has zero overhead otherwise.
+run is active and has no run-side effect otherwise (the async hook
+still fires per Read and exits early when no run is active).
 
 Coverage produces per-tool records (`coverage-read.json` for LLM reads,
 `coverage-<tool>.json` for scanners) in the run directory -- a manifest of
