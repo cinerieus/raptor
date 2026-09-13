@@ -368,21 +368,100 @@ class TestStaleRecycle(unittest.TestCase):
     def tearDown(self):
         self._ts.cleanup()
 
-    @patch.object(lifecycle, "_kill_server")
-    @patch.object(lifecycle, "_start_fresh")
-    def test_stale_server_recycled(self, mock_start, mock_kill):
-        state = {
-            "pid": os.getpid(), "port": 8888,
-            "refcount": 1,
-            "started_at": time.time() - lifecycle._STALE_THRESHOLD_S - 100,
-        }
+    def _write(self, state):
         with lifecycle._locked() as fd:
             lifecycle._write_state(fd, state)
+
+    def _stale_started_at(self):
+        return time.time() - lifecycle._STALE_THRESHOLD_S - 100
+
+    @patch.object(lifecycle, "_kill_server")
+    @patch.object(lifecycle, "_start_fresh")
+    def test_stale_unreferenced_server_recycled(self, mock_start, mock_kill):
+        """refcount 0 (defensive: release normally removes the state
+        file at zero) + stale → the recycle lane still retires it."""
+        self._write({
+            "pid": os.getpid(), "port": 8888,
+            "refcount": 0,
+            "started_at": self._stale_started_at(),
+        })
 
         new_srv = _mock_server(pid=99999, port=7777)
         mock_start.return_value = new_srv
 
         result = lifecycle.joern_acquire()
+        self.assertIs(result, new_srv)
+        mock_kill.assert_called_once()
+
+    @patch.object(lifecycle, "_connect_existing")
+    @patch.object(lifecycle, "_kill_server")
+    @patch.object(lifecycle, "_start_fresh")
+    def test_stale_referenced_server_not_killed(
+        self, mock_start, mock_kill, mock_connect,
+    ):
+        """refcount > 0 means another session may be mid-query on
+        this server (>8h audit runs are routine) — staleness must NOT
+        SIGKILL it. It is reused instead; joern_release retires it at
+        refcount zero."""
+        self._write({
+            "pid": os.getpid(), "port": 8888,
+            "refcount": 1,
+            "started_at": self._stale_started_at(),
+        })
+        reused = MagicMock()
+        reused.port = 8888
+        mock_connect.return_value = reused
+
+        result = lifecycle.joern_acquire()
+
+        self.assertIs(result, reused)
+        mock_kill.assert_not_called()
+        mock_start.assert_not_called()
+        with lifecycle._locked() as fd:
+            state = lifecycle._read_state(fd)
+        self.assertEqual(state["refcount"], 2)
+
+    @patch.object(lifecycle, "_connect_existing")
+    @patch.object(lifecycle, "_kill_server")
+    @patch.object(lifecycle, "_start_fresh")
+    def test_fresh_server_not_recycled(
+        self, mock_start, mock_kill, mock_connect,
+    ):
+        """Threshold direction two: a server younger than the horizon
+        is never staleness-recycled regardless of refcount."""
+        self._write({
+            "pid": os.getpid(), "port": 8888,
+            "refcount": 0,
+            "started_at": time.time() - 60,
+        })
+        reused = MagicMock()
+        reused.port = 8888
+        mock_connect.return_value = reused
+
+        result = lifecycle.joern_acquire()
+
+        self.assertIs(result, reused)
+        mock_kill.assert_not_called()
+
+    @patch.object(lifecycle, "_connect_existing", return_value=None)
+    @patch.object(lifecycle, "_kill_server")
+    @patch.object(lifecycle, "_start_fresh")
+    def test_stale_referenced_but_dead_server_still_recycled(
+        self, mock_start, mock_kill, _ce,
+    ):
+        """The refcount gate defers only the STALENESS kill — a
+        stale+referenced server that fails the health/liveness check
+        is still recycled through the ordinary dead-server lane."""
+        self._write({
+            "pid": os.getpid(), "port": 8888,
+            "refcount": 3,
+            "started_at": self._stale_started_at(),
+        })
+        new_srv = _mock_server(pid=99999, port=7777)
+        mock_start.return_value = new_srv
+
+        result = lifecycle.joern_acquire()
+
         self.assertIs(result, new_srv)
         mock_kill.assert_called_once()
 

@@ -53,6 +53,16 @@ _STATE_DIR = Path.home() / ".cache" / "raptor"
 _STATE_FILE = _STATE_DIR / "joern-server.json"
 _LOCK_FILE = _STATE_DIR / "joern-server.lock"
 
+# Staleness horizon for an UNREFERENCED server (see joern_acquire).
+# Trade-off, both directions: lower and a warm multi-GB JVM gets
+# recycled between closely-spaced runs, re-paying the 30-120s boot
+# plus CPG re-import; higher and a server whose state file carries a
+# leaked refcount (crashed session that never released) squats on
+# multi-GB of RAM for longer before an operator notices. 8h ≈ longer
+# than any inter-run gap in a working day, shorter than "forgotten
+# overnight". The recycle NEVER applies while refcount > 0 — audit
+# runs routinely exceed 8h, and killing a referenced server SIGKILLs
+# a JVM another session is mid-query on.
 _STALE_THRESHOLD_S = 3600 * 8
 
 
@@ -247,11 +257,30 @@ def joern_acquire(tunables: JoernTunables | None = None) -> JoernServer | None:
         if state is not None:
             started_at = state.get("started_at", 0)
             if time.time() - started_at > _STALE_THRESHOLD_S:
-                logger.info("joern lifecycle: server older than %ds — recycling",
-                            _STALE_THRESHOLD_S)
-                _kill_server(state)
-                _remove_state(fd)
-                state = None
+                # Staleness recycle only at refcount zero. A live
+                # refcount means another session acquired this server
+                # and may be mid-query — an audit run routinely
+                # exceeds 8h, and killing its JVM here loses that
+                # window's taint evidence and lets two sessions
+                # leapfrog-kill each other's servers. Referenced
+                # servers are retired by joern_release at refcount
+                # zero (or by the health check below once dead); a
+                # leaked refcount from a crashed session keeps the
+                # server alive until then — the documented cost of
+                # never killing a server in use (see the threshold
+                # comment above).
+                if state.get("refcount", 0) <= 0:
+                    logger.info(
+                        "joern lifecycle: unreferenced server older "
+                        "than %ds — recycling", _STALE_THRESHOLD_S)
+                    _kill_server(state)
+                    _remove_state(fd)
+                    state = None
+                else:
+                    logger.info(
+                        "joern lifecycle: server older than %ds but "
+                        "refcount=%d — leaving it running",
+                        _STALE_THRESHOLD_S, state.get("refcount", 0))
 
         if state is not None:
             srv = _connect_existing(state)
