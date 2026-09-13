@@ -201,14 +201,59 @@ class TestAuditE2E:
     @needs_semgrep
     def test_g7_blocks_finding_no_reach_via(self, setup):
         target, out_dir = setup
+        # orphan_fn has no caller anywhere in the target, so the
+        # checklist's own call graph (the callers inventory the G7
+        # gate consumes) reports zero callers for it.
+        (target / "orphan.c").write_text("""\
+#include <stdio.h>
+
+void orphan_fn(char *user_input) {
+    char buf[64];
+    sprintf(buf, user_input);
+}
+""")
         _run([_CHECKLIST_CLI, str(target), str(out_dir)])
 
-        # Supply an inventory where vuln_fn has zero callers so
-        # _has_any_callers returns False (confirmed) not None (unknown).
-        inv = {"files": [{"path": "vuln.c", "functions": [
-            {"name": "vuln_fn", "line_start": 8, "callers": []},
-        ]}]}
-        (out_dir / "inventory.json").write_text(json.dumps(inv))
+        _run([_AUDIT_CLI, "context", "--target", str(target),
+              "--file", "orphan.c", "--function", "orphan_fn",
+              "--line", "3", "--out", str(out_dir)])
+
+        rule_path = _write_semgrep_rule(out_dir)
+        _run([_AUDIT_CLI, "sweep",
+              "--rule-file", rule_path,
+              "--tool", "semgrep",
+              "--file", "orphan.c", "--function", "orphan_fn",
+              "--out", str(out_dir), "--target", str(target)])
+
+        r = _run([_AUDIT_CLI, "record",
+                  "--out", str(out_dir), "--target", str(target),
+                  "--file", "orphan.c", "--function", "orphan_fn",
+                  "--status", "finding",
+                  "--hypothesis", "format string",
+                  "--evidence-tool", "semgrep",
+                  "--vuln-type", "CWE-134",
+                  "--body", "confirmed"])
+        assert r.returncode != 0
+        assert "G7 REACHABILITY" in r.stderr
+
+        # Same record WITH --reach-via passes the gate.
+        r = _run([_AUDIT_CLI, "record",
+                  "--out", str(out_dir), "--target", str(target),
+                  "--file", "orphan.c", "--function", "orphan_fn",
+                  "--status", "finding",
+                  "--hypothesis", "format string",
+                  "--evidence-tool", "semgrep",
+                  "--vuln-type", "CWE-134",
+                  "--reach-via", "exported API",
+                  "--body", "confirmed"])
+        assert r.returncode == 0, r.stderr
+
+    @needs_semgrep
+    def test_g7_passes_finding_with_callers(self, setup):
+        # vuln_fn IS called (from main) — the checklist call graph
+        # must satisfy G7 with no --reach-via.
+        target, out_dir = setup
+        _run([_CHECKLIST_CLI, str(target), str(out_dir)])
 
         _run([_AUDIT_CLI, "context", "--target", str(target),
               "--file", "vuln.c", "--function", "vuln_fn",
@@ -229,8 +274,7 @@ class TestAuditE2E:
                   "--evidence-tool", "semgrep",
                   "--vuln-type", "CWE-134",
                   "--body", "confirmed"])
-        assert r.returncode != 0
-        assert "G7 REACHABILITY" in r.stderr
+        assert r.returncode == 0, r.stderr
 
     @needs_semgrep
     def test_report_counts_match(self, setup):

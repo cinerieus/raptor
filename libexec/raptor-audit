@@ -498,16 +498,31 @@ def cmd_record(args: argparse.Namespace) -> int:
                     break
 
         has_callers = None
-        if not is_entry:
-            inventory = None
-            inventory_path = out_dir / "inventory.json"
-            loaded_inv = load_json(
-                inventory_path, max_bytes=_MAX_CHECKLIST_BYTES,
+        from core.inventory.binary_builder import (
+            BINARY_PATH_PREFIX as _BIN_PFX,
+        )
+        if not is_entry and not args.file.startswith(_BIN_PFX):
+            # The callers inventory IS checklist.json:
+            # raptor-build-checklist embeds per-file call_graph data
+            # there, and every other callers_of consumer (priority,
+            # caller_contract) feeds it the checklist directly.
+            #
+            # Legacy checklists keep per-file entries under
+            # 'functions' — a shape the reachability index cannot
+            # see. A zero-caller answer there means "no call-graph
+            # data", not "dead code", so the gate must stay bypassed
+            # (has_callers None) rather than demand --reach-via for
+            # every legacy-checklist finding. Binary items ('binary:'
+            # sentinel paths) have no source call graph at all and
+            # are excluded above for the same reason.
+            inventory = checklist if checklist.get("files") else None
+            fn_defined = inventory is not None and any(
+                item.get("name") == args.function
+                for fe in inventory.get("files", [])
+                if fe.get("path") == args.file
+                for item in fe.get("items") or []
             )
-            if loaded_inv is not None:
-                inventory = loaded_inv
-
-            if inventory:
+            if fn_defined:
                 try:
                     from core.analysis.reachability import (
                         InternalFunction,

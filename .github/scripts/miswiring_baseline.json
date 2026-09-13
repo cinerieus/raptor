@@ -88,9 +88,6 @@
     "artifacts:orphan_reader::ghidra-export.json": {
       "note": "written by the JVM, not Python: ExportRaptor.java (sandboxed analyzeHeadless post-script) writes this file; packages/ghidra bridge.import_project's headless fallback parses it via parser.parse_export"
     },
-    "artifacts:orphan_reader::inventory.json": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
     "artifacts:orphan_reader::joern-flows.json": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
