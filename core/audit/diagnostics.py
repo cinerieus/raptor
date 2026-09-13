@@ -96,18 +96,24 @@ def increment_tier(
     tier: str,
     outcome_str: str,
 ) -> None:
-    """Increment a tier counter based on tool outcome."""
+    """Increment a tier counter based on tool outcome.
+
+    Thread-safe: callers run in parallel review workers, and the
+    ``+= 1`` below is a read-modify-write that loses increments
+    without exclusion (same hazard as ``increment_tier_dict``).
+    """
     tc = result.tier_counters.get(tier)
     if tc is None:
         return
-    if outcome_str == "confirmed":
-        tc.confirmed += 1
-    elif outcome_str == "refuted":
-        tc.refuted += 1
-    elif outcome_str == "error":
-        tc.errors += 1
-    else:
-        tc.inconclusive += 1
+    with _TIER_COUNTER_LOCK:
+        if outcome_str == "confirmed":
+            tc.confirmed += 1
+        elif outcome_str == "refuted":
+            tc.refuted += 1
+        elif outcome_str == "error":
+            tc.errors += 1
+        else:
+            tc.inconclusive += 1
 
 
 def format_tier_diagnostics(
