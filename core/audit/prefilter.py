@@ -21,8 +21,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._util import safe_join
-
 logger = logging.getLogger(__name__)
 
 # Universal libc/POSIX surface plus a marked kernel SEED core
@@ -2282,45 +2280,3 @@ def _check_perl_patterns(
                 line=i,
                 severity="warning",
             ))
-
-
-def run_prefilter_batch(
-    *,
-    target_path: Path,
-    functions: list[dict[str, Any]],
-) -> dict[str, PrefilterResult]:
-    """Run pre-filter on a batch of functions.
-
-    Returns dict keyed by 'file:function'.
-    """
-    results = {}
-    for func in functions:
-        file_path = func.get("file", "")
-        name = func.get("name", "")
-        source = func.get("source", "")
-
-        if not source:
-            full = safe_join(target_path, file_path) if file_path else None
-            if full is not None and full.exists():
-                try:
-                    all_lines = full.read_text(errors="replace").splitlines()
-                    start = max(0, func.get("line_start", 1) - 1)
-                    end = func.get("line_end") or (start + 50)
-                    source = "\n".join(all_lines[start:end])
-                except OSError:
-                    source = ""
-
-        result = run_prefilter(
-            target_path=target_path,
-            file_path=file_path,
-            function_name=name,
-            source=source,
-            line_start=func.get("line_start", 0),
-            line_end=func.get("line_end", 0),
-            callers=func.get("callers"),
-            callees=func.get("callees"),
-            metadata=func.get("metadata"),
-        )
-        results[f"{file_path}:{name}"] = result
-
-    return results

@@ -7,7 +7,6 @@ from pathlib import Path
 from core.audit.prefilter import (
     detect_language,
     run_prefilter,
-    run_prefilter_batch,
 )
 
 
@@ -573,82 +572,6 @@ void parse(char *buf) {
     # the test verifies the prefilter's own safety check)
     if result.hits:
         assert not result.skip_llm or "no sink path" not in result.skip_reason
-
-
-class TestRunPrefilterBatch:
-    def test_batch_returns_keyed_dict(self, tmp_path: Path):
-        (tmp_path / "handler.c").write_text(
-            "void handle(char *buf) { strcpy(dst, buf); }\n"
-        )
-        functions = [
-            {
-                "file": "handler.c",
-                "name": "handle",
-                "source": "void handle(char *buf) { strcpy(dst, buf); }",
-                "line_start": 1,
-                "line_end": 1,
-            },
-        ]
-        results = run_prefilter_batch(
-            target_path=tmp_path, functions=functions,
-        )
-        assert "handler.c:handle" in results
-        result = results["handler.c:handle"]
-        assert hasattr(result, "hits")
-        assert hasattr(result, "skip_llm")
-
-    def test_batch_multiple_functions(self, tmp_path: Path):
-        functions = [
-            {
-                "file": "a.c",
-                "name": "f1",
-                "source": "int f1() { return 0; }",
-                "line_start": 1,
-                "line_end": 1,
-            },
-            {
-                "file": "b.c",
-                "name": "f2",
-                "source": "void f2(char *s) { system(s); }",
-                "line_start": 1,
-                "line_end": 1,
-            },
-        ]
-        results = run_prefilter_batch(
-            target_path=tmp_path, functions=functions,
-        )
-        assert len(results) == 2
-        assert "a.c:f1" in results
-        assert "b.c:f2" in results
-
-    def test_batch_reads_source_from_disk(self, tmp_path: Path):
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "vuln.c").write_text(
-            "void vuln(char *input) {\n"
-            "    char buf[16];\n"
-            "    strcpy(buf, input);\n"
-            "}\n"
-        )
-        functions = [
-            {
-                "file": "src/vuln.c",
-                "name": "vuln",
-                "line_start": 1,
-                "line_end": 4,
-            },
-        ]
-        results = run_prefilter_batch(
-            target_path=tmp_path, functions=functions,
-        )
-        assert "src/vuln.c:vuln" in results
-        result = results["src/vuln.c:vuln"]
-        assert len(result.hits) > 0
-
-    def test_batch_empty_list(self, tmp_path: Path):
-        results = run_prefilter_batch(
-            target_path=tmp_path, functions=[],
-        )
-        assert results == {}
 
 
 class TestAssignInConditional:
