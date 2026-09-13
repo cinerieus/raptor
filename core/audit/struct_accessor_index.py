@@ -5,12 +5,11 @@ under what locking discipline.  Used to surface "these other functions
 touch the same fields under different locking" context for the LLM's
 concurrency review.
 
-Two backends:
-  - Joern CPG (precise): queries the code property graph for
-    memberAccess nodes with enclosing function and lock context.
-  - Source regex (fallback): scans function source for ``->field``
-    patterns and lock/unlock calls.  Less precise but works without
-    Joern.
+Single backend: a source-regex scan (``build_index_from_source``) over
+each function's source for ``->field`` / ``.field`` patterns and
+lock/unlock calls.  A Joern-CPG backend used to live here but was
+never wired to production and could not produce lock context; the
+regex path is the one the orchestrator consumes.
 """
 
 from __future__ import annotations
@@ -141,80 +140,6 @@ def build_index_from_source(
                 lock_held=lock_name,
             )
             index.setdefault(f, []).append(record)
-
-    return index
-
-
-def build_index_from_joern(
-    server: Any,
-    *,
-    timeout: int = 90,
-) -> dict[str, list[AccessorRecord]]:
-    """Build struct-field accessor index via Joern CPG query.
-
-    Queries the loaded CPG for all member access expressions,
-    groups by field name, and annotates with enclosing function
-    and lock context.
-    """
-    # Member accesses are OPERATOR calls in the CPG — their ``name``
-    # is "<operator>.fieldAccess" / "<operator>.indirectFieldAccess",
-    # never "base->field".  The old name-regex query matched the
-    # operator names themselves (they contain a dot), so every access
-    # collapsed onto the "fieldAccess" pseudo-field.  The field
-    # identifier is the access's SECOND argument.
-    query = (
-        'cpg.call.nameExact("<operator>.fieldAccess", '
-        '"<operator>.indirectFieldAccess")'
-        '.map(c => (c.method.head.name, c.method.head.filename, '
-        'c.argument(2).code, c.lineNumber.headOption.getOrElse(-1)))'
-        '.l'
-    )
-
-    try:
-        result = server.query(query, timeout=timeout)
-    except Exception:
-        logger.debug("joern struct-field query failed", exc_info=True)
-        return {}
-
-    if not result or result.errors:
-        logger.debug(
-            "joern struct-field query returned no results or errors: %s",
-            result.errors if result else "no result",
-        )
-        return {}
-
-    index: dict[str, list[AccessorRecord]] = {}
-    for row in (result.data or []):
-        if not isinstance(row, (list, tuple)) or len(row) < 4:
-            continue
-        func_name, file_path, access_name, line = row
-        access_name = str(access_name).strip()
-        if access_name.startswith("<operator>"):
-            # Operator pseudo-name — a backend handing back call NAMES
-            # instead of field identifiers must be dropped, never
-            # collapsed onto a "fieldAccess" pseudo-field.
-            continue
-        # argument(2).code is normally the bare field identifier;
-        # tolerate full access expressions ("pkt->len", "s.len") from
-        # older transports by taking the last path segment.
-        if "->" in access_name:
-            field_name = access_name.rsplit("->", 1)[-1].strip()
-        elif "." in access_name:
-            field_name = access_name.rsplit(".", 1)[-1].strip()
-        else:
-            field_name = access_name
-        if not field_name or len(field_name) < _MIN_FIELD_LEN:
-            continue
-        if field_name in _NOISE_FIELDS:
-            continue
-
-        record = AccessorRecord(
-            function=str(func_name),
-            file=str(file_path),
-            field=field_name,
-            line=int(line) if isinstance(line, (int, float)) else 0,
-        )
-        index.setdefault(field_name, []).append(record)
 
     return index
 
