@@ -1025,8 +1025,12 @@ def _siblings_fold_or_refuse(
 
 
 def _rhs_is_catalog_call(rhs, candidate_callables) -> bool:
-    """Best-effort: the rhs expression is a single call whose text
-    ends with a catalog callable name."""
+    """Best-effort: the rhs expression is a single call whose callee
+    text IS a catalog callable name — exact, or reached through a
+    ``.``-separated receiver chain. A bare suffix match (no separator)
+    would let a lookalike helper (``myencodeForHTML(...)``,
+    ``unescape(...)``) pass as a catalog sanitizer on the enforced
+    suppress path; fold-or-refuse polarity forbids that."""
     try:
         node = rhs
         if node.type == "cast_expression":
@@ -1035,7 +1039,7 @@ def _rhs_is_catalog_call(rhs, candidate_callables) -> bool:
             return False
         txt = node.text.decode("utf-8", "replace").split("(", 1)[0]
         return any(
-            txt == c or txt.endswith("." + c) or txt.endswith(c)
+            txt == c or txt.endswith("." + c)
             for c in candidate_callables
         )
     except Exception:  # noqa: BLE001

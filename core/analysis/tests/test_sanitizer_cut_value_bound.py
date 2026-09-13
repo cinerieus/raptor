@@ -485,3 +485,69 @@ class TestNonEntrySource:
             sink_arg="y",
         )
         assert result.verdict == VERDICT_SUPPRESS
+
+
+# ---------------------------------------------------------------------------
+# _rhs_is_catalog_call — sibling-guard catalog matching
+# ---------------------------------------------------------------------------
+
+
+def _java_rhs_node(expr: str):
+    """The declarator value node of ``String s = <expr>;`` — the exact
+    shape _siblings_fold_or_refuse hands to _rhs_is_catalog_call."""
+    import pytest
+
+    pytest.importorskip("tree_sitter_java")
+    from core.analysis.java_collection_index import _parser
+
+    parser = _parser()
+    assert parser is not None
+    src = "class T { void m() { String s = " + expr + "; } }"
+    tree = parser.parse(src.encode("utf-8"))
+    stack = [tree.root_node]
+    while stack:
+        n = stack.pop()
+        if n.type == "variable_declarator":
+            return n.child_by_field_name("value")
+        stack.extend(n.children)
+    raise AssertionError("no declarator in fixture")
+
+
+class TestRhsCatalogCall:
+    """The catalog match guards the value-bound SUPPRESS path — a
+    lookalike helper accepted as a catalog sanitizer lets taint ride a
+    sibling argument past an enforced suppression."""
+
+    _CATALOG = frozenset({"encodeForHTML", "escape"})
+
+    def _check(self, expr: str) -> bool:
+        from core.analysis.sanitizer_cut import _rhs_is_catalog_call
+
+        return _rhs_is_catalog_call(_java_rhs_node(expr), self._CATALOG)
+
+    def test_lookalike_suffix_rejected(self):
+        # "myencodeForHTML" ends with the catalog name but is not it.
+        assert not self._check("myencodeForHTML(x)")
+
+    def test_lookalike_suffix_rejected_short_name(self):
+        # "unescape" ends with "escape" — the measured refuse-averse
+        # shape of the bare-suffix alternative.
+        assert not self._check("unescape(x)")
+
+    def test_exact_name_accepted(self):
+        assert self._check("encodeForHTML(x)")
+
+    def test_method_qualified_call_accepted(self):
+        assert self._check("Encoder.encodeForHTML(x)")
+
+    def test_chained_call_receiver_refuses(self):
+        # The callee text is truncated at the FIRST paren, so a
+        # call-chained receiver never matches — pre-existing refusal,
+        # kept: refusing a real sanitizer only loses a suppression.
+        assert not self._check("ESAPI.encoder().encodeForHTML(x)")
+
+    def test_cast_wrapped_call_accepted(self):
+        assert self._check("(String) Encoder.encodeForHTML(x)")
+
+    def test_non_invocation_rejected(self):
+        assert not self._check("x + Encoder.encodeForHTML(y)")
