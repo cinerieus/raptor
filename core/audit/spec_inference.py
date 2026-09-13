@@ -376,7 +376,9 @@ def _infer_from_caller_usage(
                 if callee_name == function_name:
                     caller_count += 1
                     source = item.get("source", "")
-                    if _checks_return_value(source, function_name):
+                    if _checks_return_value(
+                        source, function_name, item.get("file", ""),
+                    ):
                         callers_that_check_return += 1
                     break
 
@@ -540,6 +542,7 @@ def _verify_one_precondition(
 
         satisfied = _check_precondition_in_source(
             check_type, precondition, caller_source,
+            caller.get("file", ""),
         )
         caller_id = f"{caller.get('file', '')}:{caller.get('name', caller.get('function', ''))}"
 
@@ -583,8 +586,18 @@ def _check_precondition_in_source(
     check_type: str,
     precondition: str,
     caller_source: str,
+    file_path: str = "",
 ) -> bool | None:
-    """Check if the caller source satisfies the precondition."""
+    """Check if the caller source satisfies the precondition.
+
+    Scans a comment/string-blanked view of the caller: a "verified"
+    receipt renders as "mechanically refuted" steering in the review
+    prompt, so a comment that merely mentions a guard ("/* if (!p)
+    */") must not mint one.
+    """
+    from .source_view import sanitized_view
+
+    caller_source = sanitized_view(caller_source, file_path)
     if check_type == "null_check":
         var_match = re.search(r"(\w+)\s*(?:!=\s*(?:NULL|0)|!= null)", precondition)
         if var_match:
@@ -658,10 +671,20 @@ def format_precondition_verification(
     return "\n".join(lines)
 
 
-def _checks_return_value(source: str, function_name: str) -> bool:
-    """Heuristic: does the source check the return of function_name?"""
+def _checks_return_value(
+    source: str, function_name: str, file_path: str = "",
+) -> bool:
+    """Heuristic: does the source check the return of function_name?
+
+    Scans a comment/string-blanked view — a comment that merely
+    mentions the checked call must not count as a real check.
+    """
     if not source:
         return False
+
+    from .source_view import sanitized_view
+
+    source = sanitized_view(source, file_path)
 
     patterns = [
         rf"if\s*\(\s*!?\s*{re.escape(function_name)}\s*\(",

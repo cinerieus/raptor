@@ -450,3 +450,68 @@ class TestSpecClaimGrounding:
         _user, system = build_spec_prompt("f", "a.c", "int f(void) {}")
         assert '"anchor"' in system
         assert "VERBATIM" in system
+
+
+class TestPreconditionSanitizedView:
+    """Precondition verification must scan a comment-blanked view.
+
+    A "verified" receipt renders as "mechanically refuted" steering in
+    the review prompt, so a comment that merely mentions a guard must
+    not mint one.
+    """
+
+    @staticmethod
+    def _verify(caller_source: str):
+        from core.audit.spec_inference import (
+            verify_preconditions_at_call_sites,
+        )
+
+        spec = InferredSpec(
+            function="consume",
+            file="lib.c",
+            preconditions=["buf != NULL"],
+        )
+        callers = [{
+            "file": "caller.c",
+            "name": "caller_one",
+            "source": caller_source,
+        }]
+        results = verify_preconditions_at_call_sites(spec, callers)
+        assert len(results) == 1
+        return results[0]
+
+    def test_comment_only_guard_does_not_verify(self):
+        v = self._verify(
+            "void caller_one(char *buf) {\n"
+            "    /* if (!buf) is checked upstream */\n"
+            "    consume(buf);\n"
+            "}\n"
+        )
+        assert v.verified_sites == 0
+        assert v.unknown_sites == 1
+        assert v.is_universally_satisfied is False
+
+    def test_real_guard_still_verifies(self):
+        v = self._verify(
+            "void caller_one(char *buf) {\n"
+            "    if (!buf)\n"
+            "        return;\n"
+            "    consume(buf);\n"
+            "}\n"
+        )
+        assert v.verified_sites == 1
+        assert v.is_universally_satisfied is True
+
+
+class TestChecksReturnValueSanitizedView:
+    def test_comment_only_mention_is_not_a_check(self):
+        source = (
+            "/* if (!validate_token(tok)) would bail here */\n"
+            "validate_token(tok);\n"
+            "do_stuff();\n"
+        )
+        assert _checks_return_value(source, "validate_token", "caller.c") is False
+
+    def test_real_check_with_file_path_still_found(self):
+        source = "if (!validate_token(tok)) { return -1; }"
+        assert _checks_return_value(source, "validate_token", "caller.c") is True
