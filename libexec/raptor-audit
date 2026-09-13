@@ -62,6 +62,16 @@ from core.json import load_json  # noqa: E402
 # small sidecar.
 _MAX_CHECKLIST_BYTES = 256 * 1024 * 1024
 _MAX_META_BYTES = 8 * 1024 * 1024
+# Bound on every raptor-run-lifecycle child. The stub takes
+# cross-process locks, so a wedged lock-holder would otherwise hang
+# this CLI forever with the run stuck in 'running'. Trade-off: too low
+# and a healthy-but-slow transition (cold NFS project dir, contended
+# journal merge on complete) is misreported as failed — the transition
+# itself may still land after the CLI gave up; too high and an
+# operator waits minutes just to learn the run metadata is wedged.
+# 120s is ~100x the observed worst case for the metadata + journal
+# work the stub does.
+_LIFECYCLE_TIMEOUT_S = 120
 pin_raptor_dir_in_environ()
 
 
@@ -1485,9 +1495,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
         lifecycle_cmd += ["--out", str(out_dir)]
-    lifecycle = subprocess.run(
-        lifecycle_cmd, capture_output=True, text=True, check=False,
-    )
+    try:
+        lifecycle = subprocess.run(
+            lifecycle_cmd, capture_output=True, text=True, check=False,
+            timeout=_LIFECYCLE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"lifecycle start timed out after {_LIFECYCLE_TIMEOUT_S}s",
+            file=sys.stderr,
+        )
+        return 1
     if lifecycle.returncode != 0:
         print(f"lifecycle start failed: {lifecycle.stderr.strip()}",
               file=sys.stderr)
@@ -1929,14 +1947,27 @@ def _finalize_run(
                 f"environment, then resume."
             )
             _int_exit = 1
-        interrupt_cp = subprocess.run(
-            [str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
-             "interrupt", str(out_dir),
-             _int_reason,
-             "--command", "audit"],
-            capture_output=True, text=True, check=False,
-        )
-        if interrupt_cp.returncode != 0:
+        # Timeout expiry is reported like a nonzero exit: the console
+        # must not claim a clean interrupt when the transition may
+        # never have landed.
+        try:
+            interrupt_cp = subprocess.run(
+                [str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
+                 "interrupt", str(out_dir),
+                 _int_reason,
+                 "--command", "audit"],
+                capture_output=True, text=True, check=False,
+                timeout=_LIFECYCLE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            interrupt_cp = None
+        if interrupt_cp is None:
+            print(
+                f"lifecycle interrupt failed (timed out after "
+                f"{_LIFECYCLE_TIMEOUT_S}s)",
+                file=sys.stderr, flush=True,
+            )
+        elif interrupt_cp.returncode != 0:
             detail = (interrupt_cp.stderr or "").strip()
             print(
                 f"lifecycle interrupt failed (exit {interrupt_cp.returncode})"
@@ -1962,10 +1993,20 @@ def _finalize_run(
     # Surface the child's stderr on failure — pre-fix capture_output
     # swallowed it, so a failed complete (corrupt metadata, journal
     # merge error) left the run stuck in 'running' with no signal.
-    lifecycle_cp = subprocess.run(
-        lifecycle_args, capture_output=True, text=True, check=False,
-    )
-    if lifecycle_cp.returncode != 0:
+    try:
+        lifecycle_cp = subprocess.run(
+            lifecycle_args, capture_output=True, text=True, check=False,
+            timeout=_LIFECYCLE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        lifecycle_cp = None
+    if lifecycle_cp is None:
+        print(
+            f"lifecycle complete failed (timed out after "
+            f"{_LIFECYCLE_TIMEOUT_S}s)",
+            file=sys.stderr, flush=True,
+        )
+    elif lifecycle_cp.returncode != 0:
         detail = (lifecycle_cp.stderr or "").strip()
         print(
             f"lifecycle complete failed (exit {lifecycle_cp.returncode})"
@@ -2501,14 +2542,18 @@ def _run_config_from_args(
 
 
 def _lifecycle_fail(out_dir: Path, reason: str) -> None:
-    """Call lifecycle fail, swallowing errors."""
+    """Call lifecycle fail, swallowing errors (timeouts included —
+    this always runs on an error path that already reports its own
+    failure)."""
     import subprocess
-    subprocess.run(
-        [str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
-         "fail", str(out_dir), reason],
-        capture_output=True,
-        check=False,
-    )
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        subprocess.run(
+            [str(_RAPTOR_DIR / "libexec" / "raptor-run-lifecycle"),
+             "fail", str(out_dir), reason],
+            capture_output=True,
+            check=False,
+            timeout=_LIFECYCLE_TIMEOUT_S,
+        )
 
 
 def _guess_target(out_dir: Path) -> Path | None:
