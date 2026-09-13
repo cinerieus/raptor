@@ -87,6 +87,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The sweep clones and scans the PROJECT_SAMPLES corpus with a
+          # contents:write token in scope; keep that token out of
+          # .git/config so the scan path can't reach it (same hardening
+          # as refresh-sca-data.yml / sca-self-bump.yml). The refresh-PR
+          # step already authenticates via the gh credential helper
+          # (gh auth setup-git).
+          persist-credentials: false
 
       - name: Enable the netns egress tier (unprivileged user namespaces)
         # The SCA resolvers dry-run untrusted manifests with egress

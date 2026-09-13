@@ -53,6 +53,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The collector clones and scans ~50 third-party OSS projects
+          # with a contents:write token in scope; keep that token out of
+          # .git/config so the scan path can't reach it (same hardening
+          # as refresh-sca-data.yml / sca-self-bump.yml). The push
+          # authenticates explicitly via the gh credential helper (see
+          # Commit + push).
+          persist-credentials: false
 
       - name: Enable the netns egress tier (unprivileged user namespaces)
         # The SCA resolvers dry-run untrusted manifests with egress
@@ -143,6 +151,11 @@ jobs:
         run: |
           set -eu
           BRANCH="auto/sca-project-samples-refresh"
+          # persist-credentials:false (see Checkout) kept the token out of
+          # .git/config for the collect step. Install gh CLI's credential
+          # helper, which reads the token from env at push time without
+          # ever embedding it in any URL stored in .git/config.
+          gh auth setup-git
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"

@@ -48,6 +48,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The refresh step below runs repo code over untrusted internet
+          # data with a contents:write token in scope; keep that token out
+          # of .git/config so the fetch/parse path can't reach it (same
+          # hardening as refresh-sca-data.yml / sca-self-bump.yml). The
+          # push authenticates explicitly via the gh credential helper
+          # (see Commit + push).
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -132,6 +140,11 @@ jobs:
         run: |
           set -eu
           BRANCH="auto/sca-calibration-refresh"
+          # persist-credentials:false (see Checkout) kept the token out of
+          # .git/config for the refresh step. Install gh CLI's credential
+          # helper, which reads the token from env at push time without
+          # ever embedding it in any URL stored in .git/config.
+          gh auth setup-git
           # Configure the bot identity. Using the GitHub-Actions
           # service account so the auto-commit is clearly machine-
           # generated; per-step ``GITHUB_TOKEN`` carries
