@@ -13,6 +13,7 @@ from typing import Any
 from core.security.prompt_defense_profiles import CONSERVATIVE
 from core.security.prompt_envelope import ModelDefenseProfile, system_with_priming
 
+from .correlation import tally_verdict_votes
 from .dispatch import DispatchTask
 
 # Canonical SCA-dispatch predicates live in finding_kinds (shared with
@@ -509,10 +510,38 @@ class ConsensusTask(DispatchTask):
                     continue
 
                 primary_exploitable = primary.get("is_exploitable", False)
-                verdicts = [primary_exploitable]
-                verdicts.extend(ca.get("is_exploitable", False) for ca in consensus_analyses)
+                # Shared abstention-aware tally (see correlation.py):
+                # missing/null is_exploitable — an errored / refused /
+                # schema-failed model — is an abstention, never a
+                # "not exploitable" vote. Pre-fix `.get(..., False)`
+                # let two malformed consensus responses out-vote a
+                # clean primary "exploitable" verdict 2-1.
+                panel = tally_verdict_votes(
+                    ca.get("is_exploitable") for ca in consensus_analyses
+                )
+                tally = tally_verdict_votes(
+                    [primary.get("is_exploitable")]
+                    + [ca.get("is_exploitable") for ca in consensus_analyses]
+                )
 
-                disputed = not all(v == verdicts[0] for v in verdicts)
+                disputed = tally.disputed
+
+                if panel.voted == 0:
+                    # The whole consensus panel abstained — no second
+                    # opinion exists. Mark the stage outcome
+                    # explicitly and leave the primary verdict
+                    # untouched: "agreed" here would let errored
+                    # consensus responses mint corroboration
+                    # (dataflow_validation reads consensus=="agreed"
+                    # as agreement evidence).
+                    primary["consensus"] = "no-verdict"
+                    primary["consensus_analyses"] = [
+                        {"model": ca.get("analysed_by", "?"),
+                         "is_exploitable": ca.get("is_exploitable"),
+                         "reasoning": ca.get("reasoning", "")}
+                        for ca in consensus_analyses
+                    ]
+                    continue
 
                 n_consensus = len(consensus_analyses)
                 if n_consensus == 1:
@@ -531,9 +560,18 @@ class ConsensusTask(DispatchTask):
                     # verdict and flags `cross_family_disputed`")
                     # so consensus and cross-family handle
                     # disputes the same way.
-                    final = any(verdicts)  # True if any voter says exploitable
+                    final = tally.any_exploitable()
                 else:
-                    final = sum(1 for v in verdicts if v) > len(verdicts) / 2
+                    majority = tally.majority()
+                    # Tied vote (possible once abstainers are
+                    # excluded, or with an even voter count): no
+                    # majority exists — apply the same conservative-
+                    # max rule as the 1-vote dispute above, so a
+                    # tie is surfaced as exploitable-for-review
+                    # rather than silently resolved against the
+                    # finding.
+                    final = (tally.any_exploitable() if majority is None
+                             else majority)
 
                 primary["consensus"] = "disputed" if disputed else "agreed"
                 # Capture pre-consensus verdict before overriding,
@@ -673,16 +711,50 @@ class JudgeTask(DispatchTask):
                     continue
 
                 primary_exploitable = primary.get("is_exploitable", False)
-                verdicts = [primary_exploitable]
-                verdicts.extend(ja.get("is_exploitable", False) for ja in judge_analyses)
+                # Shared abstention-aware tally (see correlation.py):
+                # missing/null is_exploitable is an abstention, never
+                # a "not exploitable" vote — pre-fix a schema-failed
+                # judge response counted as a negative majority vote
+                # and could flip a real exploitable verdict.
+                panel = tally_verdict_votes(
+                    ja.get("is_exploitable") for ja in judge_analyses
+                )
+                tally = tally_verdict_votes(
+                    [primary.get("is_exploitable")]
+                    + [ja.get("is_exploitable") for ja in judge_analyses]
+                )
 
-                disputed = not all(v == verdicts[0] for v in verdicts)
+                disputed = tally.disputed
+
+                if panel.voted == 0:
+                    # Every judge abstained — no review verdict
+                    # exists. Record the stage outcome explicitly,
+                    # preserve the primary verdict, and skip the
+                    # contradiction tie-break below (it requires an
+                    # actual judge vote; "agreed" from zero votes
+                    # would mint corroboration).
+                    primary["judge"] = "no-verdict"
+                    primary["judge_analyses"] = [
+                        {"model": ja.get("analysed_by", "?"),
+                         "resolved_model": ja.get("resolved_model"),
+                         "is_exploitable": ja.get("is_exploitable"),
+                         "reasoning": ja.get("reasoning", "")}
+                        for ja in judge_analyses
+                    ]
+                    continue
 
                 n_judges = len(judge_analyses)
                 if n_judges == 1:
                     final = primary_exploitable
                 else:
-                    final = sum(1 for v in verdicts if v) > len(verdicts) / 2
+                    majority = tally.majority()
+                    # No majority (a tie once abstainers are
+                    # excluded): preserve the primary verdict — the
+                    # judge stage overrides only on a strict
+                    # majority, mirroring its own 1-judge
+                    # preserve-primary rule.
+                    final = (primary_exploitable if majority is None
+                             else majority)
 
                 primary["judge"] = "disputed" if disputed else "agreed"
                 primary["is_exploitable"] = final

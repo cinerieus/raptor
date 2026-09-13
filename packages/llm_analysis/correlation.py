@@ -2,9 +2,95 @@
 
 Pure-Python aggregation of per-model analysis results. Produces agreement
 matrix, clusters, unique insights, and confidence signals. No LLM calls.
+
+Also home of the shared verdict-vote tally (`tally_verdict_votes` /
+`VoteTally`) used by every surface that counts ``is_exploitable``
+votes across models — this module, ``ConsensusTask.finalize`` and
+``JudgeTask.finalize`` in ``tasks.py``. One counting rule everywhere:
+a missing/null ``is_exploitable`` (errored model, refused response,
+schema failure — ``core/llm/response_validation.py`` nulls the field)
+is an ABSTENTION, excluded from both the vote count and the majority
+denominator. Counting abstainers as "not exploitable" let malformed
+LLM output out-vote a real exploitable verdict.
 """
 
+from dataclasses import dataclass
 from typing import Any
+from collections.abc import Iterable
+
+
+@dataclass(frozen=True)
+class VoteTally:
+    """Counted ``is_exploitable`` votes with abstentions excluded.
+
+    ``exploitable`` / ``not_exploitable`` count models that actually
+    voted; ``abstained`` counts missing/null verdicts. Majority and
+    tie semantics are explicit so consumers cannot re-derive them
+    divergently: a *strict* majority over the models that voted, and
+    ``None`` when nobody voted or the vote is tied — the consumer
+    applies its own documented tie policy.
+    """
+
+    exploitable: int
+    not_exploitable: int
+    abstained: int
+
+    @property
+    def voted(self) -> int:
+        """Number of models that cast a real vote (abstains excluded)."""
+        return self.exploitable + self.not_exploitable
+
+    @property
+    def tie(self) -> bool:
+        return self.voted > 0 and self.exploitable == self.not_exploitable
+
+    @property
+    def disputed(self) -> bool:
+        """True when real votes exist on BOTH sides. Abstainers can
+        never create (or mask) a dispute."""
+        return self.exploitable > 0 and self.not_exploitable > 0
+
+    @property
+    def unanimous(self) -> bool:
+        """All actual voters agreed (requires at least one vote)."""
+        return self.voted > 0 and not self.disputed
+
+    def majority(self) -> bool | None:
+        """Strict-majority verdict over the voting models.
+
+        Returns ``None`` when no model voted (all abstained) or the
+        vote is tied — there is no majority to report; the caller
+        decides what an inconclusive tally means on its surface.
+        """
+        if self.voted == 0 or self.tie:
+            return None
+        return self.exploitable > self.not_exploitable
+
+    def any_exploitable(self) -> bool:
+        """Conservative-max reading: at least one real exploitable vote."""
+        return self.exploitable > 0
+
+
+def tally_verdict_votes(votes: Iterable[Any]) -> VoteTally:
+    """Count raw ``is_exploitable`` values into a :class:`VoteTally`.
+
+    ``None`` (the response-validation null for a missing/failed
+    verdict) is an abstention; every other value is boolean-coerced
+    into a real vote.
+    """
+    exploitable = not_exploitable = abstained = 0
+    for v in votes:
+        if v is None:
+            abstained += 1
+        elif v:
+            exploitable += 1
+        else:
+            not_exploitable += 1
+    return VoteTally(
+        exploitable=exploitable,
+        not_exploitable=not_exploitable,
+        abstained=abstained,
+    )
 
 
 def correlate_results(results_by_id: dict[str, dict]) -> dict[str, Any]:
@@ -75,24 +161,23 @@ def correlate_results(results_by_id: dict[str, dict]) -> dict[str, Any]:
             }
         matrix[fid] = per_model
 
-        # Missing/null is_exploitable is an ABSTENTION (errored model,
-        # refused response, schema failure), not a "not exploitable"
-        # vote — pre-fix bool(None) coerced abstainers into False
-        # votes, so one real "exploitable" verdict plus two errored
-        # models read as a 2-1 majority AGAINST and could even mint a
-        # unanimous 'high-negative' from zero actual verdicts.
-        verdicts = [
-            bool(a["is_exploitable"]) for a in analyses
-            if a.get("is_exploitable") is not None
-        ]
-        all_agree = len(set(verdicts)) == 1
+        # Vote counting via the shared tally: missing/null
+        # is_exploitable is an ABSTENTION (errored model, refused
+        # response, schema failure), not a "not exploitable" vote —
+        # pre-fix bool(None) coerced abstainers into False votes, so
+        # one real "exploitable" verdict plus two errored models read
+        # as a 2-1 majority AGAINST and could even mint a unanimous
+        # 'high-negative' from zero actual verdicts.
+        tally = tally_verdict_votes(
+            a.get("is_exploitable") for a in analyses
+        )
 
-        if not verdicts:
+        if tally.voted == 0:
             # Every model abstained — no verdict exists to agree on.
             confidence[fid] = "no-verdict"
-        elif all_agree and verdicts[0]:
+        elif tally.unanimous and tally.any_exploitable():
             confidence[fid] = "high"
-        elif all_agree and not verdicts[0]:
+        elif tally.unanimous:
             confidence[fid] = "high-negative"
         else:
             confidence[fid] = "disputed"
@@ -106,9 +191,7 @@ def correlate_results(results_by_id: dict[str, dict]) -> dict[str, Any]:
                 if a.get("is_exploitable") is not None
                 and not a["is_exploitable"]
             ]
-            n_exp = len(exploitable_models)
-            n_non = len(non_exploitable_models)
-            if n_exp == n_non:
+            if tally.tie:
                 # Even split (the common 1-vs-1 two-model dispute):
                 # there is no majority — filing one side as the
                 # dissenting minority would frame a 50/50 tie as
@@ -126,9 +209,9 @@ def correlate_results(results_by_id: dict[str, dict]) -> dict[str, Any]:
                         "reasoning": (a.get("reasoning") or "")[:200],
                     })
             else:
-                minority = (exploitable_models if n_exp < n_non
-                            else non_exploitable_models)
-                majority_verdict = n_exp > n_non
+                majority_verdict = bool(tally.majority())
+                minority = (non_exploitable_models if majority_verdict
+                            else exploitable_models)
                 for model in minority:
                     reasoning = next(
                         (a.get("reasoning") or "" for a in analyses
