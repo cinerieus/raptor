@@ -1146,6 +1146,14 @@ jobs:
         # miswiring-scan.yml sweep.
         run: pytest .github/tests .github/scripts/tests
 
+      - name: Run release-workflow simulation
+        # Bash test (pytest doesn't collect .sh): simulates the release
+        # workflow's tag/changelog/stamping steps against a disposable
+        # git fixture. Without an explicit step it ran in NO CI lane
+        # and its assertions (tag-move refusal, changelog injection
+        # defences) rotted silently.
+        run: bash .github/tests/test_release_workflow.sh
+
   # Heavy-subdir Python tiers — each gated on its own filter so a PR
   # touching only one package skips the others. Filters live in
   # compute_filters.FILTERS and are validated by ci-lint-tests above.
