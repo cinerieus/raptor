@@ -486,7 +486,11 @@ class TestOutOfSpanOffsetsClamped:
         result = _local_alias_escapes(
             self._edge(10), segment, self._span(), 820, set(),
         )
-        assert result is None or "line 80" in result
+        # Deterministic: the clamped walk starts at offset 0 and finds
+        # `use(alias)` at segment offset 2 → span line 802. The old
+        # `result is None or ...` form passed vacuously on None.
+        assert result is not None
+        assert "line 802" in result
 
     def test_event_before_span_reads_nothing(self):
         from core.audit.ptr_lifecycle import _local_post_event_reads
@@ -529,13 +533,17 @@ class TestCensusBlockIsolationWiring:
 
         import core.audit.orchestrator as orch_mod
 
+        import re
+
         src = Path(orch_mod.__file__).read_text()
         idx = src.find("def _census_prepass")
         assert idx != -1, "per-channel isolation wrapper missing"
         window = src[idx:idx + 2500]
         assert "logger.warning" in window[:800]
-        assert '_census_prepass(\n                "ptr_lifecycle"' in src
-        assert '_census_prepass(\n                "lock_region"' in src
+        # Whitespace-insensitive: reformatting the call must not fail
+        # the wiring check.
+        assert re.search(r'_census_prepass\(\s*"ptr_lifecycle"', src)
+        assert re.search(r'_census_prepass\(\s*"lock_region"', src)
         # The block-level swallow is loud too.
         assert (
             "lifecycle channel prepass block failed" in src
