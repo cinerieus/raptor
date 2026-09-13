@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models import Confidence, Dependency, PinStyle
+from ..naming import pep503_name
 from . import _safe_read, register
 
 try:
@@ -106,7 +107,13 @@ def _build_dep(
         return None
     if not isinstance(version, str) or not version.strip():
         return None
-    name = name.strip()
+    # PEP 503 normalisation, same as every other PyPI parser. uv
+    # itself writes normalised names, but a non-canonical spelling
+    # (hand-edited lockfile, older tool output) would otherwise fail
+    # to join with the normalised manifest-side row from pyproject /
+    # requirements — the joined view would double-report instead of
+    # deferring to the manifest parser.
+    name = pep503_name(name.strip())
     version = version.strip()
 
     source = pkg.get("source") or {}
