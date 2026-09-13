@@ -101,9 +101,9 @@ def _group_max_cost(n_labels: int) -> float:
 def _ts() -> str:
     """Local ISO timestamp for phase banners.
 
-    An 8.8-hour v5 log had no timestamps anywhere — intra-group stalls
-    (study timeouts, 429 storms) were invisible without external
-    clocks. Second precision is enough for phase forensics.
+    A multi-hour run log used to have no timestamps anywhere —
+    intra-group stalls (study timeouts, 429 storms) were invisible
+    without external clocks. Second precision is enough for phase forensics.
     """
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -116,9 +116,10 @@ def _print_run_header(
 ) -> None:
     """One header stating the run's configuration up front.
 
-    The v5 log never printed the profile, tree, or model — an operator
-    reading only the log could not state the config without forensics
-    (the profile was only inferable from 120 per-group gate lines).
+    The run log used to print no profile, tree, or model — an
+    operator reading only the log could not state the config without
+    forensics (the profile was only inferable from per-group gate
+    lines).
     """
     from .history import pipeline_tree_sha
 
@@ -2057,11 +2058,11 @@ def _aggregate_spend(run_dirs: list[Path]) -> dict[str, Any] | None:
     and ``cost-breakdown.json`` (the phase/summary ledger — used only
     to surface divergence). Returns None when no telemetry exists.
 
-    A v5 corpus run printed FOUR mutually inconsistent totals ($300 /
-    $301 / $142 / $95) and the prominent final banner under-stated
-    spend by 3.2x (it summed only label-attributed review cost). This
-    aggregate is the single end-of-run number, with the per-class and
-    per-group breakdown and the reconciliation deltas in one block.
+    The run summary used to print FOUR mutually inconsistent totals
+    and the prominent final banner under-stated spend by roughly 3x
+    (it summed only label-attributed review cost). This aggregate is
+    the single end-of-run number, with the per-class and per-group
+    breakdown and the reconciliation deltas in one block.
     """
     groups: list[dict[str, Any]] = []
     per_class: dict[str, list[float]] = {}
@@ -2404,8 +2405,8 @@ def _format_summary(
     else:
         # No telemetry ledgers (probe mode / legacy dirs): say what
         # this number is — per-label review spend only, NOT the run
-        # total (a v5 run's bare "Cost:" banner under-stated total
-        # spend by 3.2x).
+        # total (a bare "Cost:" banner once under-stated total spend
+        # roughly 3x).
         lines.append(
             f"  Label-attributed cost: ${total_cost:.4f} "
             f"(per-label review spend only)",
