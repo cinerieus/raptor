@@ -32,6 +32,7 @@ from . import (
     UntrustedBlock,
     run_stage,
 )
+from ..kinds import MAJOR_BUMP_DECISION_CLASS_PREFIX
 from .prompts import UPGRADE_IMPACT_PREFILTER_SYSTEM, UPGRADE_IMPACT_SYSTEM
 from .schemas import UpgradeImpactPrefilter, UpgradeImpactVerdict
 from typing import TYPE_CHECKING
@@ -144,7 +145,7 @@ def assess_upgrade_impact(
     # the cheap verdict. Decision class is keyed by ecosystem since
     # changelog conventions and stability profiles differ
     # significantly between (e.g.) PyPI and npm.
-    decision_class = f"sca:major_bump:{dep.ecosystem}"
+    decision_class = f"{MAJOR_BUMP_DECISION_CLASS_PREFIX}{dep.ecosystem}"
     fast_model_name = fast_tier_model_name(client.config)
     cheap = _cheap_safe_check(client, dep, new_version, changelog)
     # Defensive: tests sometimes stub ``run_stage`` to return the same

@@ -35,6 +35,7 @@ from core.binary import (
 )
 from .bump.image_binary_extract import fetch_image_binary
 from .dockerfile_from import find_all_image_refs
+from .kinds import SCAN_ID_PREFIX
 from .models import (
     Confidence,
     Dependency,
@@ -241,7 +242,7 @@ def _drift_finding(
     import hashlib
     ref_hash = hashlib.sha256(ref.encode("utf-8")).hexdigest()[:16]
     return SupplyChainFinding(
-        finding_id=f"sca:scan:image_capability_drift:{ref_hash}",
+        finding_id=f"{SCAN_ID_PREFIX}image_capability_drift:{ref_hash}",
         kind="image_capability_drift",
         dependency=placeholder_dep,
         detail=detail,

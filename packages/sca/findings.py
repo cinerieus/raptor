@@ -37,6 +37,14 @@ from core.cve import EpssClient, KevClient
 from core.cve.vulnrichment import VulnrichmentClient
 
 from ._atomic import atomic_write_text
+from .kinds import (
+    HYGIENE_PREFIX,
+    LICENSE_PREFIX,
+    SCAN_HEALTH_PREFIX,
+    SUPPLY_CHAIN_PREFIX,
+    VULN_ID_PREFIX,
+    VULNERABLE_DEPENDENCY,
+)
 from .models import (
     Advisory,
     Confidence,
@@ -662,7 +670,7 @@ class _Sortable:
 
 def _vuln_finding_id(dep: Dependency, advisory: Advisory) -> str:
     return (
-        f"sca:vuln:{dep.ecosystem}:{dep.name}:{dep.version or '*'}:"
+        f"{VULN_ID_PREFIX}{dep.ecosystem}:{dep.name}:{dep.version or '*'}:"
         f"{advisory.osv_id}"
     )
 
@@ -717,7 +725,7 @@ def _vuln_finding_to_row(f: VulnFinding) -> dict[str, Any]:
     return {
         "id": f.finding_id,
         "finding_id": f.finding_id,
-        "vuln_type": "sca:vulnerable_dependency",
+        "vuln_type": VULNERABLE_DEPENDENCY,
         "tool": "sca",
         "file": str(f.dependency.declared_in),
         "function": f.dependency.name,
@@ -803,7 +811,7 @@ def _hygiene_finding_to_row(f: HygieneFinding) -> dict[str, Any]:
     return {
         "id": f.finding_id,
         "finding_id": f.finding_id,
-        "vuln_type": f"sca:hygiene:{f.kind}",
+        "vuln_type": f"{HYGIENE_PREFIX}{f.kind}",
         "tool": "sca",
         "file": str(f.dependency.declared_in),
         "function": f.dependency.name,
@@ -834,7 +842,7 @@ def _supply_chain_finding_to_row(f: SupplyChainFinding) -> dict[str, Any]:
     return {
         "id": f.finding_id,
         "finding_id": f.finding_id,
-        "vuln_type": f"sca:supply_chain:{f.kind}",
+        "vuln_type": f"{SUPPLY_CHAIN_PREFIX}{f.kind}",
         "tool": "sca",
         "file": str(f.dependency.declared_in),
         "function": f.dependency.name,
@@ -863,7 +871,7 @@ def _license_finding_to_row(f: Any) -> dict[str, Any]:
     return {
         "id": f.finding_id,
         "finding_id": f.finding_id,
-        "vuln_type": f"sca:license:{kind_short}",
+        "vuln_type": f"{LICENSE_PREFIX}{kind_short}",
         "tool": "sca",
         "file": str(f.dependency.declared_in),
         "function": f.dependency.name,
@@ -900,11 +908,11 @@ def _scan_health_to_row(h: dict[str, Any]) -> dict[str, Any]:
     sca_block: dict[str, Any] = {"kind": kind}
     if isinstance(evidence, dict):
         sca_block.update(evidence)
-    finding_id = f"sca:scan_health:{kind}"
+    finding_id = f"{SCAN_HEALTH_PREFIX}{kind}"
     return {
         "id": finding_id,
         "finding_id": finding_id,
-        "vuln_type": f"sca:scan_health:{kind}",
+        "vuln_type": f"{SCAN_HEALTH_PREFIX}{kind}",
         "tool": "sca",
         "file": "",
         "function": "",

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+from ..kinds import HYGIENE_PREFIX
 from ..models import (
     Confidence, Dependency, HygieneFinding,
 )
@@ -81,7 +82,7 @@ def scan_pinned_versions(
             return None
         return HygieneFinding(
             finding_id=(
-                f"sca:hygiene:yanked_version:{dep.ecosystem}:"
+                f"{HYGIENE_PREFIX}yanked_version:{dep.ecosystem}:"
                 f"{dep.name}:{dep.version}"
             ),
             kind="yanked_version",

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from packages.sca.kinds import SUPPLY_CHAIN_PREFIX
 from packages.sca.models import (
     Confidence, Dependency, PinStyle, SupplyChainFinding,
 )
@@ -84,7 +85,7 @@ def _make_finding(d: DropOnBumpFinding) -> SupplyChainFinding:
 
     return SupplyChainFinding(
         finding_id=(
-            f"sca:supply_chain:transitive_now_optional:{d.ecosystem}:"
+            f"{SUPPLY_CHAIN_PREFIX}transitive_now_optional:{d.ecosystem}:"
             f"{d.transitive_name}:{d.parent_name}"
         ),
         kind="transitive_now_optional",

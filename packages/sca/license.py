@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .kinds import SCA_PREFIX
 from .models import (
     Confidence,
     Dependency,
@@ -625,7 +626,7 @@ def _unparseable_finding(
 
 def _finding_id(dep: Dependency, kind: str) -> str:
     return (
-        f"sca:{kind}:{dep.ecosystem}:{dep.name}@{dep.version or '*'}"
+        f"{SCA_PREFIX}{kind}:{dep.ecosystem}:{dep.name}@{dep.version or '*'}"
         f":{dep.declared_in}"
     )
 

@@ -32,6 +32,7 @@ from core.progress import HackerProgressBar
 from . import SCA_CACHE_ROOT, default_client
 from . import suppressions as _suppressions
 from .discovery import find_manifests
+from .kinds import SCA_PREFIX
 from .findings import build_vuln_findings, write_findings_json
 from .hygiene import evaluate as evaluate_hygiene
 from .join import join as join_deps
@@ -1684,8 +1685,8 @@ def _run_triage(
     rows.extend(_supply_chain_finding_to_row(f) for f in supply_chain_findings)
 
     rows = [r for r in rows if isinstance(r, dict)]
-    sca_rows = [r for r in rows if r.get("vuln_type", "").startswith("sca:")]
-    cross_rows = [r for r in rows if not r.get("vuln_type", "").startswith("sca:")]
+    sca_rows = [r for r in rows if r.get("vuln_type", "").startswith(SCA_PREFIX)]
+    cross_rows = [r for r in rows if not r.get("vuln_type", "").startswith(SCA_PREFIX)]
 
     result = triage_findings(client, sca_rows, cross_rows or None)
     if result is None:

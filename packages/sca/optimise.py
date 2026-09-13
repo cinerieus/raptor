@@ -34,6 +34,10 @@ from typing import Any, TYPE_CHECKING
 
 from core.json import load_json, save_json
 
+from .kinds import (
+    HYGIENE_PREFIX,
+    SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT,
+)
 from .update import (
     UpgradeChange,
     _change_to_dict,
@@ -180,7 +184,7 @@ def main(argv: Sequence[str]) -> int:
     # ---- Phase 3a: detect GHA-action-ref drift (independent of pins) -------
     has_gha_drift = any(
         isinstance(r, dict)
-        and r.get("vuln_type") == "sca:supply_chain:gha_action_ref_drift"
+        and r.get("vuln_type") == SUPPLY_CHAIN_GHA_ACTION_REF_DRIFT
         for r in findings_rows
     )
     do_hash_pin = has_gha_drift and not args.no_hash_pin
@@ -372,7 +376,7 @@ def _plan_hygiene_pins(
         if not isinstance(row, dict):
             continue
         vt = row.get("vuln_type", "")
-        kind = vt.removeprefix("sca:hygiene:")
+        kind = vt.removeprefix(HYGIENE_PREFIX)
         if kind not in _HYGIENE_PIN_KINDS and kind != "cross_manifest_inconsistency":
             continue
 

@@ -35,6 +35,12 @@ from typing import Any, TYPE_CHECKING
 from core.json import dumps_artifact, load_json
 from core.security.log_sanitisation import escape_nonprintable
 
+from .kinds import (
+    HYGIENE_PREFIX,
+    LICENSE_PREFIX,
+    SUPPLY_CHAIN_PREFIX,
+    VULNERABLE_DEPENDENCY,
+)
 from .findings import severity_rank
 
 if TYPE_CHECKING:
@@ -301,7 +307,7 @@ def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
     sca = row.get("sca") or {}
     eco = sca.get("ecosystem") or ""
     name = sca.get("name") or ""
-    if vuln_type == "sca:vulnerable_dependency":
+    if vuln_type == VULNERABLE_DEPENDENCY:
         adv = sca.get("advisory") or {}
         cve = next(
             (a for a in (adv.get("aliases") or [])
@@ -312,11 +318,11 @@ def _canonical_key(row: dict[str, Any]) -> tuple[str, ...] | None:
         if not adv_key:
             return None
         return ("vuln", eco, name, adv_key)
-    if vuln_type.startswith("sca:hygiene:"):
+    if vuln_type.startswith(HYGIENE_PREFIX):
         return ("hygiene", vuln_type, eco, name)
-    if vuln_type.startswith("sca:supply_chain:"):
+    if vuln_type.startswith(SUPPLY_CHAIN_PREFIX):
         return ("supply", vuln_type, eco, name)
-    if vuln_type.startswith("sca:license:"):
+    if vuln_type.startswith(LICENSE_PREFIX):
         # Pre-fix license rows had no canonical key, so they were
         # invisibly dropped from every diff bucket — new license
         # violations in a PR never surfaced; persistent license

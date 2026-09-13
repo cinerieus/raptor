@@ -33,6 +33,7 @@ import json
 import logging
 from pathlib import Path
 
+from ..kinds import SUPPLYCHAIN_ID_PREFIX
 from ..models import (
     Confidence,
     Dependency,
@@ -185,7 +186,7 @@ def _build_finding(
     if replacement:
         detail += f" Recommended replacement: `{replacement}`."
     finding_id = (
-        f"sca:supplychain:gha_action_sunset:"
+        f"{SUPPLYCHAIN_ID_PREFIX}gha_action_sunset:"
         f"{dep.name}:{dep.version}".replace(" ", "_")
     )
     return SupplyChainFinding(

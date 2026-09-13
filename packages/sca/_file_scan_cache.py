@@ -32,6 +32,8 @@ from typing import Any, TYPE_CHECKING
 
 from core.json import JsonCache, TTL_FOREVER
 
+from .kinds import SCA_PREFIX
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -69,7 +71,7 @@ def cached_per_file(
     # Falling through to compute is the safe legacy behaviour.
     if not hasattr(cache, "get") or not hasattr(cache, "put"):
         return compute()
-    key = f"sca:{consumer}:{file_sha256(text)}"
+    key = f"{SCA_PREFIX}{consumer}:{file_sha256(text)}"
     cached = cache.get(key, ttl_seconds=TTL_FOREVER)
     if cached is not None:
         return cached

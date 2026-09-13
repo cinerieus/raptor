@@ -30,6 +30,12 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .kinds import (
+    HYGIENE_PREFIX,
+    LICENSE_PREFIX,
+    SUPPLY_CHAIN_PREFIX,
+    VULNERABLE_DEPENDENCY,
+)
 from .findings import severity_rank
 from .models import REACHABILITY_LABELS, REACHABILITY_ORDER
 from .sarif import write_sarif
@@ -217,7 +223,7 @@ def _apply_reachability_filters(
             # and the SARIF emitter each skip them defensively).
             out.append(row)
             continue
-        if row.get("vuln_type") != "sca:vulnerable_dependency":
+        if row.get("vuln_type") != VULNERABLE_DEPENDENCY:
             out.append(row)
             continue
         verdict = _row_reachability_verdict(row)
@@ -266,16 +272,16 @@ def _render_markdown(rows: list[dict[str, Any]], *, target: Path) -> str:
     # elements; filter them out rather than crash on `.get()`.
     rows = [r for r in rows if isinstance(r, dict)]
     vuln_rows = [r for r in rows
-                 if r.get("vuln_type") == "sca:vulnerable_dependency"]
+                 if r.get("vuln_type") == VULNERABLE_DEPENDENCY]
     hygiene_rows = [r for r in rows
                     if isinstance(r.get("vuln_type"), str)
-                    and r["vuln_type"].startswith("sca:hygiene:")]
+                    and r["vuln_type"].startswith(HYGIENE_PREFIX)]
     supply_rows = [r for r in rows
                    if isinstance(r.get("vuln_type"), str)
-                   and r["vuln_type"].startswith("sca:supply_chain:")]
+                   and r["vuln_type"].startswith(SUPPLY_CHAIN_PREFIX)]
     license_rows = [r for r in rows
                     if isinstance(r.get("vuln_type"), str)
-                    and r["vuln_type"].startswith("sca:license:")]
+                    and r["vuln_type"].startswith(LICENSE_PREFIX)]
 
     suppressed_count = sum(1 for r in vuln_rows if r.get("suppressed"))
     severity_counts: Counter[str] = Counter()

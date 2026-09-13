@@ -33,6 +33,7 @@ import logging
 import re
 from collections import defaultdict
 
+from .kinds import HYGIENE_PREFIX
 from .models import (
     Confidence,
     Dependency,
@@ -426,7 +427,7 @@ def _finding(
     confidence: Confidence,
 ) -> HygieneFinding:
     return HygieneFinding(
-        finding_id=f"sca:hygiene:{kind}:{dep.ecosystem}:{dep.name}:"
+        finding_id=f"{HYGIENE_PREFIX}{kind}:{dep.ecosystem}:{dep.name}:"
                     f"{dep.declared_in}",
         kind=kind,
         dependency=dep,

@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from .kinds import VULNERABLE_DEPENDENCY
 from .parsers._npm_alias import split_npm_alias
 from .versions import VersionError
 from .versions import compare as version_compare
@@ -687,7 +688,7 @@ def _plan_targets(
     """
     plans: dict[tuple[str, str, str], _PlanEntry] = {}
     for row in rows:
-        if row.get("vuln_type") != "sca:vulnerable_dependency":
+        if row.get("vuln_type") != VULNERABLE_DEPENDENCY:
             continue
         sca = row.get("sca") or {}
         adv = sca.get("advisory") or {}
@@ -870,7 +871,7 @@ def _materialise_changes(
 def _pin_styles_by_finding(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], str]:
     out: dict[tuple[str, str, str], str] = {}
     for row in rows:
-        if row.get("vuln_type") != "sca:vulnerable_dependency":
+        if row.get("vuln_type") != VULNERABLE_DEPENDENCY:
             continue
         sca = row.get("sca") or {}
         key = (sca.get("ecosystem"), sca.get("name"), str(Path(row.get("file"))) if row.get("file") else None)

@@ -50,6 +50,8 @@ from typing import Any
 
 from core.json import load_json, save_json
 
+from ..kinds import VULNERABLE_DEPENDENCY
+
 # findings.json artifacts are RAPTOR-written run output — the
 # findings-class budget.
 _MAX_FINDINGS_BYTES = 64 * 1024 * 1024
@@ -977,7 +979,7 @@ def _sanitise_findings(
         # Only vuln findings carry risk scores worth validating
         # against. Hygiene / supply-chain / license findings are
         # different signals; skip them for the corpus.
-        if f.get("vuln_type") != "sca:vulnerable_dependency":
+        if f.get("vuln_type") != VULNERABLE_DEPENDENCY:
             continue
         out.append({
             "finding_id": f.get("finding_id"),

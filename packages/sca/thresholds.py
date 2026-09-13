@@ -16,6 +16,13 @@ import sys
 from dataclasses import dataclass
 from typing import TextIO, TYPE_CHECKING
 
+from .kinds import (
+    HYGIENE_PREFIX,
+    LICENSE_PREFIX,
+    SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT,
+    SUPPLY_CHAIN_PREFIX,
+    VULNERABLE_DEPENDENCY,
+)
 from .findings import severity_rank
 
 if TYPE_CHECKING:
@@ -85,7 +92,7 @@ def evaluate(
         sev = row.get("severity", "info")
         rank = severity_rank(sev)
         desc = row.get("description") or row.get("id") or "(no description)"
-        if vuln_type == "sca:vulnerable_dependency":
+        if vuln_type == VULNERABLE_DEPENDENCY:
             if sev_floor is not None and rank >= sev_floor:
                 fails.append(f"[{sev}] {desc}")
                 continue
@@ -94,14 +101,14 @@ def evaluate(
                 sca = {}
             if cfg.fail_on_kev and sca.get("in_kev"):
                 fails.append(f"[KEV] {desc}")
-        elif vuln_type.startswith("sca:supply_chain:"):
+        elif vuln_type.startswith(SUPPLY_CHAIN_PREFIX):
             if sc_floor is not None and rank >= sc_floor:
                 fails.append(f"[supply-chain {sev}] {desc}")
             # Drift-specific gates layer on top of (and may fire
             # independently of) the supply-chain severity floor —
             # operators may want to gate on drift without gating on
             # other supply-chain signals.
-            if vuln_type == "sca:supply_chain:image_capability_drift":
+            if vuln_type == SUPPLY_CHAIN_IMAGE_CAPABILITY_DRIFT:
                 if cfg.fail_on_capability_drift:
                     fails.append(f"[capability-drift] {desc}")
                 if cfg.max_added_capability_buckets is not None:
@@ -131,10 +138,10 @@ def evaluate(
                             f"max {cfg.max_added_capability_buckets}] "
                             f"{desc}"
                         )
-        elif vuln_type.startswith("sca:hygiene:"):
+        elif vuln_type.startswith(HYGIENE_PREFIX):
             if hyg_floor is not None and rank >= hyg_floor:
                 fails.append(f"[hygiene {sev}] {desc}")
-        elif vuln_type.startswith("sca:license:"):
+        elif vuln_type.startswith(LICENSE_PREFIX):
             # License findings had no gate branch at all — a policy
             # violation could never fail a build regardless of the
             # configured floors. Same floor-per-class shape as the
