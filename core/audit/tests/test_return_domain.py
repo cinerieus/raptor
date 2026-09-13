@@ -553,3 +553,28 @@ class TestDetector:
         )
         assert len(finds) == 1
         assert any("!= 0" in p for p in finds[0].peer_checks)
+
+
+class TestConstantsBudget:
+    def test_exhausted_caller_budget_stops_walk_and_never_caches(
+        self, tmp_path,
+    ):
+        # _constants_for_root minted its own fresh default budget,
+        # ignoring the caller's remaining one — a nearly-exhausted
+        # derivation could spend another whole default window walking
+        # headers, and the cut-short table landed in the cache.
+        import core.audit.return_domain as rd
+        (tmp_path / "consts.h").write_text("#define ERR_FATAL -2\n")
+        rd._CONSTANTS_CACHE.clear()
+        exhausted = rd._Budget(0.0)
+        out = rd._constants_for_root(tmp_path, exhausted)
+        assert out == {}
+        assert str(tmp_path) not in rd._CONSTANTS_CACHE
+
+    def test_live_budget_walks_and_caches(self, tmp_path):
+        import core.audit.return_domain as rd
+        (tmp_path / "consts.h").write_text("#define ERR_FATAL -2\n")
+        rd._CONSTANTS_CACHE.clear()
+        out = rd._constants_for_root(tmp_path, rd._Budget(20.0))
+        assert out.get("ERR_FATAL") == -2
+        assert str(tmp_path) in rd._CONSTANTS_CACHE

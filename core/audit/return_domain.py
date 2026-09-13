@@ -571,7 +571,9 @@ def _strip_include_guard(text: str) -> str:
 _CONSTANTS_CACHE: dict[str, dict[str, int]] = {}
 
 
-def _constants_for_root(root: Path) -> dict[str, int]:
+def _constants_for_root(
+    root: Path, budget: _Budget | None = None,
+) -> dict[str, int]:
     """Uniqueness-gated integer constants under *root*, include-guard
     aware.
 
@@ -581,6 +583,11 @@ def _constants_for_root(root: Path) -> dict[str, int]:
     family must not read as conditional merely because the header
     guards itself. Local to this witness; the SMT-facing table keeps
     its stricter reading.
+
+    *budget* is the caller's LIVE budget — minting a fresh default here
+    let a nearly-exhausted derivation spend another whole window on the
+    header walk. A walk cut short by exhaustion is never cached (the
+    partial table must not poison later full-budget callers).
     """
     cache_key = str(root)
     if cache_key in _CONSTANTS_CACHE:
@@ -602,7 +609,8 @@ def _constants_for_root(root: Path) -> dict[str, int]:
         _CONSTANTS_CACHE[cache_key] = {}
         return {}
     defs: dict[str, list[int]] = {}
-    budget = _Budget(_DEFAULT_BUDGET_S)
+    if budget is None:
+        budget = _Budget(_DEFAULT_BUDGET_S)
     for path in _c_family_files(Path(root), budget):
         if not budget.ok():
             break
@@ -640,7 +648,8 @@ def _constants_for_root(root: Path) -> dict[str, int]:
     table = {
         name: vals[0] for name, vals in defs.items() if len(vals) == 1
     }
-    _CONSTANTS_CACHE[cache_key] = table
+    if not budget.truncated:
+        _CONSTANTS_CACHE[cache_key] = table
     return table
 
 
@@ -993,7 +1002,7 @@ def _analyze_definition(
     hops: int,
     visited: set[str],
 ) -> tuple[set[int], list[ReturnValueProof]]:
-    consts = _constants_for_root(root)
+    consts = _constants_for_root(root, budget)
     values: set[int] = set()
     proofs: list[ReturnValueProof] = []
 
