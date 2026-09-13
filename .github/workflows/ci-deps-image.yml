@@ -105,8 +105,9 @@ jobs:
 
       # Prune the untagged digests left behind when :main / :req-<hash> move
       # to this build. Tagged versions (current :main + every :req-<hash>
-      # rollback anchor) are untouched. GHCR has no auto-retention, so without
-      # this the weekly rebuild alone accrues ~52 dangling versions/year.
+      # rollback anchor) are untouched here; bounded anchor retention is
+      # the next step. GHCR has no auto-retention, so without this the
+      # weekly rebuild alone accrues ~52 dangling versions/year.
       # delete-only-untagged + a small floor never risks a rollback anchor.
       - name: Prune superseded (untagged) image versions
         uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55  # was v5.0.0
@@ -115,3 +116,57 @@ jobs:
           package-type: container
           delete-only-untagged-versions: true
           min-versions-to-keep: 5
+
+      # Tagged-anchor retention: keep the newest 10 tagged versions.
+      # Bounded both ways deliberately (churn-prone limit): pruning an
+      # old anchor costs only a rebuild-on-rollback — every :req-<hash>
+      # is reproducible from its git-pinned requirements — while
+      # unbounded anchors cost storage, package-page noise, and an
+      # operator reasonably reading the ever-growing pile as broken
+      # cleanup (this package reached 28 tagged versions that way,
+      # so the first run shrinks 28 -> 10). 10 ≈ months of
+      # requirements churn of rollback headroom. Scripted via the REST
+      # API because delete-package-versions cannot express "newest N
+      # TAGGED + always keep the moving tag" (its keep-count mixes
+      # tagged and untagged): tagged versions are sorted newest-first
+      # by created_at explicitly, the plan is logged before any
+      # deletion, and any version carrying the moving :main tag is
+      # skipped belt-and-braces even though it is always among the
+      # newest.
+      - name: Prune old tagged anchors (keep newest 10)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          PKG: raptor-ci-deps
+          MOVING: main
+          KEEP: "10"
+        run: |
+          set -euo pipefail
+          base="orgs/${OWNER}/packages/container/${PKG}"
+          gh api "${base}" >/dev/null 2>&1 \
+            || base="users/${OWNER}/packages/container/${PKG}"
+          gh api --paginate "${base}/versions?per_page=100" \
+            --jq '.[] | [(.id|tostring), .created_at, (.metadata.container.tags | join(","))] | @tsv' \
+            > /tmp/versions.tsv \
+            || { echo "::error::could not enumerate ${PKG} versions for tagged-anchor retention — inspect the package manually."; exit 1; }
+          awk -F'\t' '$3 != ""' /tmp/versions.tsv | sort -t$'\t' -k2,2r > /tmp/tagged.tsv
+          total="$(wc -l < /tmp/tagged.tsv)"
+          echo "== tagged versions: ${total}; keeping the newest ${KEEP} (any '${MOVING}' carrier always kept)"
+          tail -n +"$((KEEP + 1))" /tmp/tagged.tsv > /tmp/prune.tsv
+          if [ ! -s /tmp/prune.tsv ]; then
+            echo "== nothing to prune"
+            exit 0
+          fi
+          echo "== retention plan (logged before any deletion):"
+          while IFS=$'\t' read -r id created tags; do
+            case ",${tags}," in
+              *",${MOVING},"*) echo "   keep    ${id}  ${created}  ${tags}  (carries the moving tag)" ;;
+              *)               echo "   delete  ${id}  ${created}  ${tags}" ;;
+            esac
+          done < /tmp/prune.tsv
+          while IFS=$'\t' read -r id created tags; do
+            case ",${tags}," in *",${MOVING},"*) continue ;; esac
+            gh api -X DELETE "${base}/versions/${id}" \
+              || { echo "::error::failed to delete tagged version ${id} of ${PKG} — token grant or a GHCR refusal; prune manually in the package settings."; exit 1; }
+            echo "== deleted ${id} (${tags})"
+          done < /tmp/prune.tsv
