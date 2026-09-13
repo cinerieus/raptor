@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.atomic_fs import write_text_atomically
+from core.orchestration.llm_json import strip_json_fences
 from core.json import dumps_artifact
 from core.sandbox import telemetry_mac
 from core.sandbox.triage import TRIAGE_FILE, verify_triage_report
@@ -165,10 +166,7 @@ def _parse_assessments(text: str, report: dict) -> tuple:
     ``(assessments, overall_note, dropped)`` — unknown signal types
     are dropped (a model must not invent findings), judgements are
     coerced to the enum, rationales sanitised and capped."""
-    raw = text.strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        raw = raw.partition("\n")[2] if "\n" in raw else raw
+    raw = strip_json_fences(text)
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:

@@ -14,6 +14,7 @@ import time
 from collections import deque
 from typing import Any, TYPE_CHECKING
 
+from core.orchestration.llm_json import strip_json_fences
 from core.security.prompt_framing import with_audit_framing
 
 from .orchestrator import OrchestratorConfig, ReviewOutcome
@@ -154,11 +155,7 @@ def parse_batch_response(
     individually (schema-invalid == malformed; the keyed lookup in
     ``batch_review_fn`` then error-routes the affected functions).
     """
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [ln for ln in lines if not ln.startswith("```")]
-        text = "\n".join(lines)
+    text = strip_json_fences(raw)
     try:
         results = json.loads(text)
     except json.JSONDecodeError:

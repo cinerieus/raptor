@@ -21,6 +21,38 @@ from __future__ import annotations
 from typing import Any
 
 
+def strip_json_fences(text: str) -> str:
+    """Payload of a leading markdown code fence, else *text* stripped.
+
+    LLM responses routinely arrive wrapped in a ```json fence even
+    when the prompt forbids it. When the (whitespace-stripped)
+    response opens with a fence line, return the content of that
+    first fenced block — up to the closing fence line, or
+    end-of-text when the model never closed it. Content after the
+    closing fence (prose, a second block) is dropped: the fence
+    declares the payload, and trailing prose would only fail the
+    caller's JSON parse. Responses without a leading fence pass
+    through unchanged apart from outer whitespace.
+
+    Scope: fence removal ONLY, for callers that own their parse
+    strategy (JSONL line scans, schema-coerced loads, bespoke
+    fallbacks). Consumers that just want a parsed object should use
+    the full recovery ladder in :func:`core.json.tolerant.
+    parse_llm_json` instead — its fence strategy also handles
+    mid-text fences and ``~~~`` delimiters.
+    """
+    s = text.strip()
+    if not s.startswith("```"):
+        return s
+    lines = s.splitlines()
+    end = len(lines)
+    for i in range(1, len(lines)):
+        if lines[i].strip().startswith("```"):
+            end = i
+            break
+    return "\n".join(lines[1:end]).strip()
+
+
 def list_at(d: Any, key: str) -> list[Any]:
     """Return ``d[key]`` if it is a list, else an empty list."""
     if not isinstance(d, dict):

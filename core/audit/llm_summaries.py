@@ -16,6 +16,7 @@ from typing import Any, TYPE_CHECKING
 
 from core.analysis.summaries import FunctionSummary, Precondition, TaintRule
 from core.evidence import EvidenceTier
+from core.orchestration.llm_json import strip_json_fences
 from core.security.prompt_framing import with_audit_framing
 
 if TYPE_CHECKING:
@@ -473,10 +474,7 @@ def _parse_summary_response(
             file, function,
         )
         return None
-    if text.startswith("```"):
-        lines = text.splitlines()
-        lines = [ln for ln in lines if not ln.startswith("```")]
-        text = "\n".join(lines)
+    text = strip_json_fences(text)
 
     try:
         data = json.loads(text)

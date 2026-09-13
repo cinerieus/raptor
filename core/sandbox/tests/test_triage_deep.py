@@ -120,6 +120,18 @@ class TestDeepAnalyse:
         assert "\x1b" not in a["rationale"]
         assert len(a["rationale"]) <= deep_mod._MAX_RATIONALE_CHARS
 
+    def test_fenced_model_reply_parses(self, tmp_path):
+        # Models fence their JSON even when told not to; the parse
+        # must see the payload, not the backticks.
+        report = _suspicious_run(tmp_path)
+        fenced = "```json\n" + _reply() + "\n```"
+        assessments, note, dropped = deep_mod._parse_assessments(
+            fenced, report,
+        )
+        assert len(assessments) == 1
+        assert dropped == 0
+        assert note == "looks deliberate"
+
     def test_garbage_model_output_yields_empty_assessments(self, tmp_path):
         _suspicious_run(tmp_path)
         client = _FakeClient("I cannot help with that.")

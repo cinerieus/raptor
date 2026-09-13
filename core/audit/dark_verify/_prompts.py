@@ -10,6 +10,8 @@ import json
 import logging
 from typing import Any
 
+from core.orchestration.llm_json import strip_json_fences
+
 from ._types import DarkWitnessSpec, language_for_file
 
 logger = logging.getLogger(__name__)
@@ -319,16 +321,7 @@ def build_witness_prompt(
 
 def _extract_json(text: str) -> dict[str, Any] | None:
     """Extract a JSON object from potentially messy LLM output."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        start = 1
-        end = len(lines)
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "```":
-                end = i
-                break
-        text = "\n".join(lines[start:end]).strip()
+    text = strip_json_fences(text)
 
     try:
         data = json.loads(text)

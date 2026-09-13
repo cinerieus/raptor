@@ -348,6 +348,22 @@ _GROUND_SOURCE = (
 )
 
 
+class TestParseSpecResponseFences:
+    """Fence handling at the spec-response parse (shared helper)."""
+
+    def test_fenced_response_parses(self):
+        from core.audit.spec_inference import _parse_llm_spec_response
+
+        raw = '```json\n{"intent": "x", "preconditions": []}\n```'
+        assert _parse_llm_spec_response(raw).get("intent") == "x"
+
+    def test_fenced_with_trailing_prose_parses(self):
+        from core.audit.spec_inference import _parse_llm_spec_response
+
+        raw = '```json\n{"intent": "x"}\n```\nHope that helps.'
+        assert _parse_llm_spec_response(raw).get("intent") == "x"
+
+
 class TestSpecClaimGrounding:
     """Source-grounding of LLM spec claims (receipts.py precedent):
     anchored claims enter the spec; unanchored claims demote to the

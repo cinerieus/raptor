@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.orchestration.llm_json import strip_json_fences
 from core.security.prompt_framing import with_audit_framing
 
 logger = logging.getLogger(__name__)
@@ -820,16 +821,7 @@ def _parse_llm_spec_response(response: str) -> dict[str, Any]:
     """
     import json as _json
 
-    text = response.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        start = 1
-        end = len(lines)
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "```":
-                end = i
-                break
-        text = "\n".join(lines[start:end])
+    text = strip_json_fences(response)
 
     data: Any = None
     try:

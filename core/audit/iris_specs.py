@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from core.evidence import EvidenceTier
+from core.orchestration.llm_json import strip_json_fences
 from core.json import dumps_artifact
 
 logger = logging.getLogger(__name__)
@@ -132,11 +133,7 @@ def parse_spec_response(raw: str) -> list[TaintSpec]:
     """
     specs = []
 
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.splitlines()
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines)
+    cleaned = strip_json_fences(raw)
 
     for line in cleaned.splitlines():
         line = line.strip()
