@@ -25,12 +25,33 @@ import pytest
 from core.run import workdir
 
 
+# Captured pre-patch so test_family_name_is_the_launcher_shape pins
+# the production name even though the autouse fixture swaps it out.
+_REAL_FAMILY_NAME = workdir._family_name
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch, tmp_path):
-    """Reset the process cache and point the temp root at a private dir."""
+    """Reset the process cache and point the temp root at a private dir.
+
+    The family name is patched to a test-private one: this suite may
+    itself run under the ``bin/raptor`` launcher, where pytest's
+    ``tmp_path`` ALREADY lies inside the real ``raptor-<euid>`` family
+    (``TMPDIR=/…/raptor-<euid>/session-…``). The no-op detection then
+    correctly vetoes consolidation for any dir we can create, and every
+    standalone-behaviour test would fail while testing nothing. A
+    private name keeps all the logic under test real (mkdir posture,
+    squat refusal, dead-pid sweep, session naming) while making
+    "outside the family" constructible on any host;
+    test_family_name_is_the_launcher_shape pins the production name.
+    """
     monkeypatch.setattr(workdir, "_resolved", False)
     monkeypatch.setattr(workdir, "_cached", None)
     monkeypatch.delenv("RAPTOR_WORK_DIR", raising=False)
+    monkeypatch.setattr(
+        workdir, "_family_name",
+        lambda: f"raptor-{os.geteuid()}-selftest",
+    )
     tmp_root = tmp_path / "tmproot"
     tmp_root.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_root))
@@ -39,7 +60,14 @@ def _fresh(monkeypatch, tmp_path):
 
 
 def _family(base: Path) -> Path:
-    return base / f"raptor-{os.geteuid()}"
+    return base / workdir._family_name()
+
+
+def test_family_name_is_the_launcher_shape():
+    """The production family name must stay byte-compatible with the
+    ``bin/raptor`` launcher's session base (its sweep and this module
+    reclaim each other's dirs by that shared shape)."""
+    assert _REAL_FAMILY_NAME() == f"raptor-{os.geteuid()}"
 
 
 class TestLauncherNoOp:
