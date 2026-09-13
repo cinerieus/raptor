@@ -471,7 +471,25 @@ def _enumerate_candidates(
                     )
                     latest_cache[cache_key] = None
                     continue
-                target_version = (raw or "").lstrip("v")
+                # Gate on stable-semver shape like every other walker
+                # (_lookup_latest_release_or_tag documents why): a
+                # bundle/nightly/hostile "latest" tag must not become
+                # the proposed pin — under --apply it would be written
+                # into the ARG. And removeprefix, not lstrip: lstrip
+                # strips EVERY leading 'v' ("vault-1.2.3" → "ault-...").
+                from core.upstream_latest._version_filter import (
+                    parse_stable,
+                )
+                raw_value = raw or ""
+                if raw_value and parse_stable(raw_value) is None:
+                    skipped.append(
+                        (arg_name, dockerfile,
+                         f"upstream latest {raw_value!r} is not a "
+                         "stable semver version")
+                    )
+                    latest_cache[cache_key] = None
+                    continue
+                target_version = raw_value.removeprefix("v")
                 latest_cache[cache_key] = target_version
             if not target_version:
                 skipped.append(

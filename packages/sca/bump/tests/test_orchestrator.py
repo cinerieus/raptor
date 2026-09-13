@@ -109,6 +109,27 @@ def test_dockerfile_with_known_arg_at_latest_no_candidate(
     assert report.candidates == []
 
 
+def test_dockerfile_arg_nonsemver_latest_is_skipped_not_proposed(
+    tmp_path: Path,
+) -> None:
+    """A non-semver "latest" release (bundle tag, nightly, hostile
+    upstream) must never become the proposed ARG pin — pre-fix it
+    sailed through with zero eco checks (Clean) and, worse,
+    lstrip("v") mangled hyphenated tags ("vault-1.2.3" → "ault-...").
+    """
+    (tmp_path / "Dockerfile").write_text(
+        "ARG SEMGREP_VERSION=1.50.0\n"
+    )
+    http = _StubHttp({
+        "https://api.github.com/repos/semgrep/semgrep/releases/latest":
+            {"tag_name": "vault-nightly-20260901"},
+    })
+    report = run_bump(tmp_path, http=http)
+    assert report.candidates == []
+    assert any("not a stable semver" in reason
+               for _, _, reason in report.skipped), report.skipped
+
+
 def test_dockerfile_with_known_arg_below_latest_becomes_candidate(
     tmp_path: Path,
 ) -> None:
