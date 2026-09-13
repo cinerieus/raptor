@@ -59,6 +59,9 @@ _BINARY_MAGIC = (
     b"\xCA\xFE\xBA\xBE", # JVM class / Mach-O fat
     b"\xFE\xED\xFA\xCE", # Mach-O 32
     b"\xFE\xED\xFA\xCF", # Mach-O 64
+    b"\xCE\xFA\xED\xFE", # Mach-O 32 reversed (LE) — was missing; the
+                          # intree/binary_in_package tables carry it, so a
+                          # Mach-O 32 LE fixture escaped binary_in_tests
     b"\xCF\xFA\xED\xFE", # Mach-O 64 reversed
     b"PK\x03\x04",        # ZIP / JAR / DOCX / wheel
     b"\x1f\x8b",          # gzip

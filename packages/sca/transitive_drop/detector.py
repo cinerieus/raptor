@@ -445,10 +445,12 @@ def _dep_state_npm(
     transitive_name: str,
 ) -> dict | None:
     """npm's per-version metadata lives inline in the packument
-    (``versions[<ver>]``). Check for the transitive in ALL four
-    dep keys: ``dependencies`` (required), ``optionalDependencies``,
-    ``peerDependencies`` (with ``peerDependenciesMeta[name].optional``),
-    ``devDependencies`` (build-only)."""
+    (``versions[<ver>]``). Check for the transitive in the three
+    install-relevant dep keys: ``dependencies`` (required),
+    ``optionalDependencies``, ``peerDependencies`` (with
+    ``peerDependenciesMeta[name].optional``). ``devDependencies`` is
+    deliberately not consulted — it is never installed transitively,
+    so its presence says nothing about a runtime drop."""
     meta = client.get_metadata(parent_name)
     if not isinstance(meta, dict):
         return None

@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+
+import pytest
 
 from packages.sca.models import PinStyle
 from packages.sca.parsers.gitmodules import parse
+
+# skip-or-hermetic: the ls-tree fallback tests build REAL git repos —
+# on a git-less runner they must skip, not error.
+_needs_git = pytest.mark.skipif(
+    shutil.which("git") is None, reason="git binary not available",
+)
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    """Hermetic git env: neutralise global/system config and hooks so
+    an operator's ~/.gitconfig (fsmonitor, hooksPath, templates) can't
+    steer the fixture repos."""
+    import os
+
+    env = dict(os.environ)
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
 
 
 def _write_gitmodules(tmp_path: Path, content: str) -> Path:
@@ -273,19 +294,21 @@ def test_unparseable_url_skips_row_not_file(tmp_path, caplog):
 # git ls-tree fallback (no .git/modules/ but tree object has the SHA)
 # ---------------------------------------------------------------------------
 
+@_needs_git
 def test_ls_tree_fallback_resolves_sha(tmp_path):
     """When .git/modules/<name>/HEAD is absent, fall back to
     ``git ls-tree`` which reads the pinned SHA from the tree object."""
     import subprocess
     # Build a real git repo with a submodule-like tree entry.
-    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True,
+                   env=_git_env(tmp_path))
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.email", "t@t"],
-        capture_output=True,
+        capture_output=True, env=_git_env(tmp_path),
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.name", "t"],
-        capture_output=True,
+        capture_output=True, env=_git_env(tmp_path),
     )
     # Create a .gitmodules file.
     gm = tmp_path / ".gitmodules"
@@ -296,7 +319,7 @@ def test_ls_tree_fallback_resolves_sha(tmp_path):
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "add", ".gitmodules"],
-        capture_output=True,
+        capture_output=True, env=_git_env(tmp_path),
     )
     # Manually insert a gitlink (160000 mode) for ext/lib.
     fake_sha = "a" * 40
@@ -304,12 +327,12 @@ def test_ls_tree_fallback_resolves_sha(tmp_path):
     subprocess.run(
         ["git", "-C", str(tmp_path), "update-index", "--add",
          "--cacheinfo", f"160000,{fake_sha},ext/lib"],
-        capture_output=True,
+        capture_output=True, env=_git_env(tmp_path),
     )
     subprocess.run(
         ["git", "-C", str(tmp_path), "commit", "-m", "init",
          "--allow-empty"],
-        capture_output=True,
+        capture_output=True, env=_git_env(tmp_path),
     )
     # No .git/modules/ directory — the submodule hasn't been cloned.
     assert not (tmp_path / ".git" / "modules").exists()
@@ -318,11 +341,13 @@ def test_ls_tree_fallback_resolves_sha(tmp_path):
     assert d.pin_style == PinStyle.GIT
 
 
+@_needs_git
 def test_ls_tree_fallback_no_commit(tmp_path):
     """When there's no commit at all, the fallback returns None
     gracefully (no crash)."""
     import subprocess
-    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True,
+                   env=_git_env(tmp_path))
     gm = tmp_path / ".gitmodules"
     gm.write_text(
         '[submodule "x"]\n\tpath = x\n'

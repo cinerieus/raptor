@@ -16,8 +16,7 @@ matching OSV advisory), every PyPI dep that came up
 with on-demand wheel-metadata fetch enabled
 (:mod:`packages.sca.python_modules`). Cost is bounded by a
 forever-cache keyed on (name, version) and gated to CVE-bearing
-deps so clean projects pay nothing extra. See ``design/sca.md``
-§856.
+deps so clean projects pay nothing extra.
 """
 
 from __future__ import annotations

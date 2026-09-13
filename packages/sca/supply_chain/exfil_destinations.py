@@ -215,11 +215,10 @@ def _scan_file(
         last_pos = m.start()
         url_bytes = m.group(0)
         host_bytes = m.group("host") or b""
-        try:
-            url = url_bytes.decode("utf-8", errors="replace")
-            host = host_bytes.decode("utf-8", errors="replace").lower()
-        except UnicodeDecodeError:
-            continue
+        # errors="replace" cannot raise — no dead UnicodeDecodeError
+        # handler needed.
+        url = url_bytes.decode("utf-8", errors="replace")
+        host = host_bytes.decode("utf-8", errors="replace").lower()
         for rule in rules:
             if not _matches_rule(rule, url, host):
                 continue

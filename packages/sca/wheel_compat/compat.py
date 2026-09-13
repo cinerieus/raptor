@@ -33,6 +33,7 @@ The verdict ladder for emitting findings (``_FINDING_TIER`` in
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from packages.sca.wheel_compat.wheel_tags import (
@@ -450,7 +451,7 @@ def find_compatible_version(
     return None
 
 
-_STABLE_VERSION_RE = __import__("re").compile(
+_STABLE_VERSION_RE = re.compile(
     r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?(?:\.post\d+)?$"
 )
 

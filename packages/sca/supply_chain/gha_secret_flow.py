@@ -460,9 +460,9 @@ def _extract_redirect_blocks(
         argument is recursively scanned)
 
     Still NOT covered (documented for the next adversarial pass):
-      * Chained alias: ``A=$T; B=$A`` (only ``A`` is followed)
-      * Variable indirection: ``T=GITHUB_ENV; ... >> ${!T}``
       * Quote concatenation: ``T="$"; ... >> "${T}GITHUB_ENV"``
+        (chained aliases and ``${!T}`` variable indirection ARE
+        covered — see ``_aliased_targets``)
 
     Adversarial: each new evasion shape we close raises the cost of
     the next one.  The remaining gaps require either bash-parser-

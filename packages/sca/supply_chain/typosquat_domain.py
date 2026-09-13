@@ -35,7 +35,7 @@ from core.json import load_json_bounded
 
 from .._test_paths import TEST_DIR_NAMES as _SHARED_TEST_DIR_NAMES
 from ..discovery import EXCLUDED_DIR_NAMES
-from ..models import Confidence, Dependency, Manifest
+from ..models import PinStyle, Confidence, Dependency, Manifest
 from ._edit_distance import damerau_levenshtein
 from typing import TYPE_CHECKING
 
@@ -332,8 +332,7 @@ def _stub_dep(manifest: Manifest | None, src: Path) -> Dependency:
         declared_in=declared_in,
         scope="main",
         is_lockfile=False,
-        pin_style=__import__("packages.sca.models",
-                              fromlist=["PinStyle"]).PinStyle.UNKNOWN,
+        pin_style=PinStyle.UNKNOWN,
         direct=True,
         purl=f"pkg:project/{src.parent.name}",
         parser_confidence=Confidence(

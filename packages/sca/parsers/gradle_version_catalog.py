@@ -22,7 +22,7 @@ Without catalog support, ``parsers/gradle_dsl.py`` sees
 ``libs.spring.boot.starter`` as an unparseable accessor and skips
 the dep entirely — losing ~80-100% of dep coverage on any modern
 Gradle solution. This module is the read-side fix; the sibling
-rewriter in ``bump/rewriters/gradle_version_catalog`` handles the
+rewriter in ``packages/sca/rewriters/gradle_version_catalog`` handles the
 write-side for bumper / harden.
 
 Conventional location:

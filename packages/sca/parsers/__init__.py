@@ -1,11 +1,8 @@
 """Manifest parsers — one per file format.
 
-Every parser implements:
-
-    class ManifestParser(Protocol):
-        ecosystem: str
-        filenames: List[str]
-        def parse(self, path: Path) -> List[Dependency]: ...
+Parsers are plain functions registered per filename; the exported
+``ManifestParser`` Protocol documents the class-based shape for
+external implementations but no in-tree parser uses it.
 
 Discovery emits ``Manifest`` records keyed by filename; ``parse_manifest``
 dispatches to the right parser. Parsers do not call out to the network,

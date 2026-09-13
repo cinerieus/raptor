@@ -3,7 +3,9 @@
 Small, pure functions that recur byte-for-byte across the
 per-ecosystem modules (``cargo_function_level``,
 ``rubygems_function_level``, ``python.py``, ``nuget.py``, ...).
-Consolidated here so the copies can't drift.
+Consolidated here so the copies can't drift. (``python.py`` and
+``nodejs.py`` still carry local ``_format_evidence`` variants with a
+different overflow-marker text — not yet migrated.)
 
 Deliberately NOT here: the per-ecosystem variants that look similar
 but differ behaviourally — e.g. ``go_function_level`` /
