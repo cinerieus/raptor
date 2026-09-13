@@ -49,7 +49,11 @@ def record_cross_family_outcomes(
         if not isinstance(cf, dict):
             continue
 
-        verdict = cf.get("verdict", "")
+        # `or ""` (not a .get default): a present-but-None verdict —
+        # e.g. a checker that errored out upstream — must degrade to
+        # a skip, not AttributeError the walk and drop every
+        # remaining finding's event.
+        verdict = str(cf.get("verdict") or "")
         if verdict.startswith("skipped"):
             continue
 

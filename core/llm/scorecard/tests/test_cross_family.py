@@ -232,3 +232,25 @@ class TestConsistencyNotReliabilityGraded:
             if event_type in RELIABILITY_EVENT_TYPES:
                 assert counts.correct == 0
                 assert counts.incorrect == 0
+
+
+class TestMalformedVerdict:
+    def test_none_verdict_skips_without_aborting_walk(self, tmp_path: Path):
+        """A present-but-None verdict (checker errored upstream) must
+        degrade to a skip — pre-fix it raised AttributeError outside
+        the per-event try, dropping every remaining finding's event."""
+        sc = ModelScorecard(path=tmp_path / "sc.json")
+        results = {
+            "F-001": _make_result("F-001", cf_check={
+                "verdict": None,
+                "checker_model": "gpt-5.2",
+            }),
+            "F-002": _make_result("F-002", cf_check={
+                "verdict": "disputed",
+                "checker_model": "gpt-5.2",
+                "trigger": "verdict-flip",
+                "checker_ruling": "disagree",
+            }),
+        }
+        n = record_cross_family_outcomes(sc, results_by_id=results)
+        assert n == 1
