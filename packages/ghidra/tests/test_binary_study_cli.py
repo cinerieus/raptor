@@ -228,3 +228,37 @@ class TestClampGuards:
         mod._clamp_domain_model(out, out / "decomp-tree")
         data = json.loads((out / "domain-model.json").read_text())
         assert data["concepts"][0]["confidence"] == "observed"
+
+
+class TestPersistEnrichedDb:
+    """The size guard must measure the bytes actually written
+    (indent-2 artifact form), not compact json.dumps — a database
+    that passes a compact-size guard but exceeds the read ceiling on
+    disk bricks every capped reader of the shared cache."""
+
+    def test_written_file_never_exceeds_ceiling(self, monkeypatch,
+                                                tmp_path: Path):
+        mod = _load_cli(monkeypatch)
+        # Data whose COMPACT size is under the ceiling but whose
+        # indent-2 artifact form is over it.
+        data = {"functions": [{"n": i} for i in range(2000)]}
+        compact = len(json.dumps(data, separators=(",", ":")))
+        from core.json import dumps_artifact
+        pretty = len(dumps_artifact(data).encode("utf-8")) + 1
+        ceiling = (compact + pretty) // 2
+        assert compact <= ceiling < pretty
+        monkeypatch.setattr(mod, "_MAX_DB_BYTES", ceiling)
+
+        redb = tmp_path / "re-database.json"
+        persisted = mod._persist_enriched_db(redb, data)
+        assert persisted is False
+        assert not redb.exists()
+
+    def test_under_ceiling_persists_readable(self, monkeypatch,
+                                             tmp_path: Path):
+        mod = _load_cli(monkeypatch)
+        data = {"functions": [{"n": 1}]}
+        redb = tmp_path / "re-database.json"
+        assert mod._persist_enriched_db(redb, data) is True
+        from core.json import load_json
+        assert load_json(redb, max_bytes=mod._MAX_DB_BYTES) == data

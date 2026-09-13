@@ -322,6 +322,34 @@ def _clamp_domain_model(output_dir: Path, tree_root: Path) -> None:
               f"{str(exc)[:200]}", file=sys.stderr)
 
 
+def _persist_enriched_db(redb_path: Path, enriched: dict) -> bool:
+    """Persist the enriched database unless the ON-DISK size would
+    cross the shared read ceiling and brick every capped reader of
+    this cache thereafter (recovery is a full re-import).
+
+    Measures the bytes that will actually be written: the guard used
+    to measure COMPACT json.dumps while save_json writes indent=2
+    (typically 1.2-2x larger), so a database that passed the guard
+    could still exceed the ceiling on disk. Serialise once with the
+    artifact encoder and write those exact bytes.
+    """
+    from core.atomic_fs import write_text_atomically
+    from core.json import dumps_artifact
+    content = dumps_artifact(enriched) + "\n"
+    size = len(content.encode("utf-8"))
+    if size <= _MAX_DB_BYTES:
+        write_text_atomically(redb_path, content)
+        return True
+    print(
+        "binary-study: NOT persisting the enriched "
+        f"database ({size} bytes exceeds the "
+        f"{_MAX_DB_BYTES}-byte read ceiling); the "
+        "in-memory copy still feeds this run",
+        file=sys.stderr,
+    )
+    return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="raptor-binary-study",
@@ -500,19 +528,7 @@ def main() -> int:
                 # enriched database would cross the shared read
                 # ceiling and brick every capped reader of this
                 # cache thereafter.
-                import json as _json
-                enriched = db.to_dict()
-                approx = len(_json.dumps(enriched))
-                if approx <= _MAX_DB_BYTES:
-                    save_json(redb_path, enriched)
-                else:
-                    print(
-                        "binary-study: NOT persisting the enriched "
-                        f"database ({approx} bytes exceeds the "
-                        f"{_MAX_DB_BYTES}-byte read ceiling); the "
-                        "in-memory copy still feeds this run",
-                        file=sys.stderr,
-                    )
+                _persist_enriched_db(redb_path, db.to_dict())
 
         # Force a fresh, reading-list-NARROWED prep on the next pass:
         # prep short-circuits on a cached study-list.json, and
