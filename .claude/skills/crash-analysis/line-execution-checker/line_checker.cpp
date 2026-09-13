@@ -2,12 +2,17 @@
 // Compile: g++ -O3 -std=c++17 line_checker.cpp -o line-checker
 // Usage: ./line-checker file.c:line [file.c:line ...]
 
+#include <cctype>
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 #include <filesystem>
+
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -76,6 +81,44 @@ std::unordered_map<int, uint64_t> parse_gcov_file(const std::string& filename) {
     return line_counts;
 }
 
+// Source names arrive on argv from file:line queries the
+// crash-analysis flow derives from bug-tracker reports —
+// attacker-shaped, so they must never reach a shell and must not be
+// option-shaped when passed to gcov.
+bool valid_source_name(const std::string& s) {
+    if (s.empty() || s[0] == '-') return false;
+    for (char ch : s) {
+        if (!(std::isalnum(static_cast<unsigned char>(ch)) ||
+              ch == '.' || ch == '_' || ch == '/' || ch == '-' ||
+              ch == '+')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Run "gcov <source_file>" with an argv array (no shell), output
+// discarded. Failure is tolerated: the caller re-scans for .gcov
+// files and reports "no coverage data" if none appeared.
+void run_gcov(const std::string& source_file) {
+    if (!valid_source_name(source_file)) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        execlp("gcov", "gcov", source_file.c_str(),
+               static_cast<char*>(nullptr));
+        _exit(127);
+    } else if (pid > 0) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+    }
+}
+
 // Find .gcov file for source file
 std::string find_gcov_file(const std::string& source_file) {
     std::string basename = fs::path(source_file).filename().string();
@@ -93,8 +136,7 @@ std::string find_gcov_file(const std::string& source_file) {
     } catch (...) {}
     
     // Try to generate if not found
-    std::string cmd = "gcov " + source_file + " >/dev/null 2>&1";
-    system(cmd.c_str());
+    run_gcov(source_file);
     
     // Look again
     try {

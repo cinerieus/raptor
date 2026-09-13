@@ -102,6 +102,22 @@ class TestVerdictAgainstRealGcov:
         assert proc.returncode == 1
         assert "NOT EXECUTED" in proc.stdout
 
+    def test_gcov_regenerated_without_shell(self, checker, tmp_path):
+        """With .gcda/.gcno present but no .gcov, the checker invokes
+        gcov itself (argv array, no shell) and still answers."""
+        (tmp_path / "lc_test.c").write_text(_TEST_SRC, encoding="utf-8")
+        for cmd in (
+            ["gcc", "--coverage", "-O0", "lc_test.c", "-o", "lc_test"],
+            ["./lc_test"],
+        ):
+            proc = _run(cmd, tmp_path)
+            assert proc.returncode == 0, f"{cmd} failed:\n{proc.stderr}"
+        assert not (tmp_path / "lc_test.c.gcov").exists()
+
+        proc = _run([str(checker), f"lc_test.c:{EXECUTED_LINE}"], tmp_path)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "EXECUTED (1 time)" in proc.stdout
+
     def test_mixed_queries_exit_nonzero(self, checker, coverage_dir):
         proc = _run(
             [
@@ -114,3 +130,20 @@ class TestVerdictAgainstRealGcov:
         assert proc.returncode == 1
         assert f"lc_test.c:{EXECUTED_LINE} EXECUTED" in proc.stdout
         assert f"lc_test.c:{UNEXECUTED_LINE} NOT EXECUTED" in proc.stdout
+
+
+class TestNoShellInjection:
+    def test_shell_metacharacters_never_execute(self, checker, tmp_path):
+        """A query file name is attacker-shaped (bug-tracker derived).
+        The old ``system("gcov " + source_file + ...)`` executed shell
+        payloads embedded in it; the argv-array replacement must not.
+        """
+        payload = "x;touch PWNED"  # becomes the file part of file:line
+        proc = _run([str(checker), f"{payload}:1"], tmp_path)
+        assert proc.returncode == 2  # no coverage data — refused, not executed
+        assert not (tmp_path / "PWNED").exists()
+
+    def test_option_shaped_source_not_passed_to_gcov(self, checker, tmp_path):
+        proc = _run([str(checker), "--object-directory=/tmp:1"], tmp_path)
+        assert proc.returncode == 2
+        assert "No coverage data" in proc.stderr
