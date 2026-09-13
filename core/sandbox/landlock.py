@@ -153,8 +153,9 @@ def _landlock_functional_self_test() -> bool:
             pid = os.fork()
     except OSError:
         # Both pipe ends leak unless we close them here — the finally
-        # below only covers `r` (it expected the child to already have
-        # closed `r`, and the parent to have closed `w` at line 133).
+        # below only covers `r` (it expects the child to have closed
+        # its inherited `r`, and the parent to have closed `w` right
+        # after a successful fork).
         # Fork failures are rare (ENOMEM / nr-limit) but a leaked pipe
         # pair is still two FDs gone until the Python process exits.
         for fd in (r, w):
@@ -182,11 +183,20 @@ def _landlock_functional_self_test() -> bool:
     os.close(w)
     try:
         data = os.read(r, 1)
-        os.waitpid(pid, 0)  # reap; verdict is carried by the pipe byte
         return data == b"\x01"
     except OSError:
         return False
     finally:
+        # Reap in the finally: an OSError from os.read used to jump
+        # straight to the except arm, skipping the waitpid and
+        # leaving the self-test child a zombie for the life of the
+        # process. The verdict is carried by the pipe byte, not the
+        # exit status, so reaping here is correct on every path (the
+        # child always _exit(0)s promptly).
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
         try:
             os.close(r)
         except OSError:
