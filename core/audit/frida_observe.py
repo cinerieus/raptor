@@ -556,15 +556,23 @@ def _safe_env() -> dict[str, str]:
     """
     try:
         from core.config import RaptorConfig
-        env = RaptorConfig.get_safe_env()
-        for key in RaptorConfig.TARGET_ENV_STRIP_SET:
-            env.pop(key, None)
-        return env
+        # Whole marker-family strip, not just TARGET_ENV_STRIP_SET:
+        # several RAPTOR_* names legitimately ride the safe-env
+        # allowlist for RAPTOR's own tool children, but to the
+        # spawned TARGET every one is a one-getenv "you are inside
+        # RAPTOR" tell (packages/frida/runner.py adopted the same
+        # helper for its spawn path).
+        return RaptorConfig.strip_target_exec_markers(
+            RaptorConfig.get_safe_env(),
+        )
     except Exception:  # noqa: BLE001 — config unavailable: fall back to manual scrub
-        env = dict(os.environ)
-        for key in ("CLAUDECODE", "_RAPTOR_TRUSTED",
-                    "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN"):
-            env.pop(key, None)
-        for key in ("TERMINAL", "EDITOR", "VISUAL", "BROWSER", "PAGER"):
+        # Hand-copied prefixes mirror TARGET_EXEC_MARKER_ENV_PREFIXES
+        # (config is unimportable on this branch).
+        env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith(("RAPTOR_", "_RAPTOR"))
+        }
+        for key in ("CLAUDECODE", "TERMINAL", "EDITOR", "VISUAL",
+                    "BROWSER", "PAGER"):
             env.pop(key, None)
         return env

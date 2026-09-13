@@ -88,6 +88,20 @@ def test_frida_safe_env_excludes_the_set(monkeypatch):
         assert member not in env, f"{member} reached the frida CLI env"
 
 
+def test_frida_safe_env_strips_the_marker_family(monkeypatch):
+    """frida spawn-mode targets inherit this env: allowlisted RAPTOR_*
+    riders (budget knobs, CI stamp) are one-getenv fingerprints to a
+    hostile binary — the whole prefix family must strip, exactly as
+    on the packages/frida runner spawn path."""
+    monkeypatch.setenv("RAPTOR_EF_TIMEOUT_S", "5")
+    monkeypatch.setenv("RAPTOR_CI", "1")
+    monkeypatch.setenv("_RAPTOR_TRUSTED", "1")
+    from core.audit.frida_observe import _safe_env
+    env = _safe_env()
+    for name in ("RAPTOR_EF_TIMEOUT_S", "RAPTOR_CI", "_RAPTOR_TRUSTED"):
+        assert name not in env, f"{name} fingerprints RAPTOR to the target"
+
+
 def test_codeql_build_env_blocks_raptor_vars():
     """Repo-supplied build metadata must not inject RAPTOR control
     vars. Exercise the layering predicate exactly as
