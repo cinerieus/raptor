@@ -162,11 +162,14 @@ jobs:
         # decide_baseline_refresh gates that capture — any errored
         # scan, driver-phase crash, or incomplete sweep refuses the
         # refresh and keeps the red behaviour.
+        # The driver imports packages.sca.* relative to the checkout
+        # root: stdin scripts (``python -``) already resolve imports
+        # from the cwd (sys.path[0] == ''), and the step runs from the
+        # workspace root — no sys.path edits (the repo bans them).
         run: |
           set -euo pipefail
           python - <<'PY'
           import os, sys
-          sys.path.insert(0, '.')
           from pathlib import Path
           from packages.sca.calibration.project_samples import PROJECT_SAMPLES
           from packages.sca.calibration.stress import (
