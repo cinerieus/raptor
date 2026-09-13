@@ -279,8 +279,17 @@ def apply_sca_advisories(
             if s not in strategies:
                 strategies.append(s)
         gap["strategies"] = strategies
-        hyps = gap.setdefault("injected_hypotheses", [])
-        if not any(h.get("source") == "sca_advisory" for h in hyps):
+        # "Never raises" (docstring contract): a malformed gap — a
+        # non-list injected_hypotheses or a non-dict entry — must not
+        # AttributeError outside the try above.
+        hyps = gap.get("injected_hypotheses")
+        if not isinstance(hyps, list):
+            hyps = []
+            gap["injected_hypotheses"] = hyps
+        if not any(
+            isinstance(h, dict) and h.get("source") == "sca_advisory"
+            for h in hyps
+        ):
             hyps.append({
                 "mechanism": _advisory_note(info),
                 "confidence": "medium" if info["cwes"] else "low",
