@@ -110,3 +110,26 @@ def test_network_policy_mode_round_trips_and_defaults_isolated() -> None:
         name="x", network=NetworkPolicy(mode="unrestricted"))
     reloaded = EnvironmentSpec.from_json(spec.to_json())
     assert reloaded.network.mode == "unrestricted"
+
+
+def test_run_env_accepts_compose_style_kv_strings() -> None:
+    """The natural compose/docker spelling (env: ["K=V"]) must build a
+    working spec: tuple("K=V") char-splits, which used to construct a
+    spec that only crashed later at provision time (env_dict)."""
+    rs = RunSpec.from_dict({"env": ["FOO=bar", "EMPTY=", "EQ=a=b"]})
+    assert rs.env_dict() == {"FOO": "bar", "EMPTY": "", "EQ": "a=b"}
+
+
+def test_run_env_pair_lists_unchanged() -> None:
+    rs = RunSpec.from_dict({"env": [["K", "V"], ("K2", "V2")]})
+    assert rs.env == (("K", "V"), ("K2", "V2"))
+    assert rs.env_dict() == {"K": "V", "K2": "V2"}
+
+
+def test_run_env_malformed_entries_fail_loudly_at_parse() -> None:
+    for bad in (["NOVALUE"],       # pass-through spelling: unsupported
+                ["=v"],            # empty key
+                [["K", "V", "X"]],  # not a pair
+                [42]):             # not a pair or string
+        with pytest.raises(ValueError, match="env entry"):
+            RunSpec.from_dict({"env": bad})
