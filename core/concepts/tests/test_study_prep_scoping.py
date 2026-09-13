@@ -504,3 +504,75 @@ class TestExternalHeaderContainment:
         ])
         assert result.returncode == 0, result.stderr
         assert "pass 1.5: 1 external headers scanned" in result.stderr
+
+
+# ------------------------------------------------------------------
+# study-list.json cache: scope-keyed reuse
+# ------------------------------------------------------------------
+
+
+class TestStudyListCacheScope:
+    """The cache short-circuit must key on the SCOPE, not bare file
+    existence — re-running in the same output dir with a different
+    --identifier (or with newly queued reading-list items) previously
+    reused the stale batch, so the reading-list queue never drained."""
+
+    def test_same_scope_reuses_cache(self, tmp_path) -> None:
+        repo = _make_correlate_tree(tmp_path)
+        out = tmp_path / "out"
+        args = [str(repo), str(out), "--root", str(repo),
+                "--identifier", "alpha_ctx"]
+        first = _run_prep(args)
+        assert first.returncode == 0, first.stderr
+        second = _run_prep(args)
+        assert second.returncode == 0, second.stderr
+        assert "reusing cached study-list.json" in second.stderr
+
+    def test_scope_change_regenerates(self, tmp_path) -> None:
+        repo = _make_correlate_tree(tmp_path)
+        out = tmp_path / "out"
+        first = _run_prep([str(repo), str(out), "--root", str(repo),
+                           "--identifier", "alpha_ctx"])
+        assert first.returncode == 0, first.stderr
+        assert "beta_ops_run" not in _item_names(out)
+        second = _run_prep([str(repo), str(out), "--root", str(repo),
+                            "--identifier", "beta_ops_run"])
+        assert second.returncode == 0, second.stderr
+        assert "reusing cached" not in second.stderr
+        assert "beta_ops_run" in _item_names(out)
+
+    def test_new_reading_list_items_regenerate(self, tmp_path) -> None:
+        repo = _make_correlate_tree(tmp_path)
+        out = tmp_path / "out"
+        rl = tmp_path / "reading-list.json"
+        rl.write_text(json.dumps({"items": [{
+            "id": "rl-1", "question": "How does `alpha_ctx` work?",
+            "source_command": "audit", "resolved": False,
+        }]}), encoding="utf-8")
+        args = [str(repo), str(out), "--root", str(repo),
+                "--reading-list", str(rl)]
+        first = _run_prep(args)
+        assert first.returncode == 0, first.stderr
+        # A new pending item lands on the queue between runs.
+        rl.write_text(json.dumps({"items": [
+            {"id": "rl-1", "question": "How does `alpha_ctx` work?",
+             "source_command": "audit", "resolved": False},
+            {"id": "rl-2", "question": "What does `beta_ops_run` do?",
+             "source_command": "audit", "resolved": False},
+        ]}), encoding="utf-8")
+        second = _run_prep(args)
+        assert second.returncode == 0, second.stderr
+        assert "reusing cached" not in second.stderr
+        assert "beta_ops_run" in _item_names(out)
+
+    def test_legacy_cache_without_scope_regenerates(self, tmp_path) -> None:
+        repo = _make_correlate_tree(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "study-list.json").write_text(
+            json.dumps({"items": []}), encoding="utf-8")
+        result = _run_prep([str(repo), str(out), "--root", str(repo),
+                            "--identifier", "alpha_ctx"])
+        assert result.returncode == 0, result.stderr
+        assert "reusing cached" not in result.stderr
+        assert "alpha_ctx" in _item_names(out)

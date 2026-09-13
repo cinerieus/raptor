@@ -1713,6 +1713,33 @@ _IDENT_RE = re.compile(r"\b([a-zA-Z_]\w+_t)\b")
 _CONTEXT_NAME_RE = re.compile(r"(?:Unresolved|Dependency)\s+\w+:\s+(\S+)")
 
 
+def _scope_fingerprint(parsed: argparse.Namespace) -> dict:
+    """Scope stamp for the study-list cache: every input that changes
+    which items land in study-list.json. Stored under ``scope`` in the
+    written file; the cache short-circuit reuses the file only when
+    the stamp matches the current invocation."""
+    pending: list[str] = []
+    if parsed.reading_list:
+        raw = load_json(Path(parsed.reading_list),
+                        max_bytes=_MAX_STUDY_ARTIFACT_BYTES)
+        if isinstance(raw, dict):
+            pending = sorted(
+                str(item.get("id") or item.get("question") or "")
+                for item in raw.get("items", [])
+                if isinstance(item, dict)
+                and not item.get("resolved")
+                and not item.get("unresolvable")
+            )
+    return {
+        "identifier": parsed.identifier or "",
+        "concept": parsed.concept or "",
+        "correlate": parsed.correlate or "",
+        "narrow": bool(parsed.narrow),
+        "redb": str(parsed.redb or ""),
+        "reading_list_pending": pending,
+    }
+
+
 def _load_reading_list(path: Path) -> tuple[list[str], list[str]]:
     """Extract pending items from reading-list.json, partitioned by resolution.
 
@@ -2554,10 +2581,27 @@ def main() -> None:
     output_dir = Path(parsed.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Cache validity is keyed on the SCOPE, not bare existence: a
+    # cached study-list from an earlier differently-scoped run (or one
+    # predating newly queued reading-list items) must not short-
+    # circuit this run — that both re-spends the study LLM budget on
+    # the identical old batch and starves the reading-list drain
+    # (pending items never enter the study list). A legacy cache
+    # without a scope stamp regenerates: one cheap mechanical re-run
+    # beats silently reusing a list of unknown scope.
+    scope_fp = _scope_fingerprint(parsed)
     study_list_cache = output_dir / "study-list.json"
     if study_list_cache.is_file() and not getattr(parsed, "force", False):
-        print("study-prep: reusing cached study-list.json", file=sys.stderr)
-        return 0
+        cached = load_json(study_list_cache,
+                           max_bytes=_MAX_STUDY_ARTIFACT_BYTES)
+        cached_scope = (cached.get("scope")
+                        if isinstance(cached, dict) else None)
+        if cached_scope == scope_fp:
+            print("study-prep: reusing cached study-list.json",
+                  file=sys.stderr)
+            return 0
+        print("study-prep: cached study-list.json has a different "
+              "scope — regenerating", file=sys.stderr)
 
     if parsed.root:
         source_root = Path(parsed.root).resolve()
@@ -3273,6 +3317,7 @@ def main() -> None:
     out_data = {
         "target": str(target),
         "source_root": str(source_root),
+        "scope": scope_fp,
         "file_count": len(source_files),
         "resolved_includes": len(resolved_includes),
         "identifiers": ",".join(identifiers) if identifiers else None,
