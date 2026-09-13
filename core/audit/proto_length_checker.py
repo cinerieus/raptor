@@ -123,10 +123,55 @@ def _find_line(source: str, pos: int) -> int:
     return source[:pos].count('\n') + 1
 
 
+# Chunk marker the xref producer emits between concatenated neighbor
+# decompilations — each marks the start of an independent function.
+_XREF_SEGMENT_MARKER_RE = re.compile(
+    r"(?m)^// --- (?:caller|callee): .+ ---$",
+)
+
+
+def _segment_bounds(
+    search_source: str,
+    primary_len: int,
+) -> List[tuple]:
+    """``[start, end)`` spans of independent functions.
+
+    The primary function occupies ``[0, primary_len)``; the xref
+    suffix is split on the producer's chunk markers.  Marker-less
+    xref text stays one segment (no scoping information available).
+    """
+    bounds: List[tuple] = [(0, primary_len)]
+    starts = [
+        m.start()
+        for m in _XREF_SEGMENT_MARKER_RE.finditer(
+            search_source, primary_len,
+        )
+    ]
+    if not starts:
+        if primary_len < len(search_source):
+            bounds.append((primary_len, len(search_source)))
+        return bounds
+    if starts[0] > primary_len:
+        bounds.append((primary_len, starts[0]))
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(search_source)
+        bounds.append((s, e))
+    return bounds
+
+
+def _segment_start(pos: int, bounds: List[tuple]) -> int:
+    for s, e in bounds:
+        if s <= pos < e:
+            return s
+    return 0
+
+
 def _var_has_upper_bound(
     source: str,
     var_name: str,
     before_pos: int,
+    *,
+    start: int = 0,
 ) -> Optional[str]:
     """Check if var_name has an upper-bound check before before_pos.
 
@@ -135,8 +180,12 @@ def _var_has_upper_bound(
     read ``while (i < len)`` (a bound on ``i``) as an upper bound on
     ``len`` and hid the classic recv → malloc(len) → copy bug behind
     its own copy loop.
+
+    ``start`` scopes the scan to one function segment: the xref blob
+    concatenates unrelated functions, and a same-named bound in a
+    DIFFERENT function must not read as a guard on this chain.
     """
-    prefix = source[:before_pos]
+    prefix = source[start:before_pos]
     for m in _RETURN_CHECK_RE.finditer(prefix):
         if m.group(1) == var_name:
             return m.group(2)
@@ -164,11 +213,16 @@ def check_proto_length(
     patterns into caller/callee decompilation (cross-function chains).
     """
     findings: List[ProtoLengthFinding] = []
+    finding_keys: List[tuple] = []
     primary_len = len(source)
 
     search_source = source
     if xref_source:
-        search_source = source + xref_source
+        # Newline sentinel: without it the primary's last line glues
+        # to the xref's first and the line-anchored regexes can match
+        # across the seam.
+        search_source = source + "\n" + xref_source
+    segments = _segment_bounds(search_source, primary_len)
 
     length_candidates: Dict[str, Dict[str, Any]] = {}
 
@@ -211,7 +265,8 @@ def check_proto_length(
                 continue
 
             bound = _var_has_upper_bound(
-                search_source, len_var, alloc["pos"])
+                search_source, len_var, alloc["pos"],
+                start=_segment_start(alloc["pos"], segments))
             if bound is not None:
                 continue
 
@@ -251,6 +306,9 @@ def check_proto_length(
                     ),
                     confidence="medium" if is_xref else "high",
                 ))
+                finding_keys.append(
+                    (len_var, line, alloc["pos"], m.start()),
+                )
 
             for m in _SECOND_RECV_RE.finditer(search_source):
                 if m.start() < alloc["pos"]:
@@ -290,6 +348,9 @@ def check_proto_length(
                     ),
                     confidence="medium" if is_xref else "high",
                 ))
+                finding_keys.append(
+                    (len_var, line, alloc["pos"], m.start()),
+                )
 
     for len_var, len_info in length_candidates.items():
         for m in _COPY_RE.finditer(search_source):
@@ -306,7 +367,8 @@ def check_proto_length(
                 continue
 
             bound = _var_has_upper_bound(
-                search_source, len_var, m.start())
+                search_source, len_var, m.start(),
+                start=_segment_start(m.start(), segments))
             if bound is not None:
                 continue
 
@@ -334,11 +396,14 @@ def check_proto_length(
                 ),
                 confidence="medium",
             ))
+            finding_keys.append((len_var, line, -1, m.start()))
 
-    seen: set[tuple[str, int]] = set()
+    # Dedup on (var, line, alloc pos, copy pos): cross-function
+    # findings all report line 0, so a line-only key collapsed
+    # distinct xref chains into one row.
+    seen: set[tuple] = set()
     deduped: List[ProtoLengthFinding] = []
-    for f in findings:
-        key = (f.length_var, f.line)
+    for key, f in zip(finding_keys, findings):
         if key not in seen:
             seen.add(key)
             deduped.append(f)
