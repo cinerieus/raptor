@@ -1034,3 +1034,62 @@ def test_real_replay_first_run_etxtbsy_is_spawn_failure_not_outcome(
     sf = [d for d in result.run_details
           if d.get("outcome") == "spawn_failure"]
     assert sf and sf[0]["run"] == 1
+
+
+# ----------------------------------------------------------------------
+# Infra-error runs never read as witness non-determinism — that word is
+# reserved for clean executed runs that disagree.
+# ----------------------------------------------------------------------
+
+def test_all_error_runs_read_inconclusive_not_nondeterministic(
+        tmp_path, monkeypatch):
+    bundle, data, fake_bin = _replay_fixture(tmp_path)
+
+    def flaky(cmd, **kwargs):
+        raise OSError("transient")
+
+    monkeypatch.setattr(core.sandbox, "run_untrusted", flaky)
+    result = reproduce_witness(bundle, data, binary_path=fake_bin, n=2)
+    assert result.reproduced is False
+    assert result.deterministic is False
+    assert "non-deterministic" not in result.reason
+    assert "inconclusive" in result.reason
+    assert "infrastructure" in result.reason
+
+
+def test_mixed_error_and_match_reads_inconclusive(tmp_path, monkeypatch):
+    """One clean matching run + one infra error: not reproduced, but
+    the reason names the errors instead of claiming outcome variance."""
+    from packages.zkpox.reproduce import _finalize
+
+    result = _finalize("crash", ["crash", "error"], 2)
+    assert result.reproduced is False
+    assert "non-deterministic" not in result.reason
+    assert "inconclusive" in result.reason
+    assert "infrastructure" in result.reason
+
+
+def test_clean_disagreement_still_reads_nondeterministic():
+    from packages.zkpox.reproduce import _finalize
+
+    result = _finalize("crash", ["crash", "no_obvious_effect"], 2)
+    assert "non-deterministic" in result.reason
+
+
+def test_error_plus_offtarget_reads_offtarget():
+    from packages.zkpox.reproduce import _finalize
+
+    result = _finalize("crash", ["no_obvious_effect", "error"], 2)
+    assert "non-deterministic" not in result.reason
+    assert "off-target" in result.reason
+    assert result.deterministic is True
+
+
+def test_error_plus_clean_disagreement_names_both():
+    from packages.zkpox.reproduce import _finalize
+
+    result = _finalize(
+        "crash", ["crash", "no_obvious_effect", "error"], 3,
+    )
+    assert "non-deterministic" in result.reason
+    assert "infrastructure error" in result.reason

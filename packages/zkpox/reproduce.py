@@ -264,7 +264,15 @@ def _finalize(
     """
     executed = len(observed)
     reproduced = executed > 0 and all(o == expected for o in observed)
-    deterministic = bool(observed) and len(set(observed)) == 1
+    # "error" entries are runs whose replay RAISED (infrastructure
+    # noise), not observed target behaviour. They still block
+    # ``reproduced`` (fail-safe: an errored run is not a match), but
+    # they must not read as witness NON-DETERMINISM — that word is
+    # reserved for clean executed runs that disagree — and an all-error
+    # set is not "deterministic" either.
+    non_error = [o for o in observed if o != "error"]
+    errors = executed - len(non_error)
+    deterministic = bool(non_error) and len(set(non_error)) == 1
     excluded_note = (
         f" ({executed}/{n} planned runs executed; the rest were "
         f"spawn-failure exclusions — infrastructure, not outcome "
@@ -280,6 +288,33 @@ def _finalize(
         elif reproduced:
             reason = (
                 f"all {executed} executed runs reproduced {expected!r}"
+                + excluded_note
+            )
+        elif errors and not non_error:
+            reason = (
+                f"inconclusive: every executed run raised an "
+                f"infrastructure error (not outcome evidence; see "
+                f"run_details)" + excluded_note
+            )
+        elif errors and all(o == expected for o in non_error):
+            reason = (
+                f"inconclusive: {len(non_error)} clean run(s) "
+                f"reproduced {expected!r} but {errors} run(s) raised "
+                f"infrastructure errors (see run_details)"
+                + excluded_note
+            )
+        elif errors and deterministic:
+            reason = (
+                f"deterministic but off-target: all clean runs "
+                f"produced {non_error[0]!r}, expected {expected!r}; "
+                f"{errors} infrastructure error(s) (see run_details)"
+                + excluded_note
+            )
+        elif errors:
+            reason = (
+                f"non-deterministic: clean-run outcomes varied "
+                f"({non_error}); {errors} infrastructure error(s) "
+                f"excluded from that judgement (see run_details)"
                 + excluded_note
             )
         elif deterministic:
