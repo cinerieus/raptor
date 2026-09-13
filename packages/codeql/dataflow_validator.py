@@ -30,6 +30,7 @@ from core.smt_solver import BVProfile
 from core.smt_solver.path_feasibility import (
     PathCondition,
     check_path_feasibility,
+    check_path_feasibility_dual,
 )
 from core.llm.scorecard import fast_tier_model_name, run_cheap_fp_check
 from core.llm.task_types import TaskType
@@ -885,7 +886,22 @@ class DataflowValidator:
                 target = _steering_target(conditions)
                 if target is not None:
                     prefer = (target, "max")
-            smt_result = check_path_feasibility(
+            # Signedness honesty: ``_infer_bv_profile``'s ``signed`` is a
+            # heuristic default (unsigned) unless the LLM hint pinned it
+            # with an explicit boolean. Under a guessed-unsigned profile
+            # the ubiquitous C signed error check (``ret < 0``) encodes
+            # as ``ULT(ret, 0)`` — unsat — so one signedness-mismatched
+            # guard anywhere in the path would refute the whole finding
+            # pre-LLM. When signedness is a guess, a refutation is only
+            # honored if BOTH signedness profiles agree (the
+            # bounds_feasibility agreement rule); a pinned hint keeps the
+            # cheaper single-profile check.
+            signed_pinned = isinstance(profile_hint.get("signed"), bool)
+            check = (
+                check_path_feasibility if signed_pinned
+                else check_path_feasibility_dual
+            )
+            smt_result = check(
                 conditions, profile=profile, prefer_witness=prefer,
             )
             if smt_result.feasible is False:

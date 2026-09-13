@@ -285,6 +285,10 @@ class TestLlmFailureIsErrorState:
             lambda conditions, profile=None, **kwargs: smt,
         )
         monkeypatch.setattr(
+            dv, "check_path_feasibility_dual",
+            lambda conditions, profile=None, **kwargs: smt,
+        )
+        monkeypatch.setattr(
             validator, "_cheap_dataflow_fp_check", lambda dataflow: None,
         )
         monkeypatch.setattr(
@@ -350,6 +354,7 @@ class TestLlmFailureIsErrorState:
 from types import SimpleNamespace  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
+from core.smt_solver import z3_available  # noqa: E402
 from core.smt_solver.path_feasibility import PathCondition  # noqa: E402
 from packages.codeql.dataflow_validator import (  # noqa: E402
     MAX_SMT_PATHS,
@@ -458,7 +463,7 @@ class TestMultiPathSMT:
     def _validate(self, v, smt_side_effects):
         dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
         with patch(
-            "packages.codeql.dataflow_validator.check_path_feasibility",
+            "packages.codeql.dataflow_validator.check_path_feasibility_dual",
             side_effect=smt_side_effects,
         ), patch(
             "core.llm.scorecard.prefilter_decision",
@@ -509,7 +514,7 @@ class TestMultiPathSMT:
         dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
         dp.alternatives = []
         with patch(
-            "packages.codeql.dataflow_validator.check_path_feasibility",
+            "packages.codeql.dataflow_validator.check_path_feasibility_dual",
             return_value=_smt(False, "contradiction", ["x > 1", "x < 0"]),
         ):
             result = v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
@@ -524,12 +529,86 @@ class TestMultiPathSMT:
         extra = v.extract_dataflow_from_sarif(_sarif_two_flows())
         dp.alternatives = [extra, extra, extra, extra]
         with patch(
-            "packages.codeql.dataflow_validator.check_path_feasibility",
+            "packages.codeql.dataflow_validator.check_path_feasibility_dual",
             return_value=_smt(False, "c", ["u"]),
         ):
             result = v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
         assert result.smt_paths_checked == MAX_SMT_PATHS
         assert v._extract_path_conditions.call_count == MAX_SMT_PATHS
+
+
+class TestSignednessProfileSelection:
+    """Refutation soundness: when the LLM hint does not pin signedness
+    the heuristic profile is a guess, so the SMT pre-check must require
+    both signedness profiles to agree (the dual checker); a pinned hint
+    keeps the cheaper single-profile check."""
+
+    def _run(self, v):
+        dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
+        with patch(
+            "packages.codeql.dataflow_validator.check_path_feasibility",
+            return_value=_smt(True, "sat"),
+        ) as single, patch(
+            "packages.codeql.dataflow_validator.check_path_feasibility_dual",
+            return_value=_smt(True, "sat"),
+        ) as dual, patch(
+            "core.llm.scorecard.prefilter_decision",
+            return_value=SimpleNamespace(short_circuit=False),
+        ), patch("core.llm.scorecard.record_prefilter_outcome"), patch(
+            "packages.codeql.dataflow_validator.load_methodology",
+            return_value="",
+        ):
+            v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
+        return single, dual
+
+    def test_unpinned_signedness_uses_dual_checker(self):
+        v = _validator()  # hint {} — signedness not pinned
+        single, dual = self._run(v)
+        assert dual.call_count == 1
+        assert single.call_count == 0
+
+    def test_pinned_signedness_uses_single_profile(self):
+        v = _validator()
+        v._extract_path_conditions = MagicMock(
+            return_value=([], {"width": 64, "signed": True}),
+        )
+        single, dual = self._run(v)
+        assert single.call_count == 1
+        assert dual.call_count == 0
+        assert single.call_args.kwargs["profile"].signed is True
+
+    def test_non_bool_signed_hint_counts_as_unpinned(self):
+        v = _validator()
+        v._extract_path_conditions = MagicMock(
+            return_value=([], {"signed": "yes"}),
+        )
+        single, dual = self._run(v)
+        assert dual.call_count == 1
+        assert single.call_count == 0
+
+    @pytest.mark.skipif(
+        not z3_available(), reason="z3-solver not installed",
+    )
+    def test_signed_error_guard_does_not_refute_end_to_end(self):
+        # The empirical repro: `ret < 0` is unsat under the default
+        # unsigned profile; pre-fix a single such guard refuted the
+        # whole finding pre-LLM. With the dual checker the finding
+        # proceeds to full analysis.
+        v = _validator()
+        v._extract_path_conditions = MagicMock(
+            return_value=([PathCondition("ret < 0", step_index=0)], {}),
+        )
+        dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
+        with patch(
+            "core.llm.scorecard.prefilter_decision",
+            return_value=SimpleNamespace(short_circuit=False),
+        ), patch("core.llm.scorecard.record_prefilter_outcome"), patch(
+            "packages.codeql.dataflow_validator.load_methodology",
+            return_value="",
+        ):
+            result = v.validate_dataflow_path(dp, _Path("/nonexistent-repo"))
+        assert result.is_exploitable is True  # full LLM analysis ran
+        assert v.llm.generate_structured.call_count == 1
 
 
 class TestWitnessSteering:
@@ -554,7 +633,7 @@ class TestWitnessSteering:
         dp = v.extract_dataflow_from_sarif(_sarif_two_flows())
         dp.rule_id = rule_id
         with patch(
-            "packages.codeql.dataflow_validator.check_path_feasibility",
+            "packages.codeql.dataflow_validator.check_path_feasibility_dual",
             return_value=_smt(True, "sat"),
         ) as smt_mock, patch(
             "core.llm.scorecard.prefilter_decision",

@@ -2063,3 +2063,84 @@ class TestCallSummaries:
             profile=BV_C_INT32,
         )
         assert "1 call summary applied" in r.reasoning
+
+
+# ---------------------------------------------------------------------------
+# check_path_feasibility_dual — signedness-agreement refutation
+# ---------------------------------------------------------------------------
+
+class TestDualSignedness:
+    """A refutation under a GUESSED signedness profile must be confirmed
+    by the signedness-flipped sibling before it is honored — ``ret < 0``
+    (the standard C signed error check) is unsat as ``ULT(ret, 0)``
+    under the default unsigned profile, and a single such guard would
+    otherwise refute (suppress) the whole finding pre-LLM."""
+
+    @_requires_z3
+    def test_signed_guard_unsat_under_default_unsigned_profile(self):
+        # Documents the single-profile hazard the dual check defends
+        # against: unsigned-only evaluation refutes a live signed guard.
+        r = check_path_feasibility([PathCondition("ret < 0", step_index=0)])
+        assert r.feasible is False
+
+    @_requires_z3
+    def test_dual_does_not_refute_signed_guard(self):
+        from core.smt_solver.path_feasibility import (
+            check_path_feasibility_dual,
+        )
+        r = check_path_feasibility_dual(
+            [PathCondition("ret < 0", step_index=0)],
+        )
+        # Satisfiable at the signed sibling profile — never refuted.
+        assert r.feasible is True
+        assert "signedness" in r.reasoning
+
+    @_requires_z3
+    def test_dual_still_refutes_signedness_robust_contradiction(self):
+        from core.smt_solver.path_feasibility import (
+            check_path_feasibility_dual,
+        )
+        r = check_path_feasibility_dual([
+            PathCondition("x == 1", step_index=0),
+            PathCondition("x == 2", step_index=1),
+        ])
+        # Unsat regardless of signedness — the refutation stands.
+        assert r.feasible is False
+        assert "signedness-robust" in r.reasoning
+
+    @_requires_z3
+    def test_dual_sat_path_solves_primary_profile_only(self):
+        import core.smt_solver.path_feasibility as pf
+        calls = []
+        real = pf.check_path_feasibility
+
+        def counting(conditions, **kwargs):
+            calls.append(kwargs.get("profile"))
+            return real(conditions, **kwargs)
+
+        with patch.object(pf, "check_path_feasibility", counting):
+            r = pf.check_path_feasibility_dual(
+                [PathCondition("size > 0", step_index=0)],
+            )
+        assert r.feasible is True
+        assert len(calls) == 1  # sibling never solved on the sat path
+
+    def test_dual_sibling_inconclusive_refuses_refutation(self):
+        import core.smt_solver.path_feasibility as pf
+
+        unsat = pf.PathSMTResult(
+            feasible=False, satisfied=[], unsatisfied=["c"], unknown=[],
+            model={}, smt_available=True, reasoning="unsat",
+        )
+        unknown = pf.PathSMTResult(
+            feasible=None, satisfied=[], unsatisfied=[], unknown=["c"],
+            model={}, smt_available=True, reasoning="timeout",
+        )
+        with patch.object(
+            pf, "check_path_feasibility", side_effect=[unsat, unknown],
+        ):
+            r = pf.check_path_feasibility_dual(
+                [PathCondition("c", step_index=0)],
+            )
+        assert r.feasible is None
+        assert "refusing the refutation" in r.reasoning

@@ -1701,3 +1701,83 @@ def check_path_feasibility(
         prefer_witness=prefer_witness, vars_=vars_,
         axioms=axioms,
     )
+
+
+def check_path_feasibility_dual(
+    conditions: list[PathCondition],
+    *,
+    profile: BVProfile = BV_C_UINT64,
+    timeout_ms: int | None = None,
+    prefer_witness: tuple[str, str] | None = None,
+) -> PathSMTResult:
+    """Signedness-agnostic feasibility check for callers whose profile
+    signedness is a GUESS rather than a known fact.
+
+    The two encodings disagree on exactly the guards that matter:
+    ``ret < 0`` — the ubiquitous C signed error check — is UNSAT as
+    ``ULT(ret, 0)`` under an unsigned profile, so a heuristic-unsigned
+    caller would refute (and thereby suppress) any path carrying one.
+    ``bounds_feasibility.check_bounds_infeasible`` already applies the
+    both-profiles-must-agree rule for its overflow receipts; this is
+    the same rule generalised for path-condition consumers.
+
+    Semantics:
+
+    * ``profile``'s verdict is authoritative whenever it is anything
+      but ``False`` — sat results (model, witness steering) are
+      byte-identical to :func:`check_path_feasibility` and the
+      signedness-flipped sibling is never solved (no extra cost on
+      the common path).
+    * A ``feasible=False`` verdict is honored only when the
+      signedness-flipped sibling profile ALSO reports ``False``.
+      Sibling sat → the sibling's (feasible) result is returned;
+      sibling inconclusive → ``feasible=None`` (a single-profile
+      refutation under guessed signedness carries no weight — the
+      fail direction must be "run the expensive analysis", never
+      "suppress the finding").
+
+    Callers that KNOW the signedness (explicit type info, a trusted
+    per-path hint) should call :func:`check_path_feasibility` directly
+    with the known profile.
+    """
+    primary = check_path_feasibility(
+        conditions, profile=profile,
+        timeout_ms=timeout_ms, prefer_witness=prefer_witness,
+    )
+    if primary.feasible is not False:
+        return primary
+    sibling_profile = BVProfile(width=profile.width, signed=not profile.signed)
+    sibling = check_path_feasibility(
+        conditions, profile=sibling_profile,
+        timeout_ms=timeout_ms, prefer_witness=prefer_witness,
+    )
+    if sibling.feasible is False:
+        primary.reasoning += (
+            f" [signedness-robust: also unsat at "
+            f"{sibling_profile.describe()}]"
+        )
+        return primary
+    if sibling.feasible is True:
+        sibling.reasoning += (
+            f" [note: unsat at {profile.describe()} but satisfiable at "
+            f"{sibling_profile.describe()} — signedness unknown, so the "
+            f"path is treated as feasible]"
+        )
+        return sibling
+    return PathSMTResult(
+        feasible=None,
+        satisfied=primary.satisfied,
+        unsatisfied=primary.unsatisfied,
+        unknown=primary.unknown,
+        model={},
+        smt_available=primary.smt_available,
+        reasoning=(
+            f"signedness-ambiguous: unsat at {profile.describe()} but "
+            f"inconclusive at {sibling_profile.describe()} "
+            f"({sibling.reasoning}) — refusing the refutation because "
+            f"the profiles disagree and the signedness was not "
+            f"caller-asserted"
+        ),
+        unknown_reasons=primary.unknown_reasons,
+        anon_var_map=primary.anon_var_map,
+    )
