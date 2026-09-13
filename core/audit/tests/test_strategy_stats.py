@@ -77,14 +77,32 @@ class TestAggregateStrategyStats:
         assert stats == {}
 
     def test_error_status_excluded(self, tmp_path):
+        # Errors are excluded from the denominator AND from
+        # min_samples: an error-only strategy contributes no stats
+        # entry at all (a flaky tool run must not read as "always
+        # missed").
         _write_audit_log(tmp_path / "run1", [
             {"action": "orchestrator_review", "status": "error",
              "strategies": ["general"]},
         ])
         stats = aggregate_strategy_stats([tmp_path / "run1"])
-        assert stats["general"]["total"] == 1
-        assert stats["general"]["wins"] == 0
-        assert stats["general"]["misses"] == 0
+        assert "general" not in stats
+
+    def test_errors_do_not_dilute_win_rate(self, tmp_path):
+        # 5 wins + 5 errors must weigh like 5/5 decided wins, not
+        # like 5 wins out of 10 attempts.
+        _write_audit_log(tmp_path / "run1", [
+            {"action": "orchestrator_review", "status": "finding",
+             "strategies": ["general"]},
+        ] * 5 + [
+            {"action": "orchestrator_review", "status": "error",
+             "strategies": ["general"]},
+        ] * 5)
+        stats = aggregate_strategy_stats([tmp_path / "run1"])
+        assert stats["general"]["total"] == 5
+        assert stats["general"]["wins"] == 5
+        weights = compute_strategy_weights(stats, min_samples=5)
+        assert weights["general"] > 1.5
 
 
 class TestComputeStrategyWeights:

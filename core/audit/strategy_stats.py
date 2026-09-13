@@ -35,6 +35,9 @@ def aggregate_strategy_stats(
 
     Returns:
         Mapping of strategy name to {wins, misses, total} counts.
+        ``total`` counts decided outcomes only (wins + misses);
+        error/inconclusive outcomes contribute nothing — a strategy
+        with only errors gets no entry at all.
     """
     stats: dict[str, dict[str, int]] = defaultdict(
         lambda: {"wins": 0, "misses": 0, "total": 0},
@@ -61,11 +64,22 @@ def aggregate_strategy_stats(
                     if not strategies:
                         continue
                     for strat in strategies:
-                        stats[strat]["total"] += 1
+                        # total = decided outcomes only (wins+misses).
+                        # Trade-off, both directions: counting error/
+                        # inconclusive outcomes in the denominator
+                        # durably deprioritised strategies hit by one
+                        # flaky tool run (rate read as "always
+                        # missed"); excluding them means an error-heavy
+                        # strategy can keep its default weight on few
+                        # decided samples — min_samples in
+                        # compute_strategy_weights guards that
+                        # direction.
                         if status in _POSITIVE_STATUSES:
                             stats[strat]["wins"] += 1
+                            stats[strat]["total"] += 1
                         elif status in _NEGATIVE_STATUSES:
                             stats[strat]["misses"] += 1
+                            stats[strat]["total"] += 1
         except OSError:
             continue
 
