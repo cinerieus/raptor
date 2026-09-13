@@ -2255,6 +2255,24 @@ def review_one_function(
             )
         except Exception:  # noqa: BLE001
             prior = None
+        if (
+            prior
+            and prior.get("status") in ("clean", "dormant")
+            and _validate_confirmed_gap(evidence_index, gap_key)
+        ):
+            # Never-skip-validate-confirmed floor — the same rung the
+            # prefilter skip lane and the triage classifier enforce. A
+            # /validate run CONFIRMED a defect here; a stored clean
+            # verdict whose source hash still matches is exactly what
+            # a pre-validate recall looks like, and this was the one
+            # mechanical-clean lane that could override runtime-
+            # confirmed evidence. Fall through to a real review.
+            logger.info(
+                "SAGE recall skip overridden for %s — /validate-"
+                "confirmed defect forces a full review",
+                gap_key,
+            )
+            prior = None
         if prior and prior.get("status") in ("clean", "dormant"):
             prior_status = prior["status"]
             prior_tool = prior.get("tool", "")

@@ -5432,6 +5432,30 @@ class TestSageRecallGate:
         _, calls, _ = self._run(tmp_path, _boom)
         assert sorted(calls) == ["check_pw", "validate"]
 
+    def test_validate_confirmed_floor_blocks_recall_skip(
+        self, tmp_path: Path,
+    ):
+        """Never-skip-validate-confirmed floor: a /validate-CONFIRMED
+        function must get a real review even when a prior clean
+        verdict with a matching source hash is recalled — a stored
+        pre-validate clean is exactly what a confirmed detection-
+        evasion defect looks like from the recall's side."""
+        from unittest.mock import patch as _patch
+
+        def _floor(evidence_index, gap_key):
+            return gap_key == "src/auth.c:check_pw"
+
+        with _patch(
+            "core.audit.orchestrator._validate_confirmed_gap",
+            side_effect=_floor,
+        ):
+            _, calls, _ = self._run(
+                tmp_path,
+                lambda **kw: {"status": "clean", "tool": "semgrep:x"},
+            )
+        # The confirmed gap reaches the LLM; the sibling still skips.
+        assert calls == ["check_pw"]
+
 
 class TestSageFpPrimer:
     """Prior finding-verdict FP primers in review_one_function.
