@@ -581,6 +581,9 @@ def expand_function(
 
     tu_rel = file_path.replace(os.sep, "/")
     selected: list = []
+    # Hoisted: lines() re-splits the whole expanded text (up to 16MB)
+    # on every call.
+    view_lines = view.lines()
     for idx, entry in enumerate(view.line_map):
         if entry is None:
             continue
@@ -591,7 +594,7 @@ def expand_function(
             continue
         if line_end and origin_line > line_end:
             continue
-        selected.append((origin_line, view.lines()[idx]))
+        selected.append((origin_line, view_lines[idx]))
 
     return FunctionExpansion(
         ok=True, file_path=file_path,
@@ -672,6 +675,9 @@ def recover_macro_defined_functions(
 
     recovered: list = []
     seen: set = set()
+    # Hoisted: lines() re-splits the whole expanded text (up to 16MB)
+    # on every call.
+    view_lines = view.lines()
     for m in _FUNC_DEF_RE.finditer(view.text):
         name = m.group(1)
         if name in _C_KEYWORDS or name.lower() in _C_KEYWORDS:
@@ -692,7 +698,7 @@ def recover_macro_defined_functions(
         if key in seen:
             continue
         seen.add(key)
-        sig = view.lines()[name_line].strip()
+        sig = view_lines[name_line].strip()
         recovered.append(MacroDefinedFunction(
             name=name,
             file=origin_file,
