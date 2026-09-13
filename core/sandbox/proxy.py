@@ -3041,7 +3041,11 @@ class EgressProxy:
                     timeout=self._upstream_handshake_timeout,
                 )
             except (asyncio.TimeoutError, asyncio.IncompleteReadError,
-                    ConnectionError) as e:
+                    OSError) as e:
+                # OSError (ConnectionError's superclass) so the rarer
+                # socket-failure shapes take this branch's close+502
+                # instead of escaping to the handler-error path, which
+                # writes no status line and strands up_writer.
                 logger.warning("egress proxy: upstream CONNECT failed: %s", e)
                 up_writer.close()
                 event.update(result="upstream_failed",
@@ -3066,6 +3070,13 @@ class EgressProxy:
                 return
 
             # Drain remaining upstream headers up to blank line.
+            # Timeout/EOF keep the historical best-effort break (the
+            # relay loop surfaces a dead upstream immediately); a
+            # socket error (upstream RST mid-drain) means the tunnel
+            # is already dead — close the backend leg and give the
+            # client the documented 502 instead of letting the error
+            # escape to the handler-error path (no status line, and
+            # up_writer stranded until proxy stop).
             while True:
                 try:
                     hdr = await asyncio.wait_for(
@@ -3073,6 +3084,20 @@ class EgressProxy:
                     )
                 except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                     break
+                except OSError as e:
+                    logger.warning(
+                        "egress proxy: upstream reset during header "
+                        "drain: %s", e)
+                    with contextlib.suppress(OSError, RuntimeError):
+                        up_writer.close()
+                    event.update(
+                        result="upstream_failed",
+                        reason=("upstream header drain: "
+                                f"{e.__class__.__name__}"),
+                        duration=time.monotonic() - t_start)
+                    self._record(event)
+                    await self._write_error(writer, 502, "Bad Gateway")
+                    return
                 if hdr == b"\r\n":
                     break
         else:
@@ -3220,89 +3245,105 @@ class EgressProxy:
                 event["resolved_ip"] = dialed_ip
 
         # Acknowledge tunnel established, then relay bytes both ways.
-        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        await writer.drain()
-        # Both legs get TCP keepalive so middlebox/NAT state survives
-        # long silent stretches (thinking models). The client leg is
-        # a no-op when the child rides a unix-socket lane.
-        _enable_tcp_keepalive(writer)
-        _enable_tcp_keepalive(up_writer)
-        # Pull resolved_ip from the event dict — the direct path sets it
-        # as a local variable, but the upstream-proxy branch only populates
-        # event["resolved_ip"]. Referencing a bare `resolved_ip` here would
-        # NameError on every upstream-proxy CONNECT, crashing the tunnel
-        # handler mid-request. Read through the event dict so both paths
-        # produce a valid log line.
-        # Lazy %-style format so the string isn't built when INFO is
-        # below the logger threshold — every CONNECT used to pay the
-        # f-string formatting cost regardless of whether anything
-        # consumed the line.
-        logger.debug(
-            "egress proxy: OPEN %s:%s -> %s",
-            host, port, event.get("resolved_ip", "?"),
-        )
-
-        # CONNECT TLS-identity check. Everything up to here authorised
-        # the PLAINTEXT CONNECT authority and dialled its vetted IP —
-        # nothing ties the TLS session INSIDE the tunnel to that
-        # authorised name, so a child could CONNECT to an allowlisted
-        # host and send a ClientHello bearing a different SNI to reach
-        # another tenant behind the same shared front end (domain
-        # fronting). Peek the client's first TLS record: iff it parses
-        # as a complete ClientHello carrying an SNI, require the SNI
-        # to equal the authorised CONNECT hostname (case-insensitive).
-        # This is HONESTLY a best-effort hardening layer, not a
-        # guarantee: non-TLS first bytes, SNI-less hellos, records
-        # fragmented across TLS records, malformed structure, and a
-        # peek deadline expiry all pass through unchanged, and
-        # Encrypted ClientHello hides the name entirely — the layer
-        # only removes the cheapest fronting path. Peeked bytes are
-        # forwarded upstream below, so passing tunnels stay
-        # byte-identical to a non-peeking proxy.
-        peeked, client_sni = await self._peek_tls_identity(reader)
-        if client_sni is not None and client_sni.lower() != host.lower():
-            # The SNI is attacker-controlled — sanitise before it can
-            # reach a live terminal (same rationale as the CONNECT
-            # target check above).
-            _safe_sni = sanitise_for_terminal(client_sni)
-            logger.warning(
-                "egress proxy: DENY %s:%s — TLS ClientHello SNI %r "
-                "does not match the authorised CONNECT host "
-                "(domain-fronting attempt); tunnel closed",
-                host, port, _safe_sni,
+        # Between here and the relay pair taking ownership (its
+        # try/finally below closes up_writer on every exit), any
+        # escaping exception — client gone at the 200 ack, an
+        # unexpected error out of the TLS peek — used to strand the
+        # freshly-dialed upstream leg until proxy stop. No status
+        # line is possible on these paths (the 200 is already
+        # committed / the client is gone), so cleanup + re-raise is
+        # the whole contract; the handler-error catch upstream keeps
+        # the event accounting. Sync close only: awaiting
+        # wait_closed() during a CancelledError unwind could swallow
+        # the cancellation.
+        try:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await writer.drain()
+            # Both legs get TCP keepalive so middlebox/NAT state survives
+            # long silent stretches (thinking models). The client leg is
+            # a no-op when the child rides a unix-socket lane.
+            _enable_tcp_keepalive(writer)
+            _enable_tcp_keepalive(up_writer)
+            # Pull resolved_ip from the event dict — the direct path sets it
+            # as a local variable, but the upstream-proxy branch only populates
+            # event["resolved_ip"]. Referencing a bare `resolved_ip` here would
+            # NameError on every upstream-proxy CONNECT, crashing the tunnel
+            # handler mid-request. Read through the event dict so both paths
+            # produce a valid log line.
+            # Lazy %-style format so the string isn't built when INFO is
+            # below the logger threshold — every CONNECT used to pay the
+            # f-string formatting cost regardless of whether anything
+            # consumed the line.
+            logger.debug(
+                "egress proxy: OPEN %s:%s -> %s",
+                host, port, event.get("resolved_ip", "?"),
             )
-            event.update(result="denied_sni",
-                         reason=f"TLS SNI {_safe_sni!r} != CONNECT host",
-                         duration=time.monotonic() - t_start)
+
+            # CONNECT TLS-identity check. Everything up to here authorised
+            # the PLAINTEXT CONNECT authority and dialled its vetted IP —
+            # nothing ties the TLS session INSIDE the tunnel to that
+            # authorised name, so a child could CONNECT to an allowlisted
+            # host and send a ClientHello bearing a different SNI to reach
+            # another tenant behind the same shared front end (domain
+            # fronting). Peek the client's first TLS record: iff it parses
+            # as a complete ClientHello carrying an SNI, require the SNI
+            # to equal the authorised CONNECT hostname (case-insensitive).
+            # This is HONESTLY a best-effort hardening layer, not a
+            # guarantee: non-TLS first bytes, SNI-less hellos, records
+            # fragmented across TLS records, malformed structure, and a
+            # peek deadline expiry all pass through unchanged, and
+            # Encrypted ClientHello hides the name entirely — the layer
+            # only removes the cheapest fronting path. Peeked bytes are
+            # forwarded upstream below, so passing tunnels stay
+            # byte-identical to a non-peeking proxy.
+            peeked, client_sni = await self._peek_tls_identity(reader)
+            if client_sni is not None and client_sni.lower() != host.lower():
+                # The SNI is attacker-controlled — sanitise before it can
+                # reach a live terminal (same rationale as the CONNECT
+                # target check above).
+                _safe_sni = sanitise_for_terminal(client_sni)
+                logger.warning(
+                    "egress proxy: DENY %s:%s — TLS ClientHello SNI %r "
+                    "does not match the authorised CONNECT host "
+                    "(domain-fronting attempt); tunnel closed",
+                    host, port, _safe_sni,
+                )
+                event.update(result="denied_sni",
+                             reason=f"TLS SNI {_safe_sni!r} != CONNECT host",
+                             duration=time.monotonic() - t_start)
+                self._record(event)
+                # 200 already went out — the deny is the close itself.
+                # The peeked bytes are dropped: nothing reaches upstream.
+                with contextlib.suppress(OSError, RuntimeError):
+                    up_writer.close()
+                    await up_writer.wait_closed()
+                return
+
+            # Record the event NOW (not at close) so short tunnels that
+            # complete right around when the caller's subprocess.run returns
+            # still show up in events_since(). The event dict is mutable and
+            # shared with the ring buffer — we update bytes_c2u/bytes_u2c/
+            # duration in place when the tunnel closes.
+            event.update(result="allowed", reason=None)
             self._record(event)
-            # 200 already went out — the deny is the close itself.
-            # The peeked bytes are dropped: nothing reaches upstream.
+
+            total = {"c2u": 0, "u2c": 0}  # byte counters
+            result = "allowed"
+            reason: str | None = None
+            # Forward the peeked first bytes so the upstream sees the
+            # byte stream a non-peeking proxy would have relayed. A dead
+            # upstream here surfaces immediately in the relay loop below,
+            # so the failure is only suppressed, never lost.
+            if peeked:
+                with contextlib.suppress(ConnectionResetError,
+                                         BrokenPipeError):
+                    up_writer.write(peeked)
+                    await up_writer.drain()
+                    total["c2u"] += len(peeked)
+        except BaseException:
             with contextlib.suppress(OSError, RuntimeError):
                 up_writer.close()
-                await up_writer.wait_closed()
-            return
-
-        # Record the event NOW (not at close) so short tunnels that
-        # complete right around when the caller's subprocess.run returns
-        # still show up in events_since(). The event dict is mutable and
-        # shared with the ring buffer — we update bytes_c2u/bytes_u2c/
-        # duration in place when the tunnel closes.
-        event.update(result="allowed", reason=None)
-        self._record(event)
-
-        total = {"c2u": 0, "u2c": 0}  # byte counters
-        result = "allowed"
-        reason: str | None = None
-        # Forward the peeked first bytes so the upstream sees the
-        # byte stream a non-peeking proxy would have relayed. A dead
-        # upstream here surfaces immediately in the relay loop below,
-        # so the failure is only suppressed, never lost.
-        if peeked:
-            with contextlib.suppress(ConnectionResetError,
-                                     BrokenPipeError):
-                up_writer.write(peeked)
-                await up_writer.drain()
-                total["c2u"] += len(peeked)
+            raise
         # The relay pair runs under `_supervise_relay` rather than a
         # bare `asyncio.wait_for(..., timeout=self._total_timeout)`.
         # The historical wait_for severed EVERY tunnel at the absolute
