@@ -80,6 +80,29 @@ jobs:
           docker push "${image}:req-${reqhash}"
           echo "Pushed ${image}:main and ${image}:req-${reqhash}"
 
+      # The package must stay PRIVATE: this repo is public and the image
+      # is internal CI plumbing, not a distributable. Same gate as
+      # sandbox-matrix-image.yml (see the PRIVACY CONTRACT there): the
+      # packages REST API can read visibility but not change it, so this
+      # verifies after every push and fails loud with the one-time manual
+      # remedy. stderr is discarded on the org attempt only (expected 404
+      # on user-owned repos); the user-fallback call keeps its stderr so
+      # a real double-failure leaves its diagnosis in the job log.
+      - name: Verify the package is private
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          vis="$(gh api "orgs/${OWNER}/packages/container/raptor-ci-deps" --jq .visibility 2>/dev/null)" \
+            || vis="$(gh api "users/${OWNER}/packages/container/raptor-ci-deps" --jq .visibility)" \
+            || { echo "::error::could not query GHCR visibility for raptor-ci-deps with the workflow token — verify manually that the ghcr.io/${OWNER}/raptor-ci-deps package is Private (package settings -> Danger Zone -> Change visibility)."; exit 1; }
+          echo "package visibility: ${vis}"
+          if [ "${vis}" != "private" ]; then
+            echo "::error::ghcr.io/${OWNER}/raptor-ci-deps is '${vis}' but must be private (internal CI image, public repo). One-time manual fix: package settings -> Danger Zone -> Change visibility -> Private. Visibility persists across pushes, so this gate stays green afterwards."
+            exit 1
+          fi
+
       # Prune the untagged digests left behind when :main / :req-<hash> move
       # to this build. Tagged versions (current :main + every :req-<hash>
       # rollback anchor) are untouched. GHCR has no auto-retention, so without
