@@ -6,10 +6,21 @@ raptor-run-sandboxed — execute a binary inside the full sandbox.
 
 Usage: raptor-run-sandboxed <binary> [args...]
 
-Applies all available isolation:
+Isolation applied:
 - Network blocked (unshare --user --net)
 - Filesystem write restriction (Landlock)
 - Resource limits (memory, file size, CPU time)
+
+Deliberately NOT applied (unlike raptor-r2-sandboxed): read
+restriction and HOME masking. This wrapper's mandated use is
+arbitrary untrusted BUILD systems (configure/make/PoC compiles),
+whose read surface — toolchains, caches, system headers — is not
+enumerable up front; restrict_reads would fail-closed unpredictable
+subsets of legitimate builds. Consequence the caller must own: the
+child can READ any world-readable file, including the operator's
+real HOME. Do not point downstream agents at OUTPUT_DIR contents as
+trusted, and do not use this wrapper when read confinement matters —
+use the r2 wrapper's posture as the template instead.
 
 Falls back gracefully when features are unavailable.
 
@@ -18,6 +29,9 @@ Environment:
   be set explicitly — there is no safe default (using /tmp would let
   the child write anywhere in /tmp, which defeats isolation). Set to a
   dedicated per-invocation directory.
+- RAPTOR_SANDBOX_TIMEOUT (optional): child wall-clock limit in seconds
+  (default 1800). ASAN builds of large projects routinely exceed 30
+  minutes; raise per-run instead of editing this file.
 
 stdout/stderr pass through directly so the caller (including LLM agents)
 sees the child's output. Sandbox diagnostics and structured errors are
@@ -26,7 +40,9 @@ printed to stderr prefixed `[sandbox] ` after the child exits.
 Exit codes:
 - Child's returncode on successful invocation
 - 1 on misuse (missing args, missing OUTPUT_DIR)
-- 2 on sandbox invocation failure (unshare, kernel, etc.)
+- 2 on sandbox invocation failure (unshare, kernel, timeout, etc.)
+- 3 when sandbox isolation could not ENGAGE (SandboxSetupError — the
+  child never executed; SANDBOX_ENGAGE_EXIT_CODE convention)
 """
 
 import logging
@@ -120,13 +136,31 @@ logging.getLogger("core.sandbox").setLevel(logging.INFO)
 
 from core.sandbox import sandbox, SandboxSetupError, SANDBOX_ENGAGE_EXIT_CODE  # noqa: E402
 
+# Child wall-clock limit. 1800s default: long enough for typical
+# configure/make cycles, short enough that a wedged untrusted build
+# doesn't pin the host for hours. Too low breaks legitimate large/ASAN
+# builds (raise via RAPTOR_SANDBOX_TIMEOUT per run); too high delays
+# the fail-loud signal on a hung child — hence env-tunable, validated,
+# never unbounded.
+_timeout_raw = os.environ.get("RAPTOR_SANDBOX_TIMEOUT", "")
+if _timeout_raw:
+    if not _timeout_raw.isdigit() or int(_timeout_raw) <= 0:
+        _die(
+            f"RAPTOR_SANDBOX_TIMEOUT must be a positive integer "
+            f"number of seconds (got {_timeout_raw!r})"
+        )
+    child_timeout = int(_timeout_raw)
+else:
+    child_timeout = 1800
+
 try:
     with sandbox(block_network=True,
                  target=os.getcwd(),
                  output=output_dir) as run:
         # Run with captured stderr so _check_blocked can inspect it,
         # but print it through so the caller sees it too.
-        result = run(cmd, capture_output=True, text=True, timeout=1800)
+        result = run(cmd, capture_output=True, text=True,
+                     timeout=child_timeout)
 
         # Pass through child output
         if result.stdout:
@@ -148,7 +182,7 @@ try:
 except SandboxSetupError as e:
     _die(f"sandbox isolation could not engage: {e}", code=SANDBOX_ENGAGE_EXIT_CODE)
 except subprocess.TimeoutExpired as e:
-    # The run() backstop (timeout=1800 above) raises TimeoutExpired, not
+    # The run() backstop (child_timeout above) raises TimeoutExpired, not
     # OSError — without this clause a hung child produced a raw traceback
     # and exit 1 instead of the documented `[sandbox] ERROR` + exit 2.
     # The exception carries whatever the child wrote before the kill;
