@@ -495,3 +495,75 @@ class TestPrepass:
         )
         assert res.outcome == "confirmed"
         assert res.reachability["status"] == "entry_reachable"
+
+
+# fwrite's destination is its 4th argument (the stream); the 1st is
+# the data buffer. First-arg extraction classified `buf = malloc(len)`
+# as fresh-call provenance -> "internal" -> a false buffered-then-flush
+# refutation on a genuine pre-verify stdio release.
+FWRITE_TO_PARAM_STREAM = """\
+int cms_copy_fwrite(FILE *out, BIO *cms, unsigned char *src, int len)
+{
+    unsigned char *buf = malloc(len);
+    memcpy(buf, src, len);
+    fwrite(buf, 1, len, out);
+    if (BIO_get_cipher_status(cms) <= 0)
+        return -1;
+    return 1;
+}
+"""
+
+FWRITE_TO_INTERNAL_STREAM = """\
+int cms_copy_fwrite_spool(BIO *cms, unsigned char *src, int len)
+{
+    FILE *spool = get_spool_stream();
+    fwrite(src, 1, len, spool);
+    if (BIO_get_cipher_status(cms) <= 0)
+        return -1;
+    return 1;
+}
+"""
+
+WRITE_TO_FRESH_FD = """\
+int relay_plain(BIO *cms, unsigned char *buf, int n)
+{
+    int fd = open("/run/tap0", 1);
+    write(fd, buf, n);
+    if (BIO_get_cipher_status(cms) <= 0)
+        return -1;
+    return 1;
+}
+"""
+
+FWRITE_HYP = ("plaintext is written to the output stream before the "
+              "cipher status is verified")
+
+
+class TestDestinationArgument:
+    def test_fwrite_to_param_stream_confirms(self, tmp_path):
+        _write(tmp_path, "src/cms_fw.c", FWRITE_TO_PARAM_STREAM)
+        res = run_release_order_check(
+            tmp_path, "src/cms_fw.c", "cms_copy_fwrite", FWRITE_HYP,
+        )
+        assert res.outcome == "confirmed"
+        undominated = [r for r in res.releases if not r["dominated"]]
+        assert undominated[0]["callee"] == "fwrite"
+        assert undominated[0]["destination"] == "out"
+
+    def test_fwrite_to_internal_stream_still_refutes(self, tmp_path):
+        _write(tmp_path, "src/cms_fw.c", FWRITE_TO_INTERNAL_STREAM)
+        res = run_release_order_check(
+            tmp_path, "src/cms_fw.c", "cms_copy_fwrite_spool", FWRITE_HYP,
+        )
+        assert res.outcome == "refuted"
+
+    def test_write_to_fresh_descriptor_escapes(self, tmp_path):
+        # A freshly-opened descriptor is not an internal buffer: data
+        # leaves the process the moment write() runs.
+        _write(tmp_path, "src/relay.c", WRITE_TO_FRESH_FD)
+        res = run_release_order_check(
+            tmp_path, "src/relay.c", "relay_plain", FWRITE_HYP,
+        )
+        assert res.outcome == "confirmed"
+        undominated = [r for r in res.releases if not r["dominated"]]
+        assert undominated[0]["destination"] == "fd"

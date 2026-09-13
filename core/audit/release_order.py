@@ -318,15 +318,61 @@ def _function_segment(
     return lines, 1
 
 
-def _first_arg_base(code: str, callee: str) -> str:
-    """Base identifier of the callee's first argument
-    (``BIO_write(out, buf, n)`` → ``out``)."""
-    m = re.search(rf"\b{re.escape(callee)}\s*\(\s*([^,()]+)", code)
+# Destination argument position per release verb (1-based). fwrite's
+# destination stream is its 4th argument and fputs' its 2nd — the
+# first argument of both is the DATA buffer, and classifying that
+# buffer's provenance (``buf = malloc(len)`` → "internal") minted a
+# false buffered-then-flush refutation on genuine stdio releases.
+# Every other verb (BIO_write, write, send, learned verbs) writes to
+# its first argument.
+_DEST_ARG_POSITION = {"fwrite": 4, "fputs": 2}
+
+# Descriptor/stream constructors (POSIX seed set, <= 9 per the vocab
+# budget): a destination assigned from one of these is a live external
+# channel, never an internal buffered-then-flush buffer (contrast
+# BIO_new(BIO_s_mem())).
+_DESCRIPTOR_CONSTRUCTORS = frozenset({
+    "open", "openat", "creat", "fopen", "fdopen", "freopen",
+    "socket", "accept", "accept4",
+})
+
+
+def _dest_arg_base(code: str, callee: str) -> str:
+    """Base identifier of the callee's DESTINATION argument
+    (``BIO_write(out, buf, n)`` → ``out``;
+    ``fwrite(buf, 1, n, fp)`` → ``fp``)."""
+    m = re.search(rf"\b{re.escape(callee)}\s*\(", code)
     if not m:
         return ""
-    arg = m.group(1).strip()
-    m2 = re.match(r"[&*]*\s*([A-Za-z_]\w*)", arg)
+    args = _call_args(code, m.end())
+    pos = _DEST_ARG_POSITION.get(callee, 1)
+    if len(args) < pos:
+        return ""
+    m2 = re.match(r"[&*(]*\s*([A-Za-z_]\w*)", args[pos - 1].strip())
     return m2.group(1) if m2 else ""
+
+
+def _call_args(code: str, open_paren_end: int) -> list[str]:
+    """Top-level comma-split arguments of the call whose opening
+    paren just closed at ``open_paren_end`` (best-effort, single
+    line — the site regexes match line-locally)."""
+    depth = 1
+    args: list[str] = []
+    start = open_paren_end
+    for i in range(open_paren_end, len(code)):
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                if code[start:i].strip():
+                    args.append(code[start:i])
+                return args
+        elif ch == "," and depth == 1:
+            args.append(code[start:i])
+            start = i + 1
+    return args
 
 
 def _classify_destination(
@@ -355,9 +401,16 @@ def _classify_destination(
         for arm in arms:
             arm = arm.strip()
             base = re.match(r"[&*]*\s*([A-Za-z_]\w*)\s*$", arm)
+            call = re.match(r"([A-Za-z_]\w*)\s*\(", arm)
             if base and base.group(1) in params:
                 classes.add("escaping")
-            elif re.match(r"[A-Za-z_]\w*\s*\(", arm):
+            elif call and call.group(1) in _DESCRIPTOR_CONSTRUCTORS:
+                # A freshly-opened descriptor/stream is NOT an
+                # internal buffer: data handed to it leaves the
+                # process immediately, so the buffered-then-flush
+                # refutation shape does not apply.
+                classes.add("escaping")
+            elif call:
                 classes.add("internal")
             else:
                 classes.add("unknown")
@@ -558,7 +611,7 @@ def _adjudicate_function(
         if not m:
             continue
         callee = m.group(1)
-        dest = _first_arg_base(code, callee)
+        dest = _dest_arg_base(code, callee)
         dest_class = _classify_destination(dest, view_lines, params)
         site = {
             "file": file_path,
