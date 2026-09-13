@@ -485,10 +485,21 @@ def try_build_cfg(
     """Build a CFG for a function, auto-detecting the language.
 
     Returns a PythonCFG or CPPCFG, or None if the language is
-    unsupported or the builder fails.
+    unsupported or the builder fails. ``file_path`` comes from gap
+    records (LLM-writable), so the join is containment-checked — an
+    escaping path reads as builder-unavailable, never an out-of-root
+    file read.
     """
+    from core.paths import confine
+
     ext = Path(file_path).suffix
-    full_path = target_path / file_path
+    full_path = confine(target_path, file_path)
+    if full_path is None:
+        logger.debug(
+            "try_build_cfg: refusing path outside target root: %r",
+            file_path,
+        )
+        return None
 
     if ext == ".py":
         try:

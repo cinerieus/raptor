@@ -1941,10 +1941,16 @@ def _match_fp_verdict_to_source(
         from core.sage.hooks import finding_source_hashes
     except ImportError:
         return []
+    from core.paths import confine
+
+    # Confined join: the gap's file field is LLM-writable, and an
+    # escaping path would hash arbitrary host files into the
+    # staleness match.
+    hash_path = confine(target_path, gap.get("file", ""))
+    if hash_path is None:
+        return []
     try:
-        hashes = finding_source_hashes(
-            target_path / gap.get("file", ""), line_start, line_end,
-        )
+        hashes = finding_source_hashes(hash_path, line_start, line_end)
     except Exception:  # noqa: BLE001 — staleness probe must never break the review
         return []
     if not hashes:
@@ -2220,15 +2226,20 @@ def review_one_function(
     with contextlib.suppress(OSError):
         from core.sage.hooks import compute_finding_source_hash
 
+        from core.paths import confine as _confine
+
         line_start = gap.get("line_start", 0)
-        if line_start:
+        # Confined join: the gap's file field is LLM-writable; an
+        # escaping path would hash host files into the recall key.
+        _hash_path = _confine(config.target_path, gap["file"])
+        if line_start and _hash_path is not None:
             # Whole-function span: the gap carries the function bounds,
             # so hash line_start..line_end rather than a ±10 window —
             # a change anywhere in the function invalidates the prior
             # verdict (compute_finding_source_hash also folds in the
             # full file content).
             src_hash = compute_finding_source_hash(
-                config.target_path / gap["file"],
+                _hash_path,
                 line_start,
                 line_end=gap.get("line_end") or None,
             )
@@ -2687,14 +2698,14 @@ def review_one_function(
         )
         if gap.get("file", "").endswith(".go"):
             _swr_gap = dict(_structural_gap)
-            with contextlib.suppress(OSError):
-                _fp = config.target_path / gap.get("file", "")
-                if _fp.is_file():
-                    # Whole-file source: the receiver struct decl and
-                    # method bodies live outside the function span.
-                    _swr_gap["file_source"] = _fp.read_text(
-                        errors="replace",
-                    )
+            # Whole-file source: the receiver struct decl and method
+            # bodies live outside the function span. Confined join —
+            # the gap's file field is LLM-writable.
+            _swr_source = _contained_source_text(
+                config.target_path, gap.get("file", ""),
+            )
+            if _swr_source is not None:
+                _swr_gap["file_source"] = _swr_source
             auth_mode_findings.extend(
                 check_shared_writer_race(
                     _swr_gap, target_path=config.target_path,
@@ -5144,10 +5155,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         for gap in gaps:
             fp = gap.get("file", "")
             if fp and fp not in _ops_srcs:
-                with contextlib.suppress(OSError):
-                    sp = config.target_path / fp
-                    if sp.is_file():
-                        _ops_srcs[fp] = sp.read_text(errors="replace")
+                _ops_text = _contained_source_text(config.target_path, fp)
+                if _ops_text is not None:
+                    _ops_srcs[fp] = _ops_text
         _ops_eps = collect_ops_entry_points(_ops_srcs)
         if _ops_eps:
             entry_points = entry_points | _ops_eps
@@ -5544,12 +5554,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         for gap in gaps:
             fp = gap.get("file", "")
             if fp and fp not in prepass_texts:
-                with contextlib.suppress(OSError):
-                    src_path = config.target_path / fp
-                    if src_path.is_file():
-                        prepass_texts[fp] = src_path.read_text(
-                            errors="replace",
-                        )
+                _pp_text = _contained_source_text(config.target_path, fp)
+                if _pp_text is not None:
+                    prepass_texts[fp] = _pp_text
         if prepass_texts:
             consistency_prepass = run_consistency_prepass(
                 prepass_texts,
@@ -5622,12 +5629,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         for gap in gaps:
             fp = gap.get("file", "")
             if fp and fp not in fo_texts:
-                with contextlib.suppress(Exception):
-                    src_path = config.target_path / fp
-                    if src_path.is_file():
-                        fo_texts[fp] = src_path.read_text(
-                            errors="replace",
-                        )
+                _fo_text = _contained_source_text(config.target_path, fp)
+                if _fo_text is not None:
+                    fo_texts[fp] = _fo_text
         if fo_texts:
             fail_open_census = run_fail_open_census(
                 fo_texts,
@@ -5677,12 +5681,9 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         for gap in gaps:
             fp = gap.get("file", "")
             if fp and fp not in census_texts:
-                with contextlib.suppress(Exception):
-                    src_path = config.target_path / fp
-                    if src_path.is_file():
-                        census_texts[fp] = src_path.read_text(
-                            errors="replace",
-                        )
+                _cs_text = _contained_source_text(config.target_path, fp)
+                if _cs_text is not None:
+                    census_texts[fp] = _cs_text
         if census_texts:
             channel_vocab = DomainVocabulary.from_domain_model(
                 prep_domain_model, target_path=config.target_path,
@@ -5794,12 +5795,11 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
             for gap in gaps:
                 fp = gap.get("file", "")
                 if fp and fp not in _ch_texts:
-                    with contextlib.suppress(Exception):
-                        src_path = config.target_path / fp
-                        if src_path.is_file():
-                            _ch_texts[fp] = src_path.read_text(
-                                errors="replace",
-                            )
+                    _ch_text = _contained_source_text(
+                        config.target_path, fp,
+                    )
+                    if _ch_text is not None:
+                        _ch_texts[fp] = _ch_text
             if not _ch_texts:
                 continue
             from .fail_open_roles import RoleContext as _ChRoleCtx
@@ -10218,10 +10218,9 @@ def _run_mechanical_detectors(
     for gap in gaps:
         fp = gap.get("file", "")
         if fp and fp not in source_texts:
-            with contextlib.suppress(OSError):
-                src_path = config.target_path / fp
-                if src_path.is_file():
-                    source_texts[fp] = src_path.read_text(errors="replace")
+            _md_text = _contained_source_text(config.target_path, fp)
+            if _md_text is not None:
+                source_texts[fp] = _md_text
 
     if not source_texts:
         return mechanical_findings, guard_clean_keys
@@ -15874,6 +15873,24 @@ def _clear_file_lines_cache() -> None:
 _parse_wrapper_cache: dict[str, frozenset] = {}
 
 
+def _contained_source_text(target_path: Path, file_path: str) -> str | None:
+    """Containment-checked, capped whole-file read of an artifact path.
+
+    Whole-file sibling of :func:`_read_raw_source` for the prep loops,
+    post-loop verifiers and prompt-context builders: ``file_path``
+    comes from checklist/gap/outcome records (LLM-writable), so the
+    join is confined and the read capped
+    (``core.source.read_contained``). ``None`` — escaping, missing, or
+    unreadable — degrades to each caller's existing no-source path
+    (map entry skipped, hint not built, tool sees empty source).
+    """
+    if not file_path:
+        return None
+    from core.source import read_contained
+
+    return read_contained(target_path, file_path)
+
+
 def _read_raw_source(
     target_path: Path,
     file_path: str,
@@ -19483,13 +19500,9 @@ def _proactive_validate(
     smt_verb = smt_verb_for_cwe(cwe) if _has_cwe_dispatch else None
     if smt_verb and "smt" not in dispatched:
         try:
-            source_text = ""
-            try:
-                src_path = config.target_path / outcome.file
-                if src_path.is_file():
-                    source_text = src_path.read_text(errors="replace")
-            except OSError:
-                pass
+            source_text = _contained_source_text(
+                config.target_path, outcome.file,
+            ) or ""
             ran.add("smt")
             smt_result = run_smt_verb_direct(
                 verb=smt_verb,
@@ -19742,13 +19755,9 @@ def _proactive_validate(
             format_lifecycle_evidence,
         )
 
-        source_text = ""
-        try:
-            src_path = config.target_path / outcome.file
-            if src_path.is_file():
-                source_text = src_path.read_text(errors="replace")
-        except OSError:
-            pass
+        source_text = _contained_source_text(
+            config.target_path, outcome.file,
+        ) or ""
         lc_findings = check_lifecycle_at_function(
             file_path=outcome.file,
             function_name=outcome.function,
@@ -26249,11 +26258,10 @@ def _try_block_level_context(
         try_build_cfg,
     )
 
-    full_path = config.target_path / gap["file"]
-    try:
-        raw_source = full_path.read_text(errors="replace") if full_path.exists() else ""
-    except OSError:
-        raw_source = ""
+    # Confined: the derived text lands in a priority-0 prompt section,
+    # so an escaping gap path would quote arbitrary host files at the
+    # reviewer (defend_repo_text sanitises but does not stop the read).
+    raw_source = _contained_source_text(config.target_path, gap["file"]) or ""
 
     cfg = try_build_cfg(
         gap["file"],

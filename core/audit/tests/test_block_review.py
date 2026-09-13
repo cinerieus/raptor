@@ -914,6 +914,26 @@ class TestTryBuildCfg:
         )
         assert cfg is not None
 
+    def test_traversal_path_refused(self, tmp_path: Path):
+        # file_path comes from gap records (LLM-writable): a ../
+        # segment must not walk the CFG builder out of the target
+        # root onto arbitrary host files.
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.py").write_text(
+            "def hello(name):\n    print(name)\n",
+        )
+        cfg = try_build_cfg("../outside.py", "hello", target)
+        assert cfg is None
+
+    def test_absolute_path_refused(self, tmp_path: Path):
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("def hello(name):\n    print(name)\n")
+        cfg = try_build_cfg(str(outside), "hello", target)
+        assert cfg is None
+
 
 # ---- E2E: real CFG from eval target ----
 

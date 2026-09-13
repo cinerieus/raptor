@@ -6673,6 +6673,124 @@ class TestPostPassWiring:
         assert harvest < cancel
 
 
+class TestContainedSourceText:
+    """The shared confined whole-file reader behind the prep loops,
+    post-loop verifiers and prompt-context builders: file fields come
+    from LLM-writable artifacts, so escaping paths must read as
+    no-source, never as out-of-root content."""
+
+    def test_normal_read(self, tmp_path: Path):
+        from core.audit.orchestrator import _contained_source_text
+
+        (tmp_path / "a.c").write_text("int x;\n")
+        assert _contained_source_text(tmp_path, "a.c") == "int x;\n"
+
+    def test_traversal_refused(self, tmp_path: Path):
+        from core.audit.orchestrator import _contained_source_text
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.c").write_text("secret\n")
+        assert _contained_source_text(target, "../outside.c") is None
+
+    def test_absolute_refused(self, tmp_path: Path):
+        from core.audit.orchestrator import _contained_source_text
+
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.c"
+        outside.write_text("secret\n")
+        assert _contained_source_text(target, str(outside)) is None
+
+    def test_missing_and_empty_name(self, tmp_path: Path):
+        from core.audit.orchestrator import _contained_source_text
+
+        assert _contained_source_text(tmp_path, "absent.c") is None
+        assert _contained_source_text(tmp_path, "") is None
+
+
+class TestFpVerdictHashProbeContainment:
+    """The FP-primer staleness probe hashes the gap's file: an
+    escaping gap path must never reach the hash helper (it would fold
+    arbitrary host files into the staleness match)."""
+
+    def test_escaping_gap_path_never_hashed(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        import core.sage.hooks as hooks_mod
+
+        from core.audit.orchestrator import _match_fp_verdict_to_source
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.c").write_text("int f(void) { return 0; }\n")
+        probed: list = []
+
+        def spy(path, line_start, line_end):
+            probed.append(str(path))
+            return set()
+
+        monkeypatch.setattr(hooks_mod, "finding_source_hashes", spy)
+        rows = [{"source_hash": "deadbeef", "verdict": "false_positive"}]
+        gap = {"file": "../outside.c", "line_start": 1, "line_end": 1}
+        assert _match_fp_verdict_to_source(rows, target, gap) == []
+        assert probed == []
+
+    def test_contained_gap_path_still_probed(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        import core.sage.hooks as hooks_mod
+
+        from core.audit.orchestrator import _match_fp_verdict_to_source
+
+        (tmp_path / "a.c").write_text("int f(void) { return 0; }\n")
+        probed: list = []
+
+        def spy(path, line_start, line_end):
+            probed.append(str(path))
+            return {"deadbeef"}
+
+        monkeypatch.setattr(hooks_mod, "finding_source_hashes", spy)
+        rows = [{"source_hash": "deadbeef", "verdict": "false_positive"}]
+        gap = {"file": "a.c", "line_start": 1, "line_end": 1}
+        matched = _match_fp_verdict_to_source(rows, tmp_path, gap)
+        assert len(matched) == 1
+        assert probed and probed[0].endswith("a.c")
+
+
+class TestBlockContextContainment:
+    """_try_block_level_context derives priority-0 prompt text from
+    the gap's file: an escaping path must never feed out-of-root
+    content into the CFG builder / prompt path."""
+
+    def test_outside_content_never_reaches_the_builder(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from types import SimpleNamespace
+
+        import core.audit.block_review as br_mod
+
+        from core.audit.orchestrator import _try_block_level_context
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "outside.c").write_text("int f(void) { return 0; }\n")
+        seen: dict = {}
+
+        def spy(file_path, function_name, target_path, source=""):
+            seen["source"] = source
+            return None
+
+        monkeypatch.setattr(br_mod, "try_build_cfg", spy)
+        gap = {"file": "../outside.c", "name": "f",
+               "line_start": 1, "line_end": 1}
+        config = SimpleNamespace(target_path=target, out_dir=tmp_path)
+        assert _try_block_level_context(gap, {}, config, None) is None
+        assert seen["source"] == "", (
+            "out-of-root file content reached the block-review builder"
+        )
+
+
 class TestValidateConfirmedPrefilterFloor:
     """Review-time twin of the triage floor: the prefilter skip lane
     must never journal a mechanical clean over a /validate-CONFIRMED
