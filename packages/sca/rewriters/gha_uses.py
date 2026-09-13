@@ -202,8 +202,22 @@ def _apply_sha_pinned(
     tags (``v6`` / ``v7``); SHAs are in extra.
     """
     locator = re.escape(edit.locator)
-    old_sha = edit.extra["old_sha"]
-    new_sha = edit.extra["new_sha"]
+    old_sha = edit.extra.get("old_sha") or ""
+    new_sha = edit.extra.get("new_sha") or ""
+    # The ``rewrite()`` chokepoint validates ``new_value`` (the tag),
+    # but the bytes actually spliced into the workflow line on this
+    # path are the SHAs from ``edit.extra`` — a poisoned upstream
+    # tag→SHA resolution must not write arbitrary bytes into a file
+    # that executes in CI. Enforce the 40-hex grammar here, the one
+    # place the extra values reach the file.
+    if not (_SHA_RE.match(old_sha) and _SHA_RE.match(new_sha)):
+        return text, RewriteResult(
+            edit=edit, applied=False,
+            reason=(
+                "invalid_new_value: extra sha is not a 40-hex "
+                "commit SHA"
+            ),
+        )
     # The expected line shape: optional YAML list marker,
     # ``uses:``, the locator (possibly with subpath), ``@<40hex>``,
     # whitespace, comment containing ``was <tag>``. We MATCH on
