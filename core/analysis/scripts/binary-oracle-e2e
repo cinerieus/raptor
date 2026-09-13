@@ -4,7 +4,8 @@
 """Comprehensive E2E driver for the binary-oracle arc.
 
 Exercises EVERY consumer surface against a real C target it builds
-fresh under ``$TMPDIR/raptor-bo-e2e/``. No LLM calls — pure mechanical
+fresh in a private per-run temp dir (``raptor-bo-e2e-*``, removed on
+exit). No LLM calls — pure mechanical
 traversal of the pipeline. Prints pass/fail per surface so a single
 invocation is a self-contained audit covering: classifier, inventory
 enrichment, chokepoint accessor (incl. tier guard + name-collision
@@ -73,14 +74,24 @@ _ap.add_argument("--sandbox", default="strict",
 set_cli_profile(_ap.parse_args().sandbox)
 # ─── end sandbox posture ────────────────────────────────────
 
-TARGET = Path(tempfile.gettempdir()) / "raptor-bo-e2e"
+# Per-run private scratch dir, cleaned on exit. A fixed, predictable
+# path in shared /tmp is both a multi-user hazard (another local user
+# can pre-create/own the directory the harness compiles and classifies
+# binaries in) and a stale-state flake source (assertions running
+# against whatever build/ accumulated from earlier runs). mkdtemp is
+# 0700 and unique; the rebuild cost per run is a few seconds.
+import atexit  # noqa: E402
+import shutil as _shutil  # noqa: E402
+
+TARGET = Path(tempfile.mkdtemp(prefix="raptor-bo-e2e-"))
+atexit.register(_shutil.rmtree, TARGET, ignore_errors=True)
 BINARY = TARGET / "build" / "app"
 
 results: list[tuple[str, bool, str]] = []
 
 
 def _build_target() -> None:
-    """Build the canonical E2E target if it isn't already there.
+    """Build the canonical E2E target in the fresh per-run dir.
     Source mix: live functions, dead functions, an inlined target,
     file-static helpers, multiple TUs — exercises every classifier
     verdict shape with ``-O2 -ffunction-sections --gc-sections``."""
