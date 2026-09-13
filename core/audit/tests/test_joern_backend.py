@@ -521,3 +521,24 @@ class TestPreSweepAbort:
         )
         assert flows == {}
         assert polls["n"] >= 2
+
+
+class TestEntryPointSampleDeterminism:
+    def test_sample_is_lexical_not_set_order(self):
+        """Sampling a raw set made the adaptive propagation depth
+        hash-seed-dependent past 50 entry points: the sample must be
+        the lexically first 50."""
+        from core.audit.joern_backend import _sample_entry_point_depths
+        # ep00..ep49 reach depth 1; ep50..ep59 reach depth 3.
+        edges = []
+        for i in range(50):
+            edges.append({"caller": f"ep{i:02d}", "callee": "shallow"})
+        for i in range(50, 60):
+            edges.append({"caller": f"ep{i:02d}", "callee": "mid"})
+        edges.append({"caller": "mid", "callee": "mid2"})
+        edges.append({"caller": "mid2", "callee": "deep"})
+        inventory = {"call_edges": edges}
+        entry_points = {f"ep{i:02d}" for i in range(60)}
+        depths = _sample_entry_point_depths(inventory, entry_points)
+        # Only the lexically-first 50 (all shallow) are sampled.
+        assert max(depths) == 1

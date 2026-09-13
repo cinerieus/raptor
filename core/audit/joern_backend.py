@@ -1248,7 +1248,9 @@ def _sample_entry_point_depths(
         return []
 
     depths: list[int] = []
-    for ep in list(entry_points)[:50]:
+    # sorted(): sampling a SET here made the adaptive propagation
+    # depth hash-seed-dependent whenever >50 entry points exist.
+    for ep in sorted(entry_points)[:50]:
         name = ep.split(":")[-1] if ":" in ep else ep
         visited: set = set()
         queue = deque([(name, 0)])
