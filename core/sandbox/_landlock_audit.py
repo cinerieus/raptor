@@ -573,18 +573,36 @@ def run_landlock_audit(
                 if byte != b"G":
                     os._exit(125)
 
-                # Full fd-range sweep before handing control to the
-                # UNTRUSTED target — parity with the tracer child's
-                # sweep above. PEP 446 makes Python-opened fds CLOEXEC
-                # by default, but fds inherited from C extensions or
-                # opened with closefd tricks are not guaranteed;
-                # relying on CLOEXEC alone leaves the target a window
-                # onto whatever the parent had open. Nothing needs to
-                # survive this exec except stdio.
+                # Full fd sweep before handing control to the
+                # UNTRUSTED target. PEP 446 makes Python-opened fds
+                # CLOEXEC by default, but fds inherited from C
+                # extensions or opened with closefd tricks are not
+                # guaranteed; relying on CLOEXEC alone leaves the
+                # target a window onto whatever the parent had open.
+                # Nothing needs to survive this exec except stdio.
+                # Enumerate the ACTUALLY-open fds instead of sweeping
+                # a range bounded by RLIMIT_NOFILE: rlimit_preexec
+                # above already LOWERED that limit, and lowering
+                # NOFILE does not invalidate existing descriptors — a
+                # non-CLOEXEC fd numbered at/above the reduced soft
+                # limit survived the old range-based sweep and rode
+                # the exec into the target as an out-of-policy
+                # capability (same shape _spawn's grandchild sweep
+                # closes). Fall back to the bounded range only when
+                # /proc isn't listable.
                 import resource as _resource
                 _soft, _ = _resource.getrlimit(_resource.RLIMIT_NOFILE)
-                _sweep_cap = min(_soft, 65536)
-                os.closerange(3, _sweep_cap)
+                try:
+                    _open_fds = [int(_n)
+                                 for _n in os.listdir("/proc/self/fd")]
+                except (OSError, ValueError):
+                    _open_fds = list(range(3, min(_soft, 65536)))
+                for _fd in _open_fds:
+                    if _fd > 2:
+                        try:
+                            os.close(_fd)
+                        except OSError:
+                            pass
 
                 # Apply Landlock then seccomp(audit). Ordering:
                 # Landlock first (filesystem isolation in place),
