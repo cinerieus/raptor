@@ -24,6 +24,7 @@ binary IS, not what we asked for).
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import tempfile
 import uuid
@@ -114,8 +115,9 @@ class BuildProduct:
     """Outcome of one containerized build."""
 
     ok: bool
-    reason: str = ""                 # "" | copy_failed | build_failed |
-    #                                  export_failed | no_artifacts
+    reason: str = ""                 # "" | rejected_input | copy_failed |
+    #                                  build_failed | export_failed |
+    #                                  no_artifacts
     detail: str = ""
     artifacts: dict[str, Path] = field(default_factory=dict)
     #: relative-in-repo name -> extracted host path
@@ -217,6 +219,22 @@ def _containerized_build(
     tag = f"raptor-env-build:{build_id}"
     product = BuildProduct(ok=False, toolchain=toolchain,
                            base_image=base_image, build_command=command)
+
+    # Refuse untrusted Dockerfile-bound values BEFORE any work. The
+    # build command reaches this seam from detector/LLM synthesis over
+    # repo content and toolchains/base images can arrive from on-disk
+    # specs, so a hostile value is an EXPECTED input, not a programmer
+    # error: it gets the structured-failure path (module contract:
+    # build-class failures never raise). run_env keys/values and aux
+    # stage names come from RAPTOR constants — their validators keep
+    # raising ValueError (programmer error), unchanged.
+    try:
+        _validate_build_command(command)
+        _validate_base_image(base_image)
+        _flag_prefix(toolchain)  # validates every toolchain field
+    except ValueError as exc:
+        product.reason, product.detail = "rejected_input", str(exc)[:500]
+        return product
 
     with tempfile.TemporaryDirectory(prefix="raptor-env-build-") as tmp:
         ctx = Path(tmp) / "context"
@@ -369,6 +387,62 @@ def _validate_aux_name(name: str) -> None:
             f"an image system directory")
 
 
+#: Toolchain values are single-quote-wrapped on the generated RUN line;
+#: shape-allowlists (not blocklists) keep every quote/escape/whitespace
+#: class out by construction. Compiler names may carry a wrapper path
+#: (``/usr/lib/ccache/gcc``); flag tokens cover the real mitigation /
+#: instrumentation vocabulary (``-Wl,-z,relro,-z,now``,
+#: ``-D_FORTIFY_SOURCE=2``, ``-I/opt/include``, ``-std=c++17``).
+_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._+/-]+")
+_FLAG_TOKEN_RE = re.compile(r"[A-Za-z0-9._+/=,:-]+")
+#: Image references as the Dockerfile FROM line accepts them
+#: (registry/repo:tag@digest); anything else — whitespace, newlines,
+#: quotes — cannot start a well-formed reference.
+_IMAGE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
+
+
+def _validate_build_command(command: str) -> None:
+    """Refuse build commands that can escape their Dockerfile RUN line.
+
+    The command is UNTRUSTED (detector/LLM synthesis over repo content,
+    on-disk specs) and is interpolated raw into the generated
+    Dockerfile, so anything that terminates or extends the RUN line is
+    an instruction-injection primitive:
+
+    * newline / CR — starts a NEW Dockerfile instruction. ``COPY
+      --from=attacker/image`` makes the daemon pull an attacker image
+      (host-side egress) and BuildKit ``RUN --network=default``
+      restores exactly the egress the ``network="none"`` build
+      containment exists to deny.
+    * a leading dash — parsed as a RUN flag (``--network``,
+      ``--mount``) by BuildKit when no env/flag prefix precedes the
+      command.
+    * a trailing backslash — Dockerfile line continuation absorbs the
+      NEXT generated instruction into this RUN's shell text.
+
+    A legitimate build command has no use for any of these shapes.
+    """
+    if any(ch in command for ch in "\n\r\x00"):
+        raise ValueError(
+            "build command contains a line break or NUL — refusing "
+            "(Dockerfile instruction injection)")
+    if command.lstrip().startswith("-"):
+        raise ValueError(
+            "build command starts with '-' — refusing (would parse as "
+            "a Dockerfile RUN flag such as --network)")
+    if command.rstrip().endswith("\\"):
+        raise ValueError(
+            "build command ends with '\\' — refusing (Dockerfile line "
+            "continuation would absorb the next generated instruction)")
+
+
+def _validate_base_image(base_image: str) -> None:
+    """Base images enter the generated FROM line; enforce reference
+    shape so a value can never smuggle additional instructions."""
+    if not _IMAGE_REF_RE.fullmatch(base_image):
+        raise ValueError(f"invalid base image reference: {base_image!r}")
+
+
 def _env_prefix(run_env: dict[str, str] | None) -> str:
     """KEY='VALUE' prefix for the RUN line (empty when None).
 
@@ -391,9 +465,24 @@ def _env_prefix(run_env: dict[str, str] | None) -> str:
 
 
 def _flag_prefix(toolchain: ToolchainSpec | None) -> str:
-    """Ambient-flag env prefix for the RUN line (empty when None)."""
+    """Ambient-flag env prefix for the RUN line (empty when None).
+
+    Every field is shape-validated at this chokepoint — toolchains can
+    arrive from on-disk specs, not only the module constants, and each
+    value lands single-quoted on the generated Dockerfile RUN line
+    (see :func:`_validate_build_command` for the injection shapes).
+    """
     if toolchain is None:
         return ""
+    for label, value in (("cc", toolchain.cc), ("cxx", toolchain.cxx)):
+        if value and not _TOOL_NAME_RE.fullmatch(value):
+            raise ValueError(f"invalid toolchain {label}: {value!r}")
+    for label, tokens in (("cflags", toolchain.cflags),
+                          ("ldflags", toolchain.ldflags)):
+        for token in tokens:
+            if not _FLAG_TOKEN_RE.fullmatch(token):
+                raise ValueError(
+                    f"invalid toolchain {label} token: {token!r}")
     cflag_list = list(toolchain.cflags)
     if toolchain.debug and "-g" not in cflag_list:
         cflag_list.append("-g")
