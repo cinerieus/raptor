@@ -1249,6 +1249,90 @@ class TestCheckEvidenceStaleness:
         assert len(stale) == 1
         assert stale[0]["status"] == "deleted"
 
+    # ----- invariants (verbatim receipts) -------------------------
+
+    @staticmethod
+    def _invariant(receipt: dict | None) -> Invariant:
+        return Invariant(
+            id="inv1", concept="c1",
+            statement="offset must be validated",
+            negation="unvalidated offset overflows",
+            provenance="verbatim",
+            receipt=receipt,
+        )
+
+    def test_invariant_receipt_drift_detected(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.c"
+        src.write_text("check_offset(off, len);\nint y = 2;\n",
+                       encoding="utf-8")
+        model = DomainModel(invariants=[self._invariant({
+            "file": "a.c", "line": 1,
+            "quote": "check_offset(off, len);", "verified": True,
+        })])
+        # The quoted check is removed by a refactor — the invariant's
+        # "the API validates offset" claim is now unverifiable.
+        src.write_text("int y = 2;\n", encoding="utf-8")
+        stale = check_evidence_staleness(model, tmp_path)
+        assert len(stale) == 1
+        assert stale[0]["kind"] == "invariant"
+        assert stale[0]["id"] == "inv1"
+
+    def test_invariant_receipt_fresh_not_stale(self, tmp_path: Path) -> None:
+        src = tmp_path / "a.c"
+        src.write_text("check_offset(off, len);\n", encoding="utf-8")
+        model = DomainModel(invariants=[self._invariant({
+            "file": "a.c", "line": 1,
+            "quote": "check_offset(off, len);", "verified": True,
+        })])
+        assert check_evidence_staleness(model, tmp_path) == []
+
+    def test_invariant_without_receipt_skipped(self, tmp_path: Path) -> None:
+        model = DomainModel(invariants=[self._invariant(None)])
+        assert check_evidence_staleness(model, tmp_path) == []
+
+    # ----- contracts (span hashes) --------------------------------
+
+    def test_contract_hash_drift_detected(self, tmp_path: Path) -> None:
+        from core.staleness import hash_span
+
+        src = tmp_path / "a.c"
+        src.write_text("int f(void) {\n  return g(x);\n}\n",
+                       encoding="utf-8")
+        model = DomainModel(contracts=[Contract(
+            function="f", file="a.c",
+            hash=hash_span(src, 1, 3),
+            hash_span={"file": "a.c", "start": 1, "end": 3},
+        )])
+        src.write_text("int f(void) {\n  return g(x + 1);\n}\n",
+                       encoding="utf-8")
+        stale = check_evidence_staleness(model, tmp_path)
+        assert len(stale) == 1
+        assert stale[0]["kind"] == "contract"
+        assert stale[0]["id"] == "f"
+        assert stale[0]["status"] == "modified"
+
+    def test_contract_hash_fresh_not_stale(self, tmp_path: Path) -> None:
+        from core.staleness import hash_span
+
+        src = tmp_path / "a.c"
+        src.write_text("int f(void) {\n  return 0;\n}\n", encoding="utf-8")
+        model = DomainModel(contracts=[Contract(
+            function="f", file="a.c",
+            hash=hash_span(src, 1, 3),
+            hash_span={"file": "a.c", "start": 1, "end": 3},
+        )])
+        assert check_evidence_staleness(model, tmp_path) == []
+
+    def test_contract_without_span_skipped(self, tmp_path: Path) -> None:
+        # Legacy models carry Contract.hash without the stamped span —
+        # no baseline to re-hash, so the check skips them (same rule
+        # as unhashed concept evidence).
+        (tmp_path / "a.c").write_text("int f(void) { return 0; }\n")
+        model = DomainModel(contracts=[Contract(
+            function="f", file="a.c", hash="abcdef012345",
+        )])
+        assert check_evidence_staleness(model, tmp_path) == []
+
 
 # ------------------------------------------------------------------
 # Multi-identifier correlation
@@ -2007,6 +2091,78 @@ class TestQuarantineStalePrior:
         _quarantine_stale_prior(prior, None, tmp_path)
         assert prior.concepts[0].state == "validated"
 
+    def test_stale_invariant_quarantined(self, tmp_path: Path) -> None:
+        """A [verbatim] invariant whose quoted source drifted must not
+        be served as receipt-backed ground truth on the next run."""
+        from core.concepts.study import _quarantine_stale_prior
+
+        src = tmp_path / "a.c"
+        src.write_text("validate_len(buf, n);\n", encoding="utf-8")
+        prior = DomainModel(invariants=[Invariant(
+            id="inv1", concept="c1",
+            statement="length is validated before copy",
+            negation="unvalidated length overflows",
+            provenance="verbatim",
+            receipt={"file": "a.c", "line": 1,
+                     "quote": "validate_len(buf, n);", "verified": True},
+        )])
+        src.write_text("memcpy(buf, src, n);\n", encoding="utf-8")
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        from core.concepts.reading_list import ReadingList
+        rl = ReadingList()
+        _quarantine_stale_prior(prior, tmp_path, out_dir, reading_list=rl)
+
+        inv = prior.invariants[0]
+        assert inv.state == "stale"
+        assert inv.provenance == "llm_summarized"
+        assert inv.receipt["verified"] is False
+        data = json.loads(
+            (out_dir / "study-stale.json").read_text(encoding="utf-8"))
+        assert data["stale_evidence"][0]["kind"] == "invariant"
+        pending = rl.pending()
+        assert len(pending) == 1
+        assert "re-derive invariant inv1" in pending[0].question
+
+    def test_fresh_invariant_untouched(self, tmp_path: Path) -> None:
+        from core.concepts.study import _quarantine_stale_prior
+
+        src = tmp_path / "a.c"
+        src.write_text("validate_len(buf, n);\n", encoding="utf-8")
+        prior = DomainModel(invariants=[Invariant(
+            id="inv1", concept="c1", statement="s", negation="n",
+            provenance="verbatim",
+            receipt={"file": "a.c", "line": 1,
+                     "quote": "validate_len(buf, n);", "verified": True},
+        )])
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _quarantine_stale_prior(prior, tmp_path, out_dir)
+        assert prior.invariants[0].state == ""
+        assert prior.invariants[0].provenance == "verbatim"
+        assert prior.invariants[0].receipt["verified"] is True
+
+    def test_stale_contract_quarantined(self, tmp_path: Path) -> None:
+        from core.concepts.study import _quarantine_stale_prior
+        from core.staleness import hash_span
+
+        src = tmp_path / "a.c"
+        src.write_text("int f(void) {\n  return 0;\n}\n", encoding="utf-8")
+        prior = DomainModel(contracts=[Contract(
+            function="f", file="a.c",
+            output_semantics="returns zero on success",
+            hash=hash_span(src, 1, 3),
+            hash_span={"file": "a.c", "start": 1, "end": 3},
+            provenance="llm_summarized",
+        )])
+        src.write_text("int f(void) {\n  return -1;\n}\n", encoding="utf-8")
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        _quarantine_stale_prior(prior, tmp_path, out_dir)
+        assert prior.contracts[0].state == "stale"
+
 
 class TestStampRelatedStrategies:
     def test_stamps_unstamped_concepts_from_text(self):
@@ -2396,6 +2552,10 @@ class TestStampContractHashes:
         _stamp_contract_hashes(contracts, items, tmp_path)
         assert contracts[0].hash == hash_span(f, 1, 3)
         assert contracts[1].hash == hash_span(f, 4, 6)
+        # The stamped span rides along so the staleness check can
+        # re-verify the hash later.
+        assert contracts[0].hash_span == {"file": "a.c", "start": 1, "end": 3}
+        assert contracts[1].hash_span == {"file": "a.c", "start": 4, "end": 6}
 
     def test_unknown_function_left_unstamped(
         self, tmp_path: Path,

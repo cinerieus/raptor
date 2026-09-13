@@ -944,6 +944,49 @@ class TestProvenanceTierTags:
         assert block is not None
         assert "**sg_page_ownership** [stale-unverified]" in block
 
+    def test_stale_invariant_tagged_in_primers(self, domain_model, tmp_path):
+        """A quarantined invariant must read as [stale-unverified] on
+        the primers path — never as receipt-backed ground truth."""
+        from core.concepts.audit_bridge import primers_from_domain_model
+        domain_model["invariants"][0]["provenance"] = "verbatim"
+        domain_model["invariants"][0]["state"] = "stale"
+        dm_path = tmp_path / "domain-model.json"
+        dm_path.write_text(json.dumps(domain_model), encoding="utf-8")
+        primers = primers_from_domain_model(
+            tmp_path, "crypto/algif_aead.c", "_aead_recvmsg",
+            source="scatterlist page aliasing",
+        )
+        joined = "\n".join(primers)
+        assert "[stale-unverified]" in joined
+        assert "[verbatim] Pages accessible" not in joined
+
+    def test_stale_contract_dropped_from_primers(
+        self, domain_model, tmp_path,
+    ):
+        """The contract primer carries no tier tag — a stale contract
+        (source drifted since study) must not be served at all."""
+        from core.concepts.audit_bridge import (
+            _load_cached,
+            primers_from_domain_model,
+        )
+        dm_path = tmp_path / "domain-model.json"
+
+        dm_path.write_text(json.dumps(domain_model), encoding="utf-8")
+        fresh = primers_from_domain_model(
+            tmp_path, "crypto/algif_aead.c", "_aead_recvmsg",
+        )
+        assert any("CONTRACT FOR _aead_recvmsg" in p for p in fresh)
+
+        domain_model["contracts"][0]["state"] = "stale"
+        dm_path.write_text(json.dumps(domain_model), encoding="utf-8")
+        # The model loader caches by path for the process lifetime —
+        # drop it so the rewritten fixture is re-read.
+        _load_cached.cache_clear()
+        stale = primers_from_domain_model(
+            tmp_path, "crypto/algif_aead.c", "_aead_recvmsg",
+        )
+        assert not any("CONTRACT FOR _aead_recvmsg" in p for p in stale)
+
 
 class TestNameVariantJoin:
     """Binary audits key functions with r2 decoration; source

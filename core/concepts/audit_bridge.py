@@ -789,6 +789,14 @@ def primers_from_domain_model(
         if cf not in tuple(v.lower()
                            for v in _name_variants(function_name)):
             continue
+        if str(contract.get("state") or "") == "stale":
+            # Quarantined by the staleness check — the function's
+            # source drifted since the contract was written. This
+            # primer states semantics with no tier tag, so a stale
+            # contract must not be served at all (it describes an old
+            # version of the code and can steer the review to dismiss
+            # a real finding).
+            continue
         lines = [f"DOMAIN-SPECIFIC: CONTRACT FOR {contract['function']}"]
         if contract.get("input_semantics"):
             lines.append(f"Input: {contract['input_semantics']}")

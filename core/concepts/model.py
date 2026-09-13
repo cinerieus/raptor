@@ -98,6 +98,12 @@ class Invariant:
     mechanism_tags: list[str] = field(default_factory=list)
     provenance: str = ""
     receipt: dict[str, Any] | None = None
+    # Staleness marker: "" (fresh/unchecked) or "stale" — set by the
+    # prior-model quarantine when the verbatim receipt no longer
+    # verifies against the current source. Tier-gated consumers
+    # (audit_bridge._tier_tag) render stale entries as
+    # [stale-unverified] hints, never as receipt-backed facts.
+    state: str = ""
 
 
 # ------------------------------------------------------------------
@@ -115,8 +121,20 @@ class Contract:
     implication: str = ""
     security_note: str = ""
     hash: str | None = None
+    # Span the hash was computed over (``_stamp_contract_hashes``):
+    # {"file": <study-item file>, "start": N, "end": M}. Recorded so
+    # the staleness check can re-hash the same span later; ``hash``
+    # alone is unverifiable without it. None on pre-span legacy
+    # models — those contracts are skipped by the staleness check
+    # (no baseline), same as unhashed concept evidence.
+    hash_span: dict[str, Any] | None = None
     provenance: str = ""
     receipt: dict[str, Any] | None = None
+    # Staleness marker: "" (fresh/unchecked) or "stale" — set when the
+    # stamped span hash no longer matches the source. Stale contracts
+    # are dropped from the authority-toned review primers and render
+    # as [stale-unverified] in context blocks.
+    state: str = ""
 
 
 # ------------------------------------------------------------------

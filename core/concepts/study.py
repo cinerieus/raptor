@@ -49,17 +49,19 @@ def _quarantine_stale_prior(
     on_progress: Any = None,
     reading_list: Any = None,
 ) -> None:
-    """Quarantine prior-run concepts whose evidence drifted on disk.
+    """Quarantine prior-run entries whose evidence drifted on disk.
 
     ``check_evidence_staleness`` existed with zero production callers —
     prior-run concepts merged into this run carried drifted evidence
     with their original (possibly ``verbatim``) provenance intact.
-    Wire it into the load path: any concept with stale evidence is
-    moved to lifecycle state ``stale`` and its provenance demoted to
-    ``llm_summarized`` (the receipt no longer matches the source, so
-    tier-gated consumers must treat the claim as an unverified hint).
-    The re-derive signal is machine-consumed via the reading list
-    (one pending re-derive question per stale concept — the loop
+    Wire it into the load path: any concept, invariant, or contract
+    with stale evidence is marked ``state="stale"`` and its provenance
+    demoted to ``llm_summarized`` (the receipt / span hash no longer
+    matches the source, so tier-gated consumers must treat the claim
+    as an unverified hint — a drifted [verbatim] invariant otherwise
+    reaches review prompts as "a violation is a real bug" ground
+    truth). The re-derive signal is machine-consumed via the reading
+    list (one pending re-derive question per stale entry — the loop
     drains pending items on its next pass) and mirrored to
     ``study-stale.json`` for the operator.
 
@@ -82,11 +84,36 @@ def _quarantine_stale_prior(
     if not stale:
         return
     from .receipts import TIER_LLM_SUMMARIZED
-    stale_ids = {s["concept_id"] for s in stale}
+
+    def _kind(s: dict[str, Any]) -> str:
+        # Pre-kind records only ever described concepts.
+        return str(s.get("kind") or "concept")
+
+    stale_concept_ids = {s["id"] for s in stale if _kind(s) == "concept"}
+    stale_inv_ids = {s["id"] for s in stale if _kind(s) == "invariant"}
+    stale_ct_fns = {s["id"] for s in stale if _kind(s) == "contract"}
     for concept in prior.concepts:
-        if concept.id in stale_ids:
+        if concept.id in stale_concept_ids:
             concept.state = "stale"
             concept.provenance = TIER_LLM_SUMMARIZED
+    for inv in prior.invariants:
+        if inv.id in stale_inv_ids:
+            inv.state = "stale"
+            inv.provenance = TIER_LLM_SUMMARIZED
+            if isinstance(inv.receipt, dict):
+                # The receipt no longer verifies — a verified=True
+                # receipt must not ride along with a quarantined entry.
+                inv.receipt = {
+                    **inv.receipt,
+                    "verified": False,
+                    "note": "stale: quote no longer verifies at "
+                            "stated location",
+                }
+    for ct in prior.contracts:
+        if ct.function in stale_ct_fns:
+            ct.state = "stale"
+            ct.provenance = TIER_LLM_SUMMARIZED
+    stale_ids = stale_concept_ids | stale_inv_ids | stale_ct_fns
     try:
         stale_path = output_dir / "study-stale.json"
         save_json(stale_path, {"stale_evidence": stale})
@@ -99,14 +126,19 @@ def _quarantine_stale_prior(
                 ReadingListItem,
                 Resolution,
             )
-            by_concept: dict[str, dict[str, Any]] = {}
+            by_entry: dict[tuple[str, str], dict[str, Any]] = {}
             for s in stale:
-                by_concept.setdefault(s["concept_id"], s)
-            for cid, s in sorted(by_concept.items()):
+                by_entry.setdefault((_kind(s), s["id"]), s)
+            for (kind, eid), s in sorted(by_entry.items()):
+                # Concept ids keep the pre-kind "stale-<id>" shape so a
+                # re-run resolves the same queued item; invariant /
+                # contract ids are namespaced to avoid collisions.
+                item_id = (f"stale-{eid}" if kind == "concept"
+                           else f"stale-{kind}-{eid}")
                 reading_list.queue(ReadingListItem(
-                    id=f"stale-{cid}",
+                    id=item_id,
                     question=(
-                        f"re-derive concept {cid} — its evidence at "
+                        f"re-derive {kind} {eid} — its evidence at "
                         f"{s.get('evidence_file', '?')}:"
                         f"{s.get('evidence_line', '?')} has "
                         f"{s.get('status', 'drifted')}"
@@ -121,15 +153,15 @@ def _quarantine_stale_prior(
             logger.debug("stale re-derive queueing failed",
                          exc_info=True)
     logger.warning(
-        "study: %d prior concept(s) have drifted evidence — "
-        "quarantined as stale (provenance demoted; re-derive signal "
-        "in study-stale.json): %s",
+        "study: %d prior entrie(s) (concepts/invariants/contracts) "
+        "have drifted evidence — quarantined as stale (provenance "
+        "demoted; re-derive signal in study-stale.json): %s",
         len(stale_ids), ", ".join(sorted(stale_ids)),
     )
     if on_progress:
         on_progress(
             "staleness",
-            f"{len(stale_ids)} prior concept(s) quarantined as stale",
+            f"{len(stale_ids)} prior entrie(s) quarantined as stale",
         )
 
 
@@ -2080,7 +2112,7 @@ def _stamp_contract_hashes(
     for item in focus_items:
         item_by_name[item.name] = item
 
-    by_file: dict[Path, list[tuple[Contract, int, int]]] = {}
+    by_file: dict[Path, list[tuple[Contract, str, int, int]]] = {}
     for ct in contracts:
         item = item_by_name.get(ct.function)
         if item is None or item.line is None:
@@ -2090,14 +2122,20 @@ def _stamp_contract_hashes(
         full_path = _resolve_in_root(source_root, item.file)
         if full_path is None:
             continue
-        by_file.setdefault(full_path, []).append((ct, item.line, end_line))
+        by_file.setdefault(full_path, []).append(
+            (ct, item.file, item.line, end_line),
+        )
 
     for full_path, entries in by_file.items():
-        spans = [(start, end) for _, start, end in entries]
+        spans = [(start, end) for _, _, start, end in entries]
         hashes = hash_spans(full_path, spans)
-        for (ct, _, _), h in zip(entries, hashes):
+        for (ct, item_file, start, end), h in zip(entries, hashes):
             if h:
                 ct.hash = h
+                # Record the hashed span so check_evidence_staleness
+                # can re-verify the hash later — a bare hash has no
+                # reader without the (file, start, end) it covered.
+                ct.hash_span = {"file": item_file, "start": start, "end": end}
 
 
 def _queue_unresolved(
@@ -4255,23 +4293,34 @@ def check_evidence_staleness(
     model: DomainModel,
     source_root: Path,
 ) -> list[dict[str, Any]]:
-    """Check all evidence hashes in *model* for staleness.
+    """Check evidence freshness for concepts, invariants, AND contracts.
+
+    - Concepts: per-evidence source-line hashes (``Evidence.hash``).
+    - Invariants: the verbatim receipt is re-verified — the quoted
+      source must still appear at the stated file/line
+      (``receipts.verify_receipt``).
+    - Contracts: ``Contract.hash`` is re-checked over the span it was
+      stamped from (``Contract.hash_span``).
 
     Returns a list of dicts describing stale evidence::
 
-        {"concept_id": "...", "evidence_file": "...",
-         "evidence_line": N, "status": "modified"|"deleted"|...}
+        {"kind": "concept"|"invariant"|"contract", "id": "...",
+         "evidence_file": "...", "evidence_line": N,
+         "status": "modified"|"deleted"|...}
 
-    Evidence without a stored hash is skipped (no baseline to check).
-    Uses ``core.staleness.check_batch`` for batched reads.
+    Concept records additionally carry the legacy ``concept_id`` key
+    (``study-stale.json`` consumers predate ``kind``/``id``).
+    Entries without a stored hash / receipt / span are skipped (no
+    baseline to check). Uses ``core.staleness.check_batch`` for
+    batched reads.
     """
     from core.staleness import CheckItem, check_batch
 
     items: list[CheckItem] = []
-    item_keys: list[tuple[str, int]] = []
+    item_keys: list[tuple[str, str, str, int | None]] = []
 
     for concept in model.concepts:
-        for ev_idx, ev in enumerate(concept.evidence):
+        for ev in concept.evidence:
             if not ev.hash or not ev.file or ev.line is None:
                 continue
             # Evidence paths originate from LLM output — confine to
@@ -4284,24 +4333,73 @@ def check_evidence_staleness(
                 start_line=ev.line,
                 end_line=ev.line,
                 stored_hash=ev.hash,
-                label=f"{concept.id}:{ev_idx}",
+                label=f"concept:{concept.id}",
             ))
-            item_keys.append((concept.id, ev_idx))
+            item_keys.append(("concept", concept.id, ev.file, ev.line))
 
-    if not items:
-        return []
+    for ct in model.contracts:
+        span = ct.hash_span if isinstance(ct.hash_span, dict) else {}
+        span_file = span.get("file")
+        start, end = span.get("start"), span.get("end")
+        if (not ct.hash or not span_file
+                or not isinstance(start, int) or not isinstance(end, int)):
+            continue
+        ct_path = _resolve_in_root(source_root, str(span_file))
+        if ct_path is None:
+            continue
+        items.append(CheckItem(
+            file=ct_path,
+            start_line=start,
+            end_line=end,
+            stored_hash=ct.hash,
+            label=f"contract:{ct.function}",
+        ))
+        item_keys.append(("contract", ct.function, str(span_file), start))
 
-    results = check_batch(items, root=source_root)
     stale: list[dict[str, Any]] = []
-    for (concept_id, ev_idx), result in zip(item_keys, results):
-        if result.status not in ("current", "unknown"):
-            concept = model.get_concept(concept_id)
-            ev = concept.evidence[ev_idx] if concept else None
-            stale.append({
-                "concept_id": concept_id,
-                "evidence_file": ev.file if ev else "",
-                "evidence_line": ev.line if ev else None,
+    if items:
+        results = check_batch(items, root=source_root)
+        for (kind, entry_id, ev_file, ev_line), result in zip(
+                item_keys, results):
+            if result.status in ("current", "unknown"):
+                continue
+            record: dict[str, Any] = {
+                "kind": kind,
+                "id": entry_id,
+                "evidence_file": ev_file,
+                "evidence_line": ev_line,
                 "status": result.status,
+            }
+            if kind == "concept":
+                record["concept_id"] = entry_id
+            stale.append(record)
+
+    # Invariants carry a verbatim quote receipt, not a span hash —
+    # re-run the deterministic receipt check. verify_receipt reads
+    # the file per receipt (same shape as the _apply_receipts writer
+    # path); invariant counts are small enough that batching is not
+    # worth a second window-search implementation that could drift.
+    from .receipts import verify_receipt
+
+    for inv in model.invariants:
+        receipt = inv.receipt if isinstance(inv.receipt, dict) else {}
+        quote = receipt.get("quote") or ""
+        rc_file = receipt.get("file") or ""
+        if not quote or not rc_file:
+            continue
+        rc_line = receipt.get("line")
+        checked = verify_receipt(
+            source_root, str(rc_file),
+            rc_line if isinstance(rc_line, int) else None,
+            str(quote),
+        )
+        if not checked.verified:
+            stale.append({
+                "kind": "invariant",
+                "id": inv.id,
+                "evidence_file": str(rc_file),
+                "evidence_line": rc_line if isinstance(rc_line, int) else None,
+                "status": "modified",
             })
 
     return stale
