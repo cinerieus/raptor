@@ -102,7 +102,7 @@ def _node_label(node: dict, proximity_idx: dict, disproven_idx: dict) -> str:
     if status == "confirmed" and nid in proximity_idx:
         score = proximity_idx[nid]
         desc = _proximity_desc(score)
-        parts.append(f"proximity {score}/10,{desc}" if desc else f"proximity {score}/10")
+        parts.append(f"proximity {score}/10 — {desc}" if desc else f"proximity {score}/10")
 
     # Why-wrong annotation on disproven nodes
     if status == "disproven" and nid in disproven_idx:
@@ -184,7 +184,7 @@ def _find_subgraph_groups(
         if desc:
             groups[child] = desc
         else:
-            # Leaf child,keep ungrouped by putting it in its own single-item group
+            # Leaf child — keep ungrouped by putting it in its own single-item group
             groups[child] = []
 
     return groups if len(groups) >= 2 else None
@@ -254,7 +254,7 @@ def generate(
             prox_suffix = ""
             if group_id in proximity_idx:
                 score = proximity_idx[group_id]
-                prox_suffix = f",proximity {score}/10"
+                prox_suffix = f" — proximity {score}/10"
             hyp_suffix = ""
             if group_id in hyp_idx:
                 hyp_suffix = f",{hyp_idx[group_id]}"

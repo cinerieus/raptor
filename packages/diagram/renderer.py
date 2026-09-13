@@ -311,9 +311,9 @@ def render_directory(out_dir: Path, target: str | None = None) -> str:
                 diagram = hypotheses.generate(hyp_list)
                 body = (f"_Source: `hypotheses.json`_{_provenance_note(raw)}"
                         f"\n\n```mermaid\n{_fence(diagram)}\n```")
-                sections.append(_section("Hypotheses,Evidence Chain", body))
+                sections.append(_section("Hypotheses — Evidence Chain", body))
         except Exception as exc:  # noqa: BLE001
-            sections.append(_section("Hypotheses,Evidence Chain", f"> Could not render `hypotheses.json`: {_err(exc)}"))
+            sections.append(_section("Hypotheses — Evidence Chain", f"> Could not render `hypotheses.json`: {_err(exc)}"))
 
     # --- Attack paths ---
     paths_path = out_dir / "attack-paths.json"
@@ -356,7 +356,7 @@ def _load_optional_list(path: Path) -> list | None:
 
 
 def _load_disproven(path: Path) -> list | None:
-    """Load disproven.json,unwraps the {'disproven': [...]} envelope."""
+    """Load disproven.json — unwraps the {'disproven': [...]} envelope."""
     data = _load_json(path)
     if data is None:
         return None

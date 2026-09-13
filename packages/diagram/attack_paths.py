@@ -56,7 +56,7 @@ def generate_single(path_data: dict[str, Any], path_index: int) -> str:
     # extraction above. _sanitize is not idempotent ('&' → '&amp;' →
     # '&amp;amp;'), so re-sanitizing the assembled label mangled any
     # name containing &, < or > in the rendered title.
-    title_label = f"{name}{rt_tag}\\nProximity: {proximity}/10,{prox_desc}\\nStatus: {status}"
+    title_label = f"{name}{rt_tag}\\nProximity: {proximity}/10 — {prox_desc}\\nStatus: {status}"
     lines.append(f'    TITLE_{path_index}["{title_label}"]')
     lines.append(f"    style TITLE_{path_index} fill:#f0f0f0,stroke:#999,font-weight:bold")
     lines.append("")

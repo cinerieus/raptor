@@ -3,7 +3,7 @@ Mermaid diagram generator for hypotheses.json (produced by /validate Stage B).
 
 Shows the evidence chain: finding → hypothesis → predictions → results.
 This is the diagram to look at when deciding whether something is exploitable
-enough to write a PoC for,it shows the concrete predictions and their
+enough to write a PoC for — it shows the concrete predictions and their
 outcomes, not just whether a node is "confirmed".
 """
 
