@@ -252,7 +252,14 @@ def _run_one(
 
 def _result_to_verdict(result) -> ValidatorVerdict:
     """Map DataflowValidation result → ValidatorVerdict.
-    Mirrors CodeQLEvidenceValidator's mapping."""
+    Mirrors CodeQLEvidenceValidator's mapping — including the
+    error-state guard: ``validate_dataflow_path`` returns errored
+    results (LLM transport failure, budget exhaustion, parse errors)
+    with ``error`` set and ``is_exploitable=False`` as a DEFAULT, not
+    a verdict. Mapping those to NOT_EXPLOITABLE would count transport
+    failures as confident negatives in the A/B error rates."""
+    if getattr(result, "error", None):
+        return ValidatorVerdict.UNCERTAIN
     is_exploitable = getattr(result, "is_exploitable", None)
     if is_exploitable is True:
         return ValidatorVerdict.EXPLOITABLE
