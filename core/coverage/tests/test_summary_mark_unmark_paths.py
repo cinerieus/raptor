@@ -167,3 +167,28 @@ class TestJournalItemsPrecedence:
         rows = [e for e in entries if e.get("function") == "g"]
         # The legacy `functions` range (line_start 5) is never credited.
         assert rows and rows[0].get("line_start") == 0
+
+
+class TestMarkUnmarkLocking:
+    """mark/unmark are read-modify-write cycles over the same record a
+    live run's completion snapshot mutates — they must run under the
+    cross-process coverage lock (the import path already does). The
+    lock helper creates a sibling .lock file; its presence after a
+    mark is the observable witness that the lock engaged."""
+
+    def test_mark_takes_the_record_lock(self, tmp_path: Path):
+        _proj, run = _project(tmp_path)
+        res = _run(str(run), "--mark", "src/auth.c:check_pw")
+        assert res.returncode == 0, res.stderr
+        assert (run / "coverage-llm.json.lock").exists(), (
+            "mark ran without the cross-process record lock"
+        )
+
+    def test_unmark_takes_the_record_lock(self, tmp_path: Path):
+        _proj, run = _project(tmp_path)
+        res = _run(str(run), "--mark", "src/auth.c:check_pw")
+        assert res.returncode == 0, res.stderr
+        (run / "coverage-llm.json.lock").unlink()
+        res = _run(str(run), "--unmark", "src/auth.c:check_pw")
+        assert res.returncode == 0, res.stderr
+        assert (run / "coverage-llm.json.lock").exists()

@@ -304,74 +304,82 @@ def _cmd_mark(mark_targets: list, run_dir: Path | None,
         print("Specify a run directory explicitly.", file=sys.stderr)
         sys.exit(1)
 
+    from core.coverage.store import coverage_store_lock
+
+    # RMW under the cross-process lock: the same record is
+    # load->mutate->saved by a live run's completion snapshot;
+    # unlocked, a racing mark/unmark and run completion
+    # last-writer-wins and one side's update is silently lost
+    # (the import path already takes this lock).
     from core.coverage.record import load_records, write_record
 
-    # Load existing LLM record or create new
-    records = load_records(run_dir)
-    llm_record = None
-    for r in records:
-        if r.get("tool") == "llm":
-            llm_record = r
-            break
+    with coverage_store_lock(Path(run_dir) / "coverage-llm.json"):
+        # Load existing LLM record or create new
+        records = load_records(run_dir)
+        llm_record = None
+        for r in records:
+            if r.get("tool") == "llm":
+                llm_record = r
+                break
 
-    if not llm_record:
-        from datetime import datetime, timezone
-        llm_record = {
-            "tool": "llm",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "files_examined": [],
-            "functions_analysed": [],
+        if not llm_record:
+            from datetime import datetime, timezone
+            llm_record = {
+                "tool": "llm",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "files_examined": [],
+                "functions_analysed": [],
+            }
+
+        existing_funcs = {
+            (fa.get("file"), fa.get("function"))
+            for fa in llm_record.get("functions_analysed", [])
         }
 
-    existing_funcs = {
-        (fa.get("file"), fa.get("function"))
-        for fa in llm_record.get("functions_analysed", [])
-    }
+        # Validate marks against the inventory: a mark naming a nonexistent
+        # (file, item) pair must not record phantom review credit — the store
+        # and journal folds join on the checklist, so a phantom entry claims
+        # coverage no gap query can ever surface or withdraw.
+        valid_keys, normalise_path = _build_path_normaliser(run_dir)
 
-    # Validate marks against the inventory: a mark naming a nonexistent
-    # (file, item) pair must not record phantom review credit — the store
-    # and journal folds join on the checklist, so a phantom entry claims
-    # coverage no gap query can ever surface or withdraw.
-    valid_keys, normalise_path = _build_path_normaliser(run_dir)
-
-    statuses = dict(statuses or {})
-    added = 0
-    marked = []
-    unmatched = []
-    for target in mark_targets:
-        # --mark-file passes structured (file, item) pairs so item names
-        # containing ':' (e.g. C++ qualified names) survive intact; the
-        # CLI --mark form stays a 'file:item' string.
-        if isinstance(target, tuple):
-            file_path, func_name = target
-        else:
-            if ":" not in target:
-                print(f"WARNING: skipping '{target}' (expected file:function)",
-                      file=sys.stderr)
+        statuses = dict(statuses or {})
+        added = 0
+        marked = []
+        unmatched = []
+        for target in mark_targets:
+            # --mark-file passes structured (file, item) pairs so item names
+            # containing ':' (e.g. C++ qualified names) survive intact; the
+            # CLI --mark form stays a 'file:item' string.
+            if isinstance(target, tuple):
+                file_path, func_name = target
+            else:
+                if ":" not in target:
+                    print(f"WARNING: skipping '{target}' (expected file:function)",
+                          file=sys.stderr)
+                    continue
+                file_path, func_name = target.rsplit(":", 1)
+            if normalise_path is not None:
+                raw_key = (file_path, func_name)
+                file_path = normalise_path(file_path)
+                if raw_key in statuses:
+                    statuses.setdefault((file_path, func_name), statuses[raw_key])
+            if valid_keys is not None and (file_path, func_name) not in valid_keys:
+                unmatched.append((file_path, func_name))
                 continue
-            file_path, func_name = target.rsplit(":", 1)
-        if normalise_path is not None:
-            raw_key = (file_path, func_name)
-            file_path = normalise_path(file_path)
-            if raw_key in statuses:
-                statuses.setdefault((file_path, func_name), statuses[raw_key])
-        if valid_keys is not None and (file_path, func_name) not in valid_keys:
-            unmatched.append((file_path, func_name))
-            continue
-        if (file_path, func_name) not in existing_funcs:
-            llm_record.setdefault("functions_analysed", []).append(
-                {"file": file_path, "function": func_name}
-            )
-            existing_funcs.add((file_path, func_name))
-            marked.append((file_path, func_name))
-            added += 1
-    for file_path, func_name in unmatched:
-        print(f"WARNING: no checklist item matches "
-              f"{file_path}:{func_name} — not marked", file=sys.stderr)
-    # Marking a function records function-level review only — it must NOT add
-    # the file to files_examined (which is the whole-file "tool scanned this
-    # file" signal; the store would otherwise mark the entire file reviewed).
-    write_record(run_dir, llm_record, tool_name="llm")
+            if (file_path, func_name) not in existing_funcs:
+                llm_record.setdefault("functions_analysed", []).append(
+                    {"file": file_path, "function": func_name}
+                )
+                existing_funcs.add((file_path, func_name))
+                marked.append((file_path, func_name))
+                added += 1
+        for file_path, func_name in unmatched:
+            print(f"WARNING: no checklist item matches "
+                  f"{file_path}:{func_name} — not marked", file=sys.stderr)
+        # Marking a function records function-level review only — it must NOT add
+        # the file to files_examined (which is the whole-file "tool scanned this
+        # file" signal; the store would otherwise mark the entire file reviewed).
+        write_record(run_dir, llm_record, tool_name="llm")
     journaled = _journal_marks(run_dir, marked, statuses or {})
     durable = " (journaled to project index)" if journaled else ""
     skipped = f" ({len(unmatched)} unmatched)" if unmatched else ""
@@ -385,44 +393,52 @@ def _cmd_unmark(unmark_targets, run_dir):
         print("ERROR: cannot determine run directory for --unmark.", file=sys.stderr)
         sys.exit(1)
 
+    from core.coverage.store import coverage_store_lock
+
+    # RMW under the cross-process lock: the same record is
+    # load->mutate->saved by a live run's completion snapshot;
+    # unlocked, a racing mark/unmark and run completion
+    # last-writer-wins and one side's update is silently lost
+    # (the import path already takes this lock).
     from core.coverage.record import load_records, write_record
 
-    records = load_records(run_dir)
-    llm_record = None
-    for r in records:
-        if r.get("tool") == "llm":
-            llm_record = r
-            break
+    with coverage_store_lock(Path(run_dir) / "coverage-llm.json"):
+        records = load_records(run_dir)
+        llm_record = None
+        for r in records:
+            if r.get("tool") == "llm":
+                llm_record = r
+                break
 
-    if not llm_record:
-        print("No LLM coverage record found.")
-        return
+        if not llm_record:
+            print("No LLM coverage record found.")
+            return
 
-    # Unmark must resolve operator path spellings exactly the way mark
-    # does — mark stores the checklist-normalised key, so an unmark that
-    # kept the raw spelling would remove nothing and leave the journaled
-    # review credit standing. The raw key is kept alongside so legacy
-    # records stored before normalisation still match.
-    _valid_keys, normalise_path = _build_path_normaliser(run_dir)
+        # Unmark must resolve operator path spellings exactly the way mark
+        # does — mark stores the checklist-normalised key, so an unmark that
+        # kept the raw spelling would remove nothing and leave the journaled
+        # review credit standing. The raw key is kept alongside so legacy
+        # records stored before normalisation still match.
+        _valid_keys, normalise_path = _build_path_normaliser(run_dir)
 
-    to_remove = set()
-    for target in unmark_targets:
-        if ":" not in target:
-            print(f"WARNING: skipping '{target}' (expected file:function)", file=sys.stderr)
-            continue
-        file_path, func_name = target.rsplit(":", 1)
-        to_remove.add((file_path, func_name))
-        if normalise_path is not None:
-            to_remove.add((normalise_path(file_path), func_name))
+        to_remove = set()
+        for target in unmark_targets:
+            if ":" not in target:
+                print(f"WARNING: skipping '{target}' (expected file:function)", file=sys.stderr)
+                continue
+            file_path, func_name = target.rsplit(":", 1)
+            to_remove.add((file_path, func_name))
+            if normalise_path is not None:
+                to_remove.add((normalise_path(file_path), func_name))
 
-    original = len(llm_record.get("functions_analysed", []))
-    llm_record["functions_analysed"] = [
-        fa for fa in llm_record.get("functions_analysed", [])
-        if (fa.get("file"), fa.get("function")) not in to_remove
-    ]
-    removed = original - len(llm_record["functions_analysed"])
+        original = len(llm_record.get("functions_analysed", []))
+        llm_record["functions_analysed"] = [
+            fa for fa in llm_record.get("functions_analysed", [])
+            if (fa.get("file"), fa.get("function")) not in to_remove
+        ]
+        removed = original - len(llm_record["functions_analysed"])
 
-    write_record(run_dir, llm_record, tool_name="llm")
+        write_record(run_dir, llm_record, tool_name="llm")
     # Neutralise any journaled mark for the same key: the journal is
     # append-only, so unmark appends a NEWER error-verdict entry under
     # the same (file, function, operator) index key — the index's
