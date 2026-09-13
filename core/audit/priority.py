@@ -582,7 +582,10 @@ def detect_widely_used(
     # No memoisation: each (file, name) checklist item is visited
     # exactly once per call, so a per-call cache could never hit —
     # and a duplicate name within one file would silently reuse the
-    # first definition's count.
+    # first definition's count.  Per-item callers_of is not a rescan
+    # either: reachability memoises its adjacency index per inventory
+    # identity, so the first call builds it and every later call is a
+    # reverse-index lookup.
     for file_path, items in file_iter:
         for item in items:
             name = item.get("name", "")
