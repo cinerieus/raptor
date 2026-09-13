@@ -2677,8 +2677,11 @@ class EgressProxy:
 
         # Belt-and-braces: reject any inbound connection that isn't
         # from loopback or a unix socket. Unix socket connections have
-        # no peer IP — they're trusted because bind_unix() restricts
-        # the socket file to mode 0600.
+        # no peer IP — they're admitted here because their real gates
+        # live elsewhere: the socket sits in a random 0700
+        # make_lane_dir() directory (bind_unix binds under umask
+        # 0o077), and _handle_unix_client enforces the
+        # SO_PEERCRED + ancestry check per connection.
         if client_ip not in ("127.0.0.1", "::1", "unix"):
             logger.warning("egress proxy: rejecting non-loopback peer %s", client_ip)
             writer.close()
@@ -2725,9 +2728,8 @@ class EgressProxy:
                 writer.close()
                 return
 
-        # Aggregate tunnel cap. Enforced best-effort — a race between
-        # check and increment can let 65+ through momentarily, but the
-        # bound holds to ~max.
+        # Aggregate tunnel cap. Check-and-increment is atomic under
+        # _active_lock, so the bound holds exactly.
         #
         # Must NOT `await` while holding a threading.Lock — the lock is
         # sync, so a second _handle_client task hitting `with

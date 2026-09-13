@@ -3,7 +3,7 @@
 These tests exercise ``core.sandbox.seatbelt_audit.parse_log_entry``
 and the JSONL-append behaviour of ``LogStreamer._append_record``
 without spawning ``log stream``. The Darwin-only end-to-end log
-capture lives in test_macos_e2e.py.
+capture lives in test_macos_spawn.py.
 
 Sample entries are reproduced from spike #4 output (run on macOS
 26.4.1 arm64) so the regex and field expectations are anchored to
