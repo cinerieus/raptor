@@ -1,14 +1,25 @@
 """Tool-grounded sweep execution for /audit.
 
-Wraps existing tool packages (semgrep, coccinelle) and SMT verb shims
-to run a hypothesis test against a specific file/function, then logs
-the result to the audit trail.  The sweep log entry is the breadcrumb
-that G3 (NO-SELF-CRITIQUE) checks: re-recording a function requires a
-sweep since the last record.
+Runs a hypothesis test against a specific file/function through one
+of nine tool channels, then logs the result to the audit trail:
 
-Uses ``packages.semgrep.runner.run_rule``,
-``packages.coccinelle.runner.run_rule``, and the
-``libexec/raptor-smt-*`` CLI shims.
+- semgrep (``run_semgrep_sweep``, plus the expanded-TU pass and
+  negative-control fixtures) via ``packages.semgrep.runner``
+- coccinelle (``run_coccinelle_sweep``) via ``packages.coccinelle``
+- SMT verbs (``run_smt_sweep`` / ``run_smt_verb_direct``) via the
+  ``libexec/raptor-smt-*`` CLI shims
+- CodeQL (``run_codeql_sweep``) with the whole-DB result memo
+- Joern (``run_joern_sweep`` / ``run_joern_pre_sweep`` /
+  ``run_consistency_check``)
+- symbolic execution (``run_symbolic_sweep``, angr)
+- heap-copy / integer-truncation checkers (``run_heap_copy_sweep``,
+  ``run_integer_truncation_sweep``)
+- proto-length checker (``run_proto_length_sweep``)
+- struct-field layout checker (``run_struct_field_sweep``)
+
+The sweep log entry is the breadcrumb that G3 (NO-SELF-CRITIQUE)
+checks: re-recording a function requires a sweep since the last
+record.
 """
 
 from __future__ import annotations
@@ -1784,9 +1795,21 @@ def run_smt_sweep(
             from core.config import RaptorConfig
             safe_env = RaptorConfig.get_safe_env()
         except ImportError:
-            safe_env = dict(os.environ)
-            for var in ("TERMINAL", "EDITOR", "VISUAL", "BROWSER", "PAGER"):
-                safe_env.pop(var, None)
+            # Fail closed: without the allowlist sanitiser the only
+            # safe environment is none at all — a pass-through of
+            # os.environ minus a short blocklist contradicts the
+            # SAFE_ENV_ALLOWLIST doctrine. Unreachable in-repo
+            # (core.config always ships beside this module).
+            return SweepResult(
+                tool="smt",
+                file_path=file_path,
+                function_name=function_name,
+                outcome="error",
+                errors=[
+                    "core.config unavailable; refusing to spawn the "
+                    "SMT shim with an unsanitised environment",
+                ],
+            )
 
         proc = subprocess.run(
             cmd,

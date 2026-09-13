@@ -424,6 +424,38 @@ class TestRunSmtSweep:
         missing = all_verbs - set(sweep_mod._SMT_VERB_ROLES)
         assert not missing, f"verbs without a role entry: {sorted(missing)}"
 
+    def test_sanitiser_unavailable_fails_closed(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When core.config (the env allowlist sanitiser) cannot be
+        imported, the shim must not be spawned at all — a pass-through
+        of os.environ minus a short blocklist is not a safe
+        environment."""
+        import sys as _sys
+
+        shim_dir = tmp_path / "libexec"
+        shim_dir.mkdir()
+        marker = tmp_path / "spawned"
+        shim = shim_dir / "raptor-smt-check-overflow"
+        shim.write_text(
+            "import pathlib\n"
+            f"pathlib.Path({str(marker)!r}).write_text('ran')\n"
+            "print('{\"result\": \"sat\"}')\n",
+        )
+        monkeypatch.setattr(sweep_mod, "_SMT_SHIM_DIR", shim_dir)
+        monkeypatch.setitem(_sys.modules, "core.config", None)
+
+        result = run_smt_sweep(
+            file_path="a.c",
+            function_name="foo",
+            verb="check-overflow",
+            smt_args={"var": "len", "type": "int32", "op": "len*4",
+                      "bound": "4294967295"},
+        )
+        assert result.outcome == "error"
+        assert any("unsanitised environment" in e for e in result.errors)
+        assert not marker.exists()
+
     def test_valid_verb_runs(self):
         result = run_smt_sweep(
             file_path="a.c",
