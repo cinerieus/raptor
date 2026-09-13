@@ -553,24 +553,19 @@ def _verify_incomplete_cleanup(
             },
         )
 
-    if len(uncleaned) > 0 and len(cleaned_fields) >= 2:
-        evidence = (
-            f"Potential cleanup gap in {function_name}: "
-            f"{len(uncleaned)} fields accessed but not cleaned "
-            f"({', '.join(sorted(uncleaned)[:5])}), "
-            f"while {len(cleaned_fields)} are cleaned "
-            f"({', '.join(sorted(cleaned_fields)[:5])})"
+    # A bare set-difference (fields accessed but never passed to a
+    # cleanup call) is NOT confirmation: teardown legitimately reads
+    # flag/count/state fields it never frees, so without the
+    # hypothesis-named field the "gap" is noise — and a verified=True
+    # here promotes the finding through the merge layer. Confirmation
+    # requires the hypothesis-named field (branch above); anything
+    # weaker stays inconclusive (None), never verified.
+    if uncleaned:
+        logger.debug(
+            "incomplete_cleanup: set-difference gap in %s (%s) without "
+            "a hypothesis-field match — inconclusive",
+            function_name, ", ".join(sorted(uncleaned)[:5]),
         )
-        return CrossFunctionVerdict(
-            verified=True,
-            verifier_name="incomplete_cleanup",
-            evidence=evidence,
-            details={
-                "uncleaned": sorted(uncleaned),
-                "cleaned": sorted(cleaned_fields),
-            },
-        )
-
     return None
 
 
@@ -613,6 +608,14 @@ def cross_function_verify(
     Tries up to _MAX_VERIFIERS_PER_FUNCTION matching verifiers in
     dispatch order.  Returns the first positive verification, or
     None if no verifier matches or none confirms.
+
+    Confirmation-only contract: verified=False verdicts from the
+    individual verifiers are intentionally NOT returned.  These are
+    keyword-dispatched heuristic CPG queries, so a non-confirmation is
+    weak negative evidence — it must not flow out as a mechanical
+    refutation that demotes findings.  Callers treat None as "no
+    mechanical signal"; refutation stays the job of the dedicated
+    refutation passes.
     """
     _init_dispatch()
 

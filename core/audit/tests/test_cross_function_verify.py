@@ -272,6 +272,45 @@ class TestIncompleteCleanup:
         assert result is not None
         assert result.verified is False
 
+    def test_set_difference_alone_does_not_confirm(self):
+        # Teardown reads flag/count fields it correctly never frees;
+        # without the hypothesis-named field that set-difference must
+        # stay inconclusive, not promote the finding as verified.
+        server = MockJoernServer()
+        server.add_response(
+            ".ast.isFieldIdentifier.map",
+            'List((pending, 5), (flags, 10), (refcount, 12))',
+        )
+        server.add_response(
+            ".argument.isFieldIdentifier",
+            'List((pending, 30), (refcount, 35))',
+        )
+        result = _verify_incomplete_cleanup(
+            "dev_teardown",
+            "resource leak in the teardown path",
+            server,
+        )
+        assert result is None
+
+    def test_hypothesis_named_field_still_confirms(self):
+        server = MockJoernServer()
+        server.add_response(
+            ".ast.isFieldIdentifier.map",
+            'List((pending, 5), (io, 10), (refcount, 12))',
+        )
+        server.add_response(
+            ".argument.isFieldIdentifier",
+            'List((pending, 30), (refcount, 35))',
+        )
+        result = _verify_incomplete_cleanup(
+            "dev_teardown",
+            "fails to clean up requests on the `io` list",
+            server,
+        )
+        assert result is not None
+        assert result.verified is True
+        assert result.details["hypothesis_field"] == "io"
+
 
 # ── Dispatcher tests ─────────────────────────────────────────────────
 
