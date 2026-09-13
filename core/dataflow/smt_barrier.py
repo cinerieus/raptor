@@ -66,6 +66,7 @@ pin) and 4.16.0; all PoC cases finish in 7-9 ms.
 from __future__ import annotations
 
 import ast
+import builtins
 import logging
 import re as _re
 from dataclasses import dataclass, field
@@ -698,19 +699,77 @@ def _block_uses_raise(body: list) -> bool:
     return any(isinstance(stmt, ast.Raise) for stmt in body)
 
 
+def _raised_exception_names(body: list) -> list[str | None]:
+    """Names of the exception classes the block's top-level ``raise``
+    statements throw. ``None`` entries mark statically-unresolvable
+    raises (dotted classes, re-raises, computed expressions) — the
+    caller must treat those as catchable-by-anything."""
+    names: list[str | None] = []
+    for stmt in body:
+        if not isinstance(stmt, ast.Raise):
+            continue
+        exc = stmt.exc
+        if isinstance(exc, ast.Call):
+            exc = exc.func
+        names.append(exc.id if isinstance(exc, ast.Name) else None)
+    return names
+
+
+def _handler_type_names(t: ast.AST | None) -> list[str | None]:
+    """Exception-class names an ``except`` clause declares. ``None``
+    entries mark unresolvable elements (dotted / computed)."""
+    elts = t.elts if isinstance(t, ast.Tuple) else [t]
+    return [e.id if isinstance(e, ast.Name) else None for e in elts]
+
+
+def _handler_name_may_catch(handler: str | None, raised: str | None) -> bool:
+    """Whether an ``except <handler>:`` clause may catch a ``raise
+    <raised>`` — resolvable statically only when BOTH names are real
+    builtin exception classes (then Python's own hierarchy answers);
+    every unresolvable pairing errs toward "may catch" (refusing a
+    dominance claim costs yield, never soundness). Builtin-name
+    shadowing by the scanned repo can only ADD catches this misses in
+    the certify direction for provably-disjoint builtin pairs — the
+    same static-name assumption the pre-existing disjoint-class
+    behavior already encodes."""
+    if handler is None or raised is None:
+        return True
+    if handler in {"Exception", "BaseException"}:
+        return True
+    handler_cls = getattr(builtins, handler, None)
+    raised_cls = getattr(builtins, raised, None)
+    if (isinstance(handler_cls, type)
+            and issubclass(handler_cls, BaseException)
+            and isinstance(raised_cls, type)
+            and issubclass(raised_cls, BaseException)):
+        return issubclass(raised_cls, handler_cls)
+    return True
+
+
 def _line_in_try_body_with_catching_handler(
     tree: ast.AST, validator_line: int,
+    raised_names: list[str | None],
 ) -> bool:
     """True iff ``validator_line`` falls inside the ``try.body`` of a
-    ``Try`` whose handlers might catch a generic / unspecified
-    exception.
+    ``Try`` with a handler that may SWALLOW the failure branch's raise
+    — the exception is caught and control falls through to the code
+    after the ``try``, so the unvalidated value reaches the sink.
 
-    Conservative: any ``except:`` (bare), ``except Exception:``,
-    ``except BaseException:`` triggers; specific exception classes
-    don't (since the validator's ``raise`` typically raises
-    ``ValueError``/``BadRequest`` and a generic ``except OSError:``
-    won't catch those).  False positives here only cost yield —
-    they don't compromise soundness.
+    Triggers:
+
+    * ``except:`` (bare), ``except Exception:``, ``except
+      BaseException:`` — catch everything, always trigger (even an
+      exiting body stays conservative here, the pre-existing rule).
+    * A TYPED handler that may catch one of ``raised_names`` (builtin
+      hierarchy when both names resolve to real builtin exception
+      classes; assumed catching otherwise) AND whose body falls
+      through (does not provably exit) — ``except ValueError: pass``
+      around a ``raise ValueError`` guard swallows exactly like a bare
+      except. A catching handler that re-raises / returns keeps the
+      failure path exiting and does NOT trigger.
+
+    False positives here only cost yield — they don't compromise
+    soundness.
     """
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try):
@@ -726,18 +785,24 @@ def _line_in_try_body_with_catching_handler(
         if not in_try_body:
             continue
         for h in node.handlers:
-            t = h.type
+            names = _handler_type_names(h.type) if h.type is not None else []
             # bare except: -> catches everything (UNSOUND if validator raises)
-            if t is None:
+            if h.type is None:
                 return True
-            # except Exception: / except BaseException:
-            if isinstance(t, ast.Name) and t.id in {"Exception", "BaseException"}:
+            # except Exception: / except BaseException: (incl. in tuples)
+            if any(n in {"Exception", "BaseException"} for n in names):
                 return True
-            # except (Exception, OSError): tuple of types
-            if isinstance(t, ast.Tuple):
-                for elt in t.elts:
-                    if isinstance(elt, ast.Name) and elt.id in {"Exception", "BaseException"}:
-                        return True
+            # Typed handler: a swallow needs BOTH a catch and a
+            # fall-through — a re-raising / returning handler keeps
+            # the failure path exiting.
+            if _block_always_exits(h.body):
+                continue
+            if any(
+                _handler_name_may_catch(hn, rn)
+                for hn in names
+                for rn in (raised_names or [None])
+            ):
+                return True
     return False
 
 
@@ -764,12 +829,14 @@ def _validator_block_exits_on_failure(
                 failure_body = node.orelse
             if not _block_always_exits(failure_body):
                 return False
-            # If the exit is `raise` and we're inside a catching try,
-            # the raise gets caught — decline.
+            # If the exit is `raise` and we're inside a try with a
+            # handler that may swallow it, the raise gets caught —
+            # decline.
             return not (
                 _block_uses_raise(failure_body)
                 and _line_in_try_body_with_catching_handler(
-                    tree, validator_line)
+                    tree, validator_line,
+                    _raised_exception_names(failure_body))
             )
     return False
 

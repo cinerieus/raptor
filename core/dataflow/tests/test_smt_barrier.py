@@ -2199,3 +2199,155 @@ def test_try_tier0_declined_on_ternary_substitution(tmp_path: Path):
     )
     assert r.status is sb.Tier0Status.NOT_APPLICABLE
     assert "does not dominate" in r.reasoning
+
+
+# ---------------------------------------------------------------------------
+# Dominance: try-swallowed guard (typed handler catching the guard's
+# own raise).
+#
+# The generic-handler cases (bare / Exception / BaseException) are
+# pinned above; these pin the TYPED handler that names the exact class
+# the failure branch raises — the swallow defeats exit-on-fail just
+# the same, and the value reaches the sink unvalidated.
+# ---------------------------------------------------------------------------
+
+def test_validator_raise_swallowed_by_matching_except_declines(tmp_path: Path):
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise ValueError\n"
+        "    except ValueError:\n"                    # catches the guard's raise
+        "        pass\n"                              # ...and falls through
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise ValueError\n"
+        "+    except ValueError:\n"
+        "+        pass\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+def test_validator_raise_swallowed_by_tuple_except_declines(tmp_path: Path):
+    """The matching class hiding inside a tuple handler swallows too."""
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise ValueError\n"
+        "    except (OSError, ValueError):\n"
+        "        pass\n"
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise ValueError\n"
+        "+    except (OSError, ValueError):\n"
+        "+        pass\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+def test_validator_raise_caught_by_superclass_declines(tmp_path: Path):
+    """``except LookupError:`` catches the KeyError the guard raises —
+    builtin subclass relationships must count as catching."""
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise KeyError(x)\n"
+        "    except LookupError:\n"
+        "        pass\n"
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise KeyError(x)\n"
+        "+    except LookupError:\n"
+        "+        pass\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+def test_validator_raise_of_nonbuiltin_class_declines(tmp_path: Path):
+    """A non-builtin exception class is statically unresolvable — the
+    handler may catch it, so certifying would gamble on soundness."""
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise BadRequest(x)\n"
+        "    except HTTPException:\n"
+        "        pass\n"
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise BadRequest(x)\n"
+        "+    except HTTPException:\n"
+        "+        pass\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+def test_validator_raise_with_reraising_matching_except_still_dominates(tmp_path: Path):
+    """Two-direction: a matching handler whose body re-raises keeps the
+    failure path exiting — dominance genuinely holds."""
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise ValueError\n"
+        "    except ValueError:\n"
+        "        raise\n"                              # propagates — still exits
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise ValueError\n"
+        "+    except ValueError:\n"
+        "+        raise\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.SOUND
