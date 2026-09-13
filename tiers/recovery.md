@@ -43,23 +43,30 @@
 ### LLM Issues
 
 **Rate limit:**
-- Python handles: Automatic fallback (Claude → GPT-4 → Ollama)
+- Python handles: retries with backoff and reduced concurrency
+- Provider failover: configure a `role: fallback` model in
+  `models.json` (see docs/llm.md) — there is no built-in
+  provider chain without one
 - If all fail: Analyze SARIF files manually
 
 **Placeholder exploits (TODO comments):**
-- Preferred: `/exploit <finding-id>` — wraps the
-  exploit-developer workflow with sandbox + budget tracking
-  and produces a working PoC in `out/exploit_<id>/`.
+- Preferred: `/exploit <target>` — dispatches
+  `python3 raptor.py agentic --repo <target> --no-patches`
+  with sandbox + budget tracking; working PoCs land in the
+  run's `autonomous/exploits/` directory. Add `--sarif <file>`
+  to reuse findings from a previous `/scan` instead of
+  re-scanning.
 - Manual fallback: load `tiers/personas/exploit_developer.md`
   explicitly only if `/exploit` is unavailable / disabled.
   Command: "Load tiers/personas/exploit_developer.md and fix
   finding #X".
 
 **Template patches (recommendations not code):**
-- Preferred: `/patch <finding-id>` — wraps the patch-engineer
-  workflow and produces an applyable diff in
-  `out/patch_<id>/`. For exploit PoC patches, run `/exploit`
-  first to confirm the finding is exploitable.
+- Preferred: `/patch <target>` — dispatches
+  `python3 raptor.py agentic --repo <target> --no-exploits`;
+  patches land in the run's `autonomous/patches/` directory.
+  For exploit PoC patches, run `/exploit` first to confirm the
+  finding is exploitable.
 - Manual fallback: load `tiers/personas/patch_engineer.md`
   (or `tiers/personas/exploit_developer.md` for exploit PoC
   patches) only if `/patch` is unavailable.
@@ -69,7 +76,7 @@
 **Model not found (Ollama):**
 - Check: `ollama list` for available models
 - Install: `ollama pull <model>`
-- Alternative: Use cloud models (Claude/GPT-4)
+- Alternative: Use a configured cloud model (see docs/llm.md)
 
 ---
 
