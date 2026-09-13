@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import ast
 import logging
-import threading
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -59,70 +58,37 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tree_sitter import Node
 
+from core.inventory import _ts_cache
+
 logger = logging.getLogger(__name__)
 
 
-# Tree-sitter Parser cache.  Each ``Parser(Language(ts_X.language()))``
-# holds C-side mutable state (libtree-sitter's internal parse stack) —
-# NOT thread-safe for concurrent ``.parse()`` calls.  The inventory
-# builder fans out via ThreadPoolExecutor, so a shared module-level
-# dict would hand the same Parser to multiple workers simultaneously.
-#
-# ``threading.local`` gives every thread its own dict of parsers,
-# avoiding both the cache-mutation race and the concurrent-parse
-# unsafety.  The grammar is immutable, so each thread still gets
-# exactly one Parser per language for its lifetime.
-_TS_PARSER_LOCAL = threading.local()
-
-# Cached tree-sitter grammar imports. Python does NOT cache FAILED
-# imports, so a per-file ``import tree_sitter_go`` on a grammar-less
-# install re-ran the full import machinery — plus a log emission —
-# for every file of that language. Besides the hot-loop cost, both
-# the import lock and the logging handler locks are exactly what a
-# fork-pool worker inherits FROZEN when the parent process is
-# multi-threaded (the stress sweep runs scans as threads), turning
-# any file of a grammar-less language into a deadlock site. Cache
-# hits touch neither lock, and the missing-grammar note fires once
-# per process instead of once per file.
-_GRAMMAR_CACHE: dict = {}
+# Grammar-import and Parser caching live in core.inventory._ts_cache,
+# SHARED with extractors.py (one failure-caching importer — see that
+# module for the fork-pool deadlock rationale — and one per-thread
+# Parser cache with disjoint key spaces). The thin wrappers below are
+# this module's stable call/monkeypatch seams.
 
 
 def _import_grammar(module_name: str):
     """Import a tree-sitter grammar module, caching success AND
-    failure. Returns the module or ``None`` when not installed."""
-    if module_name in _GRAMMAR_CACHE:
-        return _GRAMMAR_CACHE[module_name]
-    try:
-        import importlib
-        mod = importlib.import_module(module_name)
-    except ImportError:
-        logger.debug(
-            "call_graph: %s not installed; files of this language "
-            "get an empty call graph", module_name,
-        )
-        mod = None
-    _GRAMMAR_CACHE[module_name] = mod
-    return mod
-
+    failure (shared cache — core.inventory._ts_cache.import_grammar).
+    Returns the module or ``None`` when not installed."""
+    return _ts_cache.import_grammar(module_name)
 
 
 def _get_ts_parser(language_fn: Any) -> Any:
-    """Return a per-thread cached tree-sitter Parser for *language_fn*.
+    """Return a per-thread cached tree-sitter Parser for *language_fn*
+    (shared cache, keyed by grammar-function identity — ints, so it
+    cannot collide with extractors' language-name keys).
 
     Raises ``ImportError`` if ``tree_sitter`` itself isn't installed.
     """
-    cache: dict[int, Any] = getattr(_TS_PARSER_LOCAL, "parsers", None)  # type: ignore[assignment]
-    if cache is None:
-        cache = {}
-        _TS_PARSER_LOCAL.parsers = cache
-    key = id(language_fn)
-    cached = cache.get(key)
-    if cached is not None:
-        return cached
-    from tree_sitter import Language, Parser
-    parser = Parser(Language(language_fn()))
-    cache[key] = parser
-    return parser
+    def _make_language() -> Any:
+        from tree_sitter import Language
+        return Language(language_fn())
+
+    return _ts_cache.cached_parser(id(language_fn), _make_language)
 
 
 def _ts_tree(content: str, grammar_module: str, label: str,

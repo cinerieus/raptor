@@ -11,7 +11,6 @@ import ast
 import bisect
 import logging
 import re
-import threading
 import warnings
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
@@ -20,6 +19,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tree_sitter import Node
+
+from core.inventory import _ts_cache
 
 logger = logging.getLogger(__name__)
 
@@ -1796,103 +1797,98 @@ class RubyExtractor:
 
 try:
     from tree_sitter import Language
-    from tree_sitter import Parser as TSParser
     _TS_AVAILABLE = True
 except ImportError:
     _TS_AVAILABLE = False
 
 
-# Per-language Parser cache.  tree-sitter's Parser holds C-side
-# mutable state (internal parse stack) — NOT thread-safe for
-# concurrent ``.parse()`` calls.  The inventory builder fans out
-# via ThreadPoolExecutor, so a shared module-level dict would hand
-# the same Parser to multiple workers simultaneously.
-# ``threading.local`` gives every thread its own dict of parsers.
-_TS_PARSER_LOCAL = threading.local()
-
+# Per-language Parser cache — shared with call_graph.py via
+# core.inventory._ts_cache (per-thread; see that module for the
+# thread-safety rationale). The local name is this module's
+# test/monkeypatch seam: it is the SAME threading.local object, so
+# clearing ``_TS_PARSER_LOCAL.parsers`` here clears the shared cache.
+_TS_PARSER_LOCAL = _ts_cache._TS_PARSER_LOCAL
 
 def _ts_language(lang: str):
-    """Load tree-sitter language grammar. Returns None if not installed."""
-    try:
-        if lang == "python":
-            import tree_sitter_python as ts
-        elif lang == "java":
-            import tree_sitter_java as ts
-        elif lang == "javascript":
-            import tree_sitter_javascript as ts
-        elif lang in ("typescript", "tsx"):
-            # Pre-2026-05-26 this branch loaded ``tree_sitter_javascript``,
-            # which can't parse TS type annotations / interfaces / enums /
-            # access modifiers / decorators — a typed file produced ERROR
-            # nodes and extracted ZERO functions (the same class of bug the
-            # cpp branch had with tree_sitter_c). ``.ts`` and ``.tsx`` need
-            # DIFFERENT grammars: ``language_typescript`` parses ``<T>x`` casts
-            # but errors on JSX; ``language_tsx`` parses JSX but errors on the
-            # cast syntax. Pick by the language (``.tsx`` → ``tsx``).
-            import tree_sitter_typescript as ts
-            ts_fn = ts.language_tsx if lang == "tsx" else ts.language_typescript
-            return Language(ts_fn())
-        elif lang == "c":
-            import tree_sitter_c as ts
-        elif lang == "cpp":
-            # Pre-2026-05-16 this branch loaded ``tree_sitter_c``,
-            # which can't parse class / method / template / namespace
-            # / qualified-id shapes. Inline class methods and
-            # out-of-line destructors were silently dropped from
-            # ``extract_functions`` output. Using the cpp-specific
-            # grammar gives the extractor the right node types
-            # (``class_specifier``, ``destructor_name``, etc.).
-            import tree_sitter_cpp as ts
-        elif lang == "go":
-            import tree_sitter_go as ts
-        elif lang == "rust":
-            import tree_sitter_rust as ts
-        elif lang == "csharp":
-            import tree_sitter_c_sharp as ts
-        elif lang == "ruby":
-            import tree_sitter_ruby as ts
-        elif lang == "php":
-            import tree_sitter_php as ts
-            return Language(ts.language_php())
-        elif lang == "lua":
-            import tree_sitter_lua as ts
-        elif lang == "scala":
-            # Without this branch .scala fell through to the regex
-            # extractor: no ``line_end`` on any function, and roughly a
-            # third fewer functions found. ``line_end`` is what the
-            # source-slicing consumers key on, so a JVM target like
-            # Kafka (Scala broker core, Java clients) silently got a
-            # partial inventory on its Scala half only. Same failure
-            # shape as the cpp and typescript branches above.
-            import tree_sitter_scala as ts
-        elif lang == "kotlin":
-            import tree_sitter_kotlin as ts
-        elif lang == "swift":
-            import tree_sitter_swift as ts
-        else:
-            return None
-        return Language(ts.language())
-    except ImportError:
+    """Load tree-sitter language grammar. Returns None if not installed.
+
+    Grammar imports go through the shared failure-caching importer
+    (core.inventory._ts_cache.import_grammar) so a grammar-less
+    install pays the import machinery — and its fork-frozen lock
+    hazard — once per process, not once per file.
+    """
+    attr = "language"
+    if lang == "python":
+        module_name = "tree_sitter_python"
+    elif lang == "java":
+        module_name = "tree_sitter_java"
+    elif lang == "javascript":
+        module_name = "tree_sitter_javascript"
+    elif lang in ("typescript", "tsx"):
+        # Pre-2026-05-26 this branch loaded ``tree_sitter_javascript``,
+        # which can't parse TS type annotations / interfaces / enums /
+        # access modifiers / decorators — a typed file produced ERROR
+        # nodes and extracted ZERO functions (the same class of bug the
+        # cpp branch had with tree_sitter_c). ``.ts`` and ``.tsx`` need
+        # DIFFERENT grammars: ``language_typescript`` parses ``<T>x`` casts
+        # but errors on JSX; ``language_tsx`` parses JSX but errors on the
+        # cast syntax. Pick by the language (``.tsx`` → ``tsx``).
+        module_name = "tree_sitter_typescript"
+        attr = "language_tsx" if lang == "tsx" else "language_typescript"
+    elif lang == "c":
+        module_name = "tree_sitter_c"
+    elif lang == "cpp":
+        # Pre-2026-05-16 this branch loaded ``tree_sitter_c``,
+        # which can't parse class / method / template / namespace
+        # / qualified-id shapes. Inline class methods and
+        # out-of-line destructors were silently dropped from
+        # ``extract_functions`` output. Using the cpp-specific
+        # grammar gives the extractor the right node types
+        # (``class_specifier``, ``destructor_name``, etc.).
+        module_name = "tree_sitter_cpp"
+    elif lang == "go":
+        module_name = "tree_sitter_go"
+    elif lang == "rust":
+        module_name = "tree_sitter_rust"
+    elif lang == "csharp":
+        module_name = "tree_sitter_c_sharp"
+    elif lang == "ruby":
+        module_name = "tree_sitter_ruby"
+    elif lang == "php":
+        module_name = "tree_sitter_php"
+        attr = "language_php"
+    elif lang == "lua":
+        module_name = "tree_sitter_lua"
+    elif lang == "scala":
+        # Without this branch .scala fell through to the regex
+        # extractor: no ``line_end`` on any function, and roughly a
+        # third fewer functions found. ``line_end`` is what the
+        # source-slicing consumers key on, so a JVM target like
+        # Kafka (Scala broker core, Java clients) silently got a
+        # partial inventory on its Scala half only. Same failure
+        # shape as the cpp and typescript branches above.
+        module_name = "tree_sitter_scala"
+    elif lang == "kotlin":
+        module_name = "tree_sitter_kotlin"
+    elif lang == "swift":
+        module_name = "tree_sitter_swift"
+    else:
         return None
+    mod = _ts_cache.import_grammar(module_name)
+    if mod is None:
+        return None
+    language_fn = getattr(mod, attr, None)
+    if language_fn is None:
+        return None
+    return Language(language_fn())
 
 
 def _ts_parser_for(lang: str):
     """Return a per-thread cached ``TSParser`` for ``lang``, or None
-    if the grammar isn't installed.
+    if the grammar isn't installed. Cache shared with call_graph
+    (disjoint key spaces — see core.inventory._ts_cache).
     """
-    cache: dict[str, Any] = getattr(_TS_PARSER_LOCAL, "parsers", None)  # type: ignore[assignment]
-    if cache is None:
-        cache = {}
-        _TS_PARSER_LOCAL.parsers = cache
-    cached = cache.get(lang)
-    if cached is not None:
-        return cached
-    ts_lang = _ts_language(lang)
-    if ts_lang is None:
-        return None
-    parser = TSParser(ts_lang)
-    cache[lang] = parser
-    return parser
+    return _ts_cache.cached_parser(lang, lambda: _ts_language(lang))
 
 
 class TreeSitterExtractor:
