@@ -111,7 +111,8 @@ class TestUnixLaneIsolation:
             proxy.stop()
 
     def test_in_flight_connection_keeps_its_lane(self, reset_proxy,
-                                                 short_sock_dir):
+                                                 short_sock_dir,
+                                                 hermetic_invalid_dns):
         # A connection ACCEPTED before unbind is decided by the
         # lane object captured at accept time — deterministic, no
         # enforce/lenient flapping during teardown.
@@ -145,7 +146,8 @@ class TestUnixLaneIsolation:
 
 
 class TestTcpLanes:
-    def test_tcp_lane_scoping_and_lifecycle(self, reset_proxy):
+    def test_tcp_lane_scoping_and_lifecycle(self, reset_proxy,
+                                            hermetic_invalid_dns):
         proxy = proxy_mod.EgressProxy(allowed_hosts=set())
         try:
             port = proxy.bind_tcp_lane(label="tier2-ctx")
@@ -474,7 +476,8 @@ class TestLaneHostAllowlists:
     own set; gate 1 denies the rest with a lane-specific reason."""
 
     def test_lane_scoped_to_its_own_hosts(self, reset_proxy,
-                                          short_sock_dir):
+                                          short_sock_dir,
+                                          hermetic_invalid_dns):
         """Host in the GLOBAL union but not in THIS lane's set -> 403;
         the lane's own host passes gate 1 (then fails at DNS -> 502,
         which proves gate-1 passage, not a policy deny)."""
@@ -503,7 +506,7 @@ class TestLaneHostAllowlists:
         assert denied[0]["host"] == "run-b.invalid"
 
     def test_lane_without_allowlist_keeps_global_semantics(
-            self, reset_proxy, short_sock_dir):
+            self, reset_proxy, short_sock_dir, hermetic_invalid_dns):
         proxy = proxy_mod.EgressProxy(allowed_hosts={"run-a.invalid"})
         try:
             sock = str(short_sock_dir / "lane.sock")
@@ -515,7 +518,8 @@ class TestLaneHostAllowlists:
             proxy.stop()
 
     def test_lane_allowlist_case_insensitive(self, reset_proxy,
-                                             short_sock_dir):
+                                             short_sock_dir,
+                                             hermetic_invalid_dns):
         proxy = proxy_mod.EgressProxy(allowed_hosts={"run-a.invalid"})
         try:
             sock = str(short_sock_dir / "lane.sock")
@@ -524,3 +528,106 @@ class TestLaneHostAllowlists:
             assert _connect_unix(sock, "Run-A.Invalid:443") == 502
         finally:
             proxy.stop()
+
+
+class TestLaneAttributedControlEvents:
+    """Control-plane events must reach the audit trail with lane
+    attribution: a capacity refusal (429) used to be log-only —
+    attacker-forceable slot exhaustion left zero per-run evidence —
+    and a handler_error from a laned transport was un-laned, so
+    lane-scoped registrations (the production shape) never saw their
+    own run's handler crashes."""
+
+    def test_capacity_refusal_records_event(self, reset_proxy):
+        proxy = proxy_mod.EgressProxy(allowed_hosts=set(),
+                                      max_tunnels=0)
+        try:
+            token = proxy.register_sandbox(caller_label="test")
+            try:
+                status = _connect_tcp(proxy.port, _DENIED)
+                assert status == 429
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        refused = [e for e in events
+                   if e["result"] == "refused_capacity"]
+        assert len(refused) == 1, \
+            f"expected 1 refused_capacity event, got: {events}"
+        assert refused[0]["lane"] == "main"
+        assert refused[0]["lane_id"] is None
+        assert "tunnel cap" in refused[0]["reason"]
+
+    def test_capacity_refusal_carries_lane(self, reset_proxy,
+                                           short_sock_dir):
+        proxy = proxy_mod.EgressProxy(allowed_hosts=set(),
+                                      max_tunnels=0)
+        try:
+            sock = str(short_sock_dir / "cap.sock")
+            proxy.bind_unix(sock, label="cap-ctx")
+            token = proxy.register_sandbox(caller_label="test",
+                                           lane_key=sock)
+            try:
+                assert _connect_unix(sock, _DENIED) == 429
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        # Delivered into the LANE-SCOPED buffer — the refusal is
+        # attributed, not dropped into (only) the global view.
+        refused = [e for e in events
+                   if e["result"] == "refused_capacity"]
+        assert len(refused) == 1, \
+            f"expected 1 lane-scoped refused_capacity, got: {events}"
+        assert refused[0]["lane"] == "cap-ctx"
+        assert refused[0]["lane_id"] is not None
+
+    def test_handler_error_carries_lane_attribution(
+            self, reset_proxy, short_sock_dir, monkeypatch):
+        async def _boom(self, reader, writer, lane=None):
+            msg = "injected handler crash"
+            raise ValueError(msg)
+
+        monkeypatch.setattr(proxy_mod.EgressProxy, "_serve_tunnel",
+                            _boom)
+        proxy = proxy_mod.EgressProxy(allowed_hosts=set())
+        try:
+            sock = str(short_sock_dir / "err.sock")
+            proxy.bind_unix(sock, label="err-ctx")
+            token = proxy.register_sandbox(caller_label="test",
+                                           lane_key=sock)
+            try:
+                # Handler dies before reading: the client sees EOF
+                # (status 0) or a reset, depending on timing.
+                import contextlib
+                with contextlib.suppress(ConnectionResetError,
+                                         BrokenPipeError):
+                    _connect_unix(sock, _DENIED)
+                # The record is fanned out by the handler's except
+                # block, which may still be running when the client
+                # side unblocks; poll the registration's buffer
+                # before unregistering.
+                import time as _time
+                deadline = _time.monotonic() + 2.0
+                while _time.monotonic() < deadline:
+                    bufs = [buf for tok, buf, _sub
+                            in proxy._sandbox_buffers_snapshot
+                            if tok == token]
+                    if bufs and any(e.get("result") == "handler_error"
+                                    for e in bufs[0]):
+                        break
+                    _time.sleep(0.01)
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        errors = [e for e in events if e["result"] == "handler_error"]
+        assert len(errors) == 1, (
+            f"handler_error must land in the run's LANE-SCOPED "
+            f"buffer, got: {events}")
+        assert errors[0]["lane"] == "err-ctx"
+        assert errors[0]["lane_id"] is not None
+        assert "injected handler crash" in errors[0]["reason"]

@@ -79,6 +79,7 @@ Error responses:
     403 Forbidden         — host not in allowlist OR resolved to blocked IP
     408 Request Timeout   — handshake (request line + headers) exceeded
                             the absolute deadline
+    429 Too Many Tunnels  — aggregate tunnel-slot cap reached
     502 Bad Gateway       — backend refused / unreachable
     504 Gateway Timeout   — backend didn't respond within timeout
 """
@@ -408,6 +409,12 @@ _PROXY_EVENT_RESULTS = frozenset({
     "bad_request",
     # Unhandled exception in tunnel handler
     "handler_error",
+    # Tunnel-slot cap reached — the CONNECT was refused with 429
+    # before the handshake. Slot exhaustion is attacker-forceable
+    # (one hostile run flooding CONNECTs starves sibling runs
+    # process-wide), so the refusal must land in the audit trail,
+    # not only the process log.
+    "refused_capacity",
     # Control-plane marker, one per overflowed registration buffer:
     # the per-registration event cap was reached and subsequent
     # events were trimmed (see _append_bounded_locked). Carries
@@ -1797,8 +1804,11 @@ class EgressProxy:
         With ``lane_key=None`` (default) the buffer is run-global and
         receives every event — the pre-lane behaviour, and the home
         for events that carry no lane attribution (main-listener
-        traffic, handler errors): un-laned events are never dropped
-        from the global view, and never leak into lane-scoped views.
+        traffic): un-laned events are never dropped from the global
+        view, and never leak into lane-scoped views. Handler errors
+        and capacity refusals are lane-attributed whenever the
+        accepting transport was a lane, so a run's own mid-tunnel
+        handler crashes land in its scoped buffer too.
 
         Fail-open on lookup miss BY DESIGN for the audit trail: a
         ``lane_key`` that matches no live lane degrades to the
@@ -1950,9 +1960,12 @@ class EgressProxy:
             ``lane_id`` matches their subscription, so concurrent
             runs' events segregate;
           - an event with no lane attribution (``lane_id`` absent or
-            None: main-listener traffic, handler errors) goes to the
+            None: main-listener traffic, including main-listener
+            handler errors and capacity refusals) goes to the
             run-global buffers only — never dropped from the global
-            view, never leaked into another run's lane view.
+            view, never leaked into another run's lane view. Handler
+            errors and capacity refusals on a LANED transport carry
+            that lane's attribution and reach its scoped buffers.
 
         Each buffer holds a REFERENCE to the same event dict, NOT a
         copy. That's deliberate: the tunnel handler records at CONNECT
@@ -2701,6 +2714,24 @@ class EgressProxy:
             logger.warning(
                 "egress proxy: max tunnels (%s) reached — refusing new connection", self._max_tunnels
             )
+            # Slot exhaustion is attacker-forceable, so the refusal
+            # must be visible in proxy-events.jsonl / triage, not
+            # only the process log — same "capped is never silent"
+            # property the buffer-overflow marker guarantees. No
+            # host/port: the refusal happens before the handshake is
+            # read (holding the slotless connection open to parse a
+            # CONNECT line would defeat the cap).
+            event = {
+                "t": time.monotonic(),
+                "host": None, "port": None,
+                "result": "refused_capacity",
+                "reason": f"tunnel cap {self._max_tunnels} reached",
+                "resolved_ip": None,
+                "lane": lane.label if lane is not None else "main",
+                "lane_id": lane.lane_id if lane is not None else None,
+                "bytes_c2u": 0, "bytes_u2c": 0, "duration": 0.0,
+            }
+            self._record(event)
             try:
                 await self._write_error(writer, 429, "Too Many Tunnels")
             finally:
@@ -2729,14 +2760,22 @@ class EgressProxy:
                 "egress proxy: unhandled exception in tunnel handler — "
                 "connection aborted, proxy stays up"
             )
-            self._record({
+            event = {
                 "t": time.monotonic(),
                 "host": None, "port": None,
                 "result": "handler_error",
                 "reason": f"{exc.__class__.__name__}: {exc}",
                 "resolved_ip": None,
+                # Lane attribution: production registrations are
+                # lane-scoped, so an un-laned handler_error from a
+                # laned transport landed only in run-global buffers —
+                # i.e. nowhere, for exactly the runs using lane
+                # isolation. The lane is in scope here; stamp it.
+                "lane": lane.label if lane is not None else "main",
+                "lane_id": lane.lane_id if lane is not None else None,
                 "bytes_c2u": 0, "bytes_u2c": 0, "duration": 0.0,
-            })
+            }
+            self._record(event)
         finally:
             with self._active_lock:
                 self._active_tunnels -= 1
