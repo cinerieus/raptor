@@ -93,11 +93,18 @@ def joern_session(
         # profiles rather than trusting parse-side auto-detection.
         from .lang_config import parse_languages_for
         parse_langs = parse_languages_for(str(target_path))
+        # heap_mb reaches BOTH JVMs: the query server above
+        # (from_tunables) and the joern-parse frontend here — on large
+        # targets the parse JVM is exactly where the operator's
+        # joern_heap_mb matters; omitting it left big builds
+        # GC-thrashing at the JVM default while the setting silently
+        # applied only to the server.
         if cache_dir is not None:
             cpg = build_cpg_cached(
                 target_path, cache_dir,
                 languages=parse_langs,
                 timeout=tunables.cpg_timeout_s,
+                heap_mb=tunables.heap_mb,
                 exclude_dirs=exclude_dirs,
             )
         else:
@@ -105,6 +112,7 @@ def joern_session(
                 target_path,
                 languages=parse_langs,
                 timeout=tunables.cpg_timeout_s,
+                heap_mb=tunables.heap_mb,
                 exclude_dirs=exclude_dirs,
             )
         if cpg.exists():
