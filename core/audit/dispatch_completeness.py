@@ -387,9 +387,10 @@ def find_dispatch_gaps(
             absent, falls back to reading each file from ``call_graphs``
             keys.
         target_root: The run's source root.  Disk fallback reads are
-            confined to it (symlink-aware); without it the fallback
-            keeps only the lexical traversal guard and resolves
-            relative to the process CWD (legacy behaviour).
+            confined to it (symlink-aware); without it there is no
+            disk fallback at all — a bare relative read would resolve
+            against the process CWD, never the scanned target — so
+            files absent from ``source_texts`` read as unavailable.
 
     Returns:
         List of ``DispatchGap`` instances describing produced-but-
@@ -570,22 +571,26 @@ def _get_source(
         return None
     if source_texts and fpath in source_texts:
         return source_texts[fpath]
-    if target_root is not None:
-        # Symlink-aware containment: the lexical guard above cannot
-        # catch an in-repo symlink pointing outside the tree, and a
-        # bare Path(fpath) resolves against the process CWD rather
-        # than the scanned target.
-        from core.paths import confine
+    if target_root is None:
+        # No root to confine against: a bare Path(fpath) would resolve
+        # relative to the process CWD — the tool's own repo dir, never
+        # the scanned target. Source-unavailable, not a CWD read.
+        logger.debug(
+            "_get_source: no target root — skipping disk fallback "
+            "for %r", fpath,
+        )
+        return None
+    # Symlink-aware containment: the lexical guard above cannot
+    # catch an in-repo symlink pointing outside the tree.
+    from core.paths import confine
 
-        full = confine(target_root, fpath)
-        if full is None:
-            logger.warning(
-                "_get_source: refusing path outside target root: %r",
-                fpath,
-            )
-            return None
-    else:
-        full = Path(fpath)
+    full = confine(target_root, fpath)
+    if full is None:
+        logger.warning(
+            "_get_source: refusing path outside target root: %r",
+            fpath,
+        )
+        return None
     try:
         with full.open(encoding="utf-8", errors="replace") as f:
             return f.read()
