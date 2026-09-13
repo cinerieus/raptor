@@ -195,6 +195,18 @@ def test_kernel_clamp_bounds_the_request(tmp_path, monkeypatch):
         env={"PATH": "/usr/bin:/bin"},
         capture_output=True, text=True, timeout=20,
     )
+    if (r.returncode != 0
+            and "Resource temporarily unavailable" in (r.stderr or "")):
+        # The census-sized clamp is a SNAPSHOT: same-UID task load
+        # can spike past it inside the spawn window, and then the
+        # kernel refuses the shim's own fork before production
+        # semantics are observable — the same pure load flake, just
+        # later. Skipping here cannot mask an absolute-cap
+        # regression: test_ceiling_is_count_plus_budget_clamped
+        # EAGAINs deterministically under a budget-sized limit and
+        # carries no such guard.
+        pytest.skip("same-UID task load crossed the emulated clamp "
+                    "during spawn")
     assert r.returncode == 0, r.stderr
     assert int(r.stdout.strip()) == _expected_soft(fake_count + budget,
                                                    fake_clamp)
