@@ -447,6 +447,16 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
         executing attacker-controlled binaries (PoC exec) where the
         risk of credential-exfil via read-everywhere outweighs the
         tool-compatibility cost.
+      - restricted reads also engage EXEC scoping: the EXECUTE right
+        (ABI v1) is handled, granted on the readable DIRECTORY rules
+        (except /proc and /sys) and on the writable rules, denied
+        everywhere else. This makes exec-denial an explicit policy
+        rather than a side effect of the exec-open's FMODE_READ, and
+        covers the on-filesystem fileless spellings (O_TMPFILE /
+        unlinked inodes inherit their directory's hierarchy). It can
+        NOT cover memfd — kernel-internal SB_NOUSER mounts are exempt
+        from Landlock rules (live-verified) — which is closed at the
+        seccomp layer (deny_fd_exec).
 
     Network (ABI v4+): if allowed_tcp_ports is set, restricts TCP connect
     to those ports only. If `deny_all_tcp_connect` is set (and no port
@@ -488,10 +498,26 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
     # — reads were never restricted (READ_FILE was miscoded as EXECUTE)
     # and MAKE_SYM was never restricted (shifted off the end of the
     # write mask). Verified against the uapi header on kernel 6.x.
-    # EXECUTE retained as a comment-constant to document the bit
-    # position even though we don't restrict it (RAPTOR must exec
-    # arbitrary target build tools).
-    EXECUTE = 1 << 0  # noqa: F841 — kernel-ABI doc, not used
+    # EXECUTE (ABI v1, kernel 5.13 — no ABI gate needed beyond Landlock
+    # availability) is handled ONLY under restrict_reads (the untrusted
+    # / strict posture): exec is then granted exactly where the read
+    # allowlist and the writable grants reach, making exec scoping an
+    # EXPLICIT policy instead of a side effect of the exec-open's
+    # FMODE_READ check. Read-everywhere rulesets leave the bit
+    # unhandled (RAPTOR must exec arbitrary target build tools there).
+    #
+    # HONEST LIMIT (live-verified on kernel 7.0 / ABI 8): Landlock
+    # exempts inodes on kernel-internal SB_NOUSER mounts — a
+    # memfd_create fd is NOT subject to EXECUTE (or READ) rules, so
+    # execve("/proc/self/fd/<memfd>") passes every Landlock layer.
+    # The memfd/fileless-exec deny is therefore enforced at the
+    # seccomp layer (deny_fd_exec in seccomp.py: memfd_create denied
+    # wholesale + execveat AT_EMPTY_PATH denied); this EXECUTE
+    # handling covers the on-filesystem spellings (O_TMPFILE and
+    # unlinked files inherit their directory's hierarchy and ARE
+    # covered, verified live) and decouples exec-denial from the read
+    # mask.
+    EXECUTE = 1 << 0
     WRITE_FILE = 1 << 1
     READ_FILE = 1 << 2
     READ_DIR = 1 << 3
@@ -543,6 +569,20 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
     def _build_read_mask():
         return READ_FILE | READ_DIR
 
+    # Read-granted trees that do NOT get the EXECUTE grant under
+    # restrict_reads. Nothing legitimately execs from /proc or /sys,
+    # and for /proc the grant would be inert anyway: exec through a
+    # /proc/<pid>/fd or /proc/<pid>/exe magic link is checked against
+    # the RESOLVED file's own hierarchy, never against /proc's.
+    # Matching is on the parent-resolved canonical rule path (exact or
+    # beneath), so the default context.py allowlist entries are caught
+    # regardless of how the caller spelled them.
+    _NOEXEC_READ_GRANTS = ("/proc", "/sys")
+
+    def _exec_exempt(canonical: str) -> bool:
+        return any(canonical == p or canonical.startswith(p + "/")
+                   for p in _NOEXEC_READ_GRANTS)
+
     # Landlock network constants (ABI v4+, kernel 6.7)
     LANDLOCK_ACCESS_NET_CONNECT_TCP = 1 << 1
     RULE_NET_PORT = 2
@@ -593,6 +633,13 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
     _abi = _get_landlock_abi()
     _write_access = _build_write_mask()
     _read_access = _build_read_mask() if restrict_reads else 0
+    # EXECUTE rides the restrict_reads posture: the untrusted / strict
+    # read allowlist doubles as the exec allowlist (writable grants —
+    # output, the /tmp baseline — carry it too, so compile-and-run
+    # PoC/conftest shapes keep working; see the rule sites below).
+    # Read-everywhere rulesets keep exec unhandled — trusted lanes are
+    # byte-identical. ABI v1 bit; no version gate needed.
+    _exec_access = EXECUTE if restrict_reads else 0
     # handled_access_fs is the SET of accesses the ruleset governs —
     # any access bit NOT set here is allowed unrestricted. We add read
     # bits only when restrict_reads is on; otherwise reads stay wide.
@@ -601,7 +648,8 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
     # only TCP connect and filesystem behaviour is untouched.
     _net_only = (deny_all_tcp_connect and not paths
                  and not restrict_reads and ports is None)
-    _handled_fs = 0 if _net_only else (_write_access | _read_access)
+    _handled_fs = (0 if _net_only
+                   else (_write_access | _read_access | _exec_access))
     # ABI < 3 (pre-6.2): the TRUNCATE right doesn't exist, so the
     # handled write mask silently lacks it — announce the degradation
     # once whenever this ruleset actually governs filesystem writes,
@@ -695,7 +743,16 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
                 # the rule means the child can both read and write these
                 # paths. If restrict_reads is off, _read_access is 0 and
                 # the rule is identical to the old write-only rule.
-                writable_access = _write_access | _read_access
+                # Exec too (restrict_reads only): output and the /tmp
+                # baseline are where PoCs and conftest-style probes are
+                # compiled AND run — withholding EXECUTE there breaks
+                # every compile-and-run caller. Accepted residual,
+                # stated: a sandboxed payload can write a binary under
+                # a writable grant and exec it — but that artifact is
+                # ON the filesystem under the run's own trees
+                # (auditable, swept at teardown), unlike the anonymous
+                # memfd image the seccomp deny_fd_exec layer refuses.
+                writable_access = _write_access | _read_access | _exec_access
                 for path in _resolved_writable:
                     try:
                         # Pinned open of the parent-resolved canonical
@@ -829,9 +886,22 @@ def _make_landlock_preexec(writable_paths: list, allowed_tcp_ports: list | None 
                             # keep the full read mask; files get the
                             # file-only mask (READ_FILE, no READ_DIR),
                             # matching the historical two-step open.
+                            # Directory grants carry EXECUTE (the read
+                            # allowlist IS the exec allowlist: system
+                            # toolchain trees, target build scripts,
+                            # tool_paths interpreters) except /proc
+                            # and /sys — see _NOEXEC_READ_GRANTS.
+                            # Per-FILE read grants stay exec-less:
+                            # none of them (dev nodes, the /etc
+                            # minimal files) is a legitimate exec
+                            # target.
                             path_fd, _is_dir = _open_grant(path)
-                            access = _read_access if _is_dir \
-                                else _read_file_access
+                            if _is_dir:
+                                access = _read_access | (
+                                    0 if _exec_exempt(path)
+                                    else _exec_access)
+                            else:
+                                access = _read_file_access
                             try:
                                 rule = PathBeneathAttr(allowed_access=access,
                                                        parent_fd=path_fd)
