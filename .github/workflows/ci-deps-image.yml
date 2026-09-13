@@ -12,7 +12,8 @@ name: CI deps image
 #
 # Uses the plain `docker` CLI (preinstalled on ubuntu runners) rather than
 # docker/* marketplace actions, to keep the third-party action surface to
-# just actions/checkout (pinned to the same SHA the rest of the repo uses).
+# just actions/checkout and actions/delete-package-versions (both pinned
+# to the same SHAs the rest of the repo uses).
 
 on:
   push:
@@ -36,6 +37,15 @@ concurrency:
 permissions:
   contents: read
   packages: write
+
+env:
+  # actions/delete-package-versions@v5.0.0 (the GHCR pruning step) still
+  # declares ``runs.using: node20`` and upstream has published no Node 24
+  # release yet, so without this opt-in the runner emits a Node 20
+  # deprecation warning for that step. Every other JS action pinned in
+  # this repo already declares node24. Lift this once
+  # actions/delete-package-versions ships a Node 24 release.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-push:
