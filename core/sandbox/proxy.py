@@ -2282,7 +2282,12 @@ class EgressProxy:
             return host if _ip_is_blocked(host) else None
         try:
             addrinfo = await self._cached_getaddrinfo(host, port)
-        except (asyncio.TimeoutError, socket.gaierror) as e:
+        except (asyncio.TimeoutError, OSError, UnicodeError) as e:
+            # OSError covers socket.gaierror plus the rarer plain-
+            # OSError resolver shapes; UnicodeError is the IDNA-
+            # encoding failure raised from inside getaddrinfo. All are
+            # local-resolution failures, so all take the same
+            # documented fail-open forward below.
             logger.warning(
                 "egress proxy: could not resolve %s locally to vet the "
                 "upstream-path CONNECT (%s) — forwarding; the upstream "
@@ -3083,7 +3088,16 @@ class EgressProxy:
                 self._record(event)
                 await self._write_error(writer, 504, "Gateway Timeout")
                 return
-            except socket.gaierror as e:
+            except (OSError, UnicodeError) as e:
+                # Resolver-failure shapes vary by platform and input:
+                # socket.gaierror (an OSError subclass) is the common
+                # case, but a hostname that fails IDNA encoding raises
+                # UnicodeError from inside getaddrinfo, and resolver
+                # backends can surface plain OSError. Every shape must
+                # produce the 502 response line — falling through to
+                # the generic handler-error path closes the client
+                # socket without any status line, so the child sees an
+                # opaque hang/EOF instead of the documented failure.
                 logger.warning("egress proxy: DNS failure for %s:%s: %s",
                                 host, port, e)
                 event.update(result="dns_failed", reason=f"DNS: {e}",

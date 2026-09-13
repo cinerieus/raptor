@@ -417,6 +417,57 @@ class TestProxyAuditModeNoActiveRun:
         assert len(would_deny) == 1
 
 
+class TestProxyResolverFailureShapes:
+    """Every resolver-failure shape must produce the 502 response line.
+
+    Platform resolvers differ in exception class as well as message:
+    glibc raises gaierror(-2), macOS raises gaierror(8), a hostname
+    that fails IDNA encoding raises UnicodeError from inside
+    getaddrinfo, and resolver backends can surface plain OSError. A
+    shape that escapes the DNS-failure branch falls through to the
+    generic handler-error path, which closes the client socket with NO
+    status line — the child sees an opaque EOF instead of the
+    documented 502. The resolver is stubbed: no live lookup, so the
+    outcome is deterministic on every platform.
+    """
+
+    @pytest.mark.parametrize("exc", [
+        socket.gaierror(8, "nodename nor servname provided, or not known"),
+        socket.gaierror(-2, "Name or service not known"),
+        OSError("resolver backend failure"),
+        UnicodeError("encoding with 'idna' codec failed"),
+    ], ids=["gaierror-darwin-eai-noname", "gaierror-glibc-eai-noname",
+            "plain-oserror", "idna-unicode-error"])
+    def test_resolver_failure_writes_502(self, reset_proxy, monkeypatch,
+                                         exc):
+        async def _resolver_fails(self, host, port):
+            raise exc
+
+        monkeypatch.setattr(proxy_mod.EgressProxy, "_cached_getaddrinfo",
+                            _resolver_fails)
+        proxy = proxy_mod.EgressProxy(
+            allowed_hosts={"allowed-host.invalid"},
+        )
+        try:
+            token = proxy.register_sandbox(caller_label="test")
+            try:
+                status, _ = _send_connect(proxy.port,
+                                          "allowed-host.invalid:443")
+                assert status == 502, (
+                    f"resolver failure {exc!r} must surface as 502, "
+                    f"got {status}")
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        # The failure took the DNS path (dns_failed event), not the
+        # generic handler_error fallback.
+        dns_failed = [e for e in events if e["result"] == "dns_failed"]
+        assert len(dns_failed) == 1, \
+            f"expected 1 dns_failed event, got: {events}"
+
+
 class TestProxyAuditRefCount:
     """The ref-counted acquire/release API is the operator-facing
     path for engaging audit mode (constructor kwarg is for direct
