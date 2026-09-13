@@ -592,3 +592,33 @@ def test_old_bindings_spawn_refuses_instead_of_leaking_env(
     result = runner.run(cfg, frida_mod_override=fake)
     assert result.ok is False
     assert "refusing to spawn" in (result.error or "")
+
+
+def test_spawn_env_carries_no_raptor_markers(tmp_path: Path, monkeypatch):
+    """Allowlist survivors like RAPTOR_EF_* / RAPTOR_CI serve RAPTOR's
+    own tool children, but to the spawned TARGET every RAPTOR_* name
+    is a one-getenv framework fingerprint (anti-analysis trigger).
+    The target env must carry none."""
+    monkeypatch.setenv("RAPTOR_EF_TIMEOUT_FAST", "5")
+    monkeypatch.setenv("RAPTOR_EF_VERBOSE", "1")
+    monkeypatch.setenv("RAPTOR_CI", "1")
+    monkeypatch.setenv("RAPTOR_CC_TRANSPORT_DISABLED", "1")
+
+    env = runner._spawn_env()
+    raptor_names = [k for k in env
+                    if k.startswith(("RAPTOR_", "_RAPTOR"))
+                    or k == "CLAUDECODE"]
+    assert raptor_names == [], raptor_names
+    # A desktop target still needs the basics.
+    assert "PATH" in env
+
+
+def test_tooling_safe_env_still_carries_ef_knobs(monkeypatch):
+    """Both directions: the marker strip is TARGET-exec only — the
+    tooling baseline (get_safe_env) must keep the documented
+    RAPTOR_EF_* budget knobs for scrub-spawned tool children."""
+    from core.config import RaptorConfig
+
+    monkeypatch.setenv("RAPTOR_EF_TIMEOUT_FAST", "5")
+    env = RaptorConfig.get_safe_env()
+    assert env.get("RAPTOR_EF_TIMEOUT_FAST") == "5"

@@ -592,6 +592,38 @@ class RaptorConfig:
         "RAPTOR_DIR", "RAPTOR_OUT_DIR", "RAPTOR_TARGET_KIND",
     })
 
+    # Name prefixes that identify RAPTOR to EXECUTED target code even
+    # when no member of TARGET_ENV_STRIP_SET survives: several
+    # RAPTOR_* names legitimately ride the safe-env allowlist for
+    # RAPTOR's own scrub-spawned TOOL children (RAPTOR_EF_* budget
+    # knobs, the RAPTOR_CI stamp for the interactivity gate, transport
+    # kill switches) — but to a hostile binary every one of them is a
+    # one-getenv "you are inside RAPTOR" tell and an anti-analysis
+    # trigger. Paths that EXECUTE the analysed artifact (frida spawn;
+    # the sandbox's direct-exec target arm is the intended next
+    # adopter) must strip the whole family via
+    # strip_target_exec_markers(); tooling-facing paths keep the
+    # allowlist as-is. Prefix-based so future RAPTOR_* allowlist
+    # additions cannot silently re-open the fingerprint.
+    TARGET_EXEC_MARKER_ENV_PREFIXES = ("RAPTOR_", "_RAPTOR")
+
+    @staticmethod
+    def strip_target_exec_markers(env: dict) -> dict:
+        """Return *env* minus every RAPTOR-identifying name.
+
+        For spawn paths whose child IS the analysed target. Removes
+        TARGET_ENV_STRIP_SET plus every name matching
+        TARGET_EXEC_MARKER_ENV_PREFIXES. Never apply this to RAPTOR's
+        own tool children — they consume RAPTOR_EF_* / RAPTOR_CI by
+        contract (see the allowlist comments above).
+        """
+        strip = RaptorConfig.TARGET_ENV_STRIP_SET
+        prefixes = RaptorConfig.TARGET_EXEC_MARKER_ENV_PREFIXES
+        return {
+            k: v for k, v in env.items()
+            if k not in strip and not k.startswith(prefixes)
+        }
+
     # CI markers ride the allowlist: RAPTOR's own interactivity gate
     # (core.security.rule_of_two.is_interactive) runs inside children
     # whose env this scrub produced — stripping every CI marker made

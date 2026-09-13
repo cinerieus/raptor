@@ -756,3 +756,34 @@ class TestGetOutDirRootRefusal:
         # a legitimate operator choice; only true system roots refuse.
         with patch.dict(os.environ, {"RAPTOR_OUT_DIR": str(tmp_path)}):
             assert RaptorConfig.get_out_dir() == tmp_path.resolve()
+
+
+class TestStripTargetExecMarkers:
+    """Target-exec spawns must carry no RAPTOR-identifying names;
+    tooling paths keep the allowlisted RAPTOR_* knobs."""
+
+    def test_strips_marker_family_and_strip_set(self):
+        env = {
+            "PATH": "/usr/bin",
+            "HOME": "/home/u",
+            "RAPTOR_EF_TIMEOUT_FAST": "5",
+            "RAPTOR_CI": "1",
+            "RAPTOR_CC_TRANSPORT_DISABLED": "1",
+            "_RAPTOR_TRUSTED": "1",
+            "CLAUDECODE": "1",
+            "RAPTOR_SESSION_TOKEN": "s",
+        }
+        out = RaptorConfig.strip_target_exec_markers(env)
+        assert out == {"PATH": "/usr/bin", "HOME": "/home/u"}
+
+    def test_prefix_closed_against_future_allowlist_growth(self):
+        # Any future RAPTOR_*-named allowlist addition must not
+        # silently re-open the target fingerprint.
+        out = RaptorConfig.strip_target_exec_markers(
+            {"RAPTOR_FUTURE_KNOB": "x", "LANG": "C"})
+        assert out == {"LANG": "C"}
+
+    def test_tooling_baseline_untouched(self, monkeypatch):
+        monkeypatch.setenv("RAPTOR_EF_MAX_GADGETS", "9")
+        env = RaptorConfig.get_safe_env()
+        assert env.get("RAPTOR_EF_MAX_GADGETS") == "9"

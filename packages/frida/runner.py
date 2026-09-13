@@ -375,13 +375,20 @@ def _spawn_env() -> dict[str, str]:
         }
     try:
         from core.config import RaptorConfig as _RC
-        strip: tuple[str, ...] | frozenset[str] = _RC.TARGET_ENV_STRIP_SET
+        # Strip set PLUS the whole RAPTOR_* marker family: allowlist
+        # survivors like RAPTOR_EF_* / RAPTOR_CI serve RAPTOR's own
+        # tool children, but to the spawned TARGET each is a
+        # one-getenv "you are inside RAPTOR" anti-analysis tell.
+        return _RC.strip_target_exec_markers(env)
     except (ImportError, AttributeError):
         strip = ("CLAUDECODE", "_RAPTOR_TRUSTED",
                  "RAPTOR_SESSION_PID", "RAPTOR_SESSION_TOKEN")
-    for _k in strip:
-        env.pop(_k, None)
-    return env
+        for _k in strip:
+            env.pop(_k, None)
+        return {
+            k: v for k, v in env.items()
+            if not k.startswith(("RAPTOR_", "_RAPTOR"))
+        }
 
 
 def _attach_or_spawn(_frida_mod: Any, device: Any, cfg: RunConfig
