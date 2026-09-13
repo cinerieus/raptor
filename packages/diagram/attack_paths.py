@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 from core.json import load_json
 
+from .envelope import unwrap_list
 from .sanitize import sanitize as _sanitize
 
 if TYPE_CHECKING:
@@ -176,7 +177,4 @@ def generate_from_file(path: Path) -> str:
     if data is None:
         msg = f"Failed to load {path}"
         raise ValueError(msg)
-    if isinstance(data, dict):
-        # Some files wrap array in a key
-        data = data.get("paths", data.get("attack_paths", next(iter(data.values())) if data else []))
-    return generate(data if isinstance(data, list) else [])
+    return generate(unwrap_list(data, keys=("paths", "attack_paths")) or [])

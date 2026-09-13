@@ -21,6 +21,7 @@ from . import (
     hypotheses,
     edge_obligations,
 )
+from .envelope import unwrap_list
 from .sanitize import detect_id_collisions, sanitize as _sanitize
 
 _FLOW_TRACE_GLOB = "flow-trace-*.json"
@@ -323,8 +324,7 @@ def render_directory(out_dir: Path, target: str | None = None) -> str:
                 msg = "failed to parse JSON"
                 raise ValueError(msg)
             prov_note = _provenance_note(data)
-            if isinstance(data, dict):
-                data = data.get("paths") or data.get("attack_paths") or next(iter(data.values()), [])
+            data = unwrap_list(data, keys=("paths", "attack_paths"))
             if isinstance(data, list) and data:
                 body = (f"_Source: `attack-paths.json`_{prov_note}\n\n"
                         + attack_paths.generate(data))
@@ -352,17 +352,7 @@ def _load_optional_list(path: Path) -> list | None:
     data = _load_json(path)
     if data is None:
         return None
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("paths", "attack_paths", "hypotheses"):
-            v = data.get(key)
-            if isinstance(v, list):
-                return v
-        lists = [v for v in data.values() if isinstance(v, list)]
-        if len(lists) == 1:
-            return lists[0]
-    return None
+    return unwrap_list(data, keys=("paths", "attack_paths", "hypotheses"))
 
 
 def _load_disproven(path: Path) -> list | None:

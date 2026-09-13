@@ -96,7 +96,14 @@ def _step_node_id(step: dict[str, Any], fallback: int | str = "?") -> str:
 def generate(data: dict[str, Any]) -> str:
     trace_id = data.get("id", "TRACE")
     name = _sanitize(data.get("name", trace_id))
+    # Mirror the branches guard below: a non-list ``steps`` or a
+    # non-dict element raised AttributeError and degraded the WHOLE
+    # trace file to "Could not render"; malformed elements drop, the
+    # rest of the trace still renders.
     steps = data.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+    steps = [s for s in steps if isinstance(s, dict)]
     # Cap step count. Pre-fix `steps` was used unbounded;
     # legitimate large traces (deep call chains in
     # generated code, recursive analyses) produced
