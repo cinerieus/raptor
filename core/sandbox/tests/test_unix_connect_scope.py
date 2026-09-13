@@ -70,6 +70,16 @@ _SPAWN_DEFAULTS = dict(
     seccomp_block_udp=False,
     env=None, cwd=None, timeout=30,
     capture_output=True, text=True,
+    # The subject here is the seccomp-unotify connect supervisor, not
+    # the Landlock layer. These tests call the spawn backend directly,
+    # so they must supply the floor-plumbing value context.run() would
+    # resolve for a call whose floor admits the ns-only tier: on a
+    # Landlock-less kernel the backend then runs without the Landlock
+    # layer instead of fail-closing the whole spawn (which would leave
+    # the connect-scoping battery untested exactly on those hosts).
+    # On Landlock-capable kernels the flag is inert — the tolerance is
+    # scoped strictly to kernel absence and Landlock still engages.
+    landlock_required=False,
 )
 
 
