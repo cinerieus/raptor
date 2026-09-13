@@ -29,11 +29,12 @@ systems; if the system pip-compile refuses (or is missing), we fall
 back to creating an ephemeral venv, installing pip-tools into it,
 and re-running pip-compile with the venv's pip (which doesn't have
 the marker). Per-run cost is ~3-5s for venv create + pip-tools
-install. The venv lives at ``/tmp/raptor-sca-venv-<pid>-<hash>/``
-— the sandbox mounts most of the project tree read-only, so the
-per-call tmpfs at ``/tmp`` is the writeable surface — and vanishes
-with that tmpfs when the sandbox call ends. See
-:meth:`PipResolver._venv_dir` for the path rationale.
+install. The venv lives at an unpredictable ``mkdtemp``-created
+``/tmp/raptor-sca-venv-*/`` path — the sandbox mounts most of the
+project tree read-only, so ``/tmp`` is the writeable surface — and
+vanishes with the sandbox tmpfs when the call ends (with a
+best-effort host-side cleanup for sandbox lanes that share the host
+``/tmp``). See :meth:`PipResolver._venv_dir` for the path rationale.
 """
 
 from __future__ import annotations
@@ -41,8 +42,10 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from . import ResolverResult, _check_tool, _run
@@ -96,8 +99,8 @@ class PipResolver:
     First tries system ``pip-compile`` in the sandbox; if that fails
     for any reason (PEP 668 refusal, missing binary, ``$HOME``-hidden
     install path under ``fake_home=True``, version mismatch, …) we
-    fall back to creating an ephemeral venv at
-    ``/tmp/raptor-sca-venv-<pid>-<hash>/`` and running pip-tools we
+    fall back to creating an ephemeral venv at an unpredictable
+    ``/tmp/raptor-sca-venv-*/`` path and running pip-tools we
     install into it. The venv path always works given network access
     to PyPI, at the cost of ~5-8s setup per PyPI manifest dir.
 
@@ -253,28 +256,32 @@ class PipResolver:
 
     # --- ephemeral-venv pipeline ---------------------------------------
 
-    def _venv_dir(self, project_dir: Path) -> Path:
-        """Per-run venv path.
+    def _venv_dir(self) -> Path:
+        """Fresh per-call venv path — ``mkdtemp``, never a derived name.
 
-        Lives under ``/tmp`` rather than the project tree because the
-        sandbox makes most subdirs of the project read-only at the
-        mount-ns level (``output=cwd`` permits writes only to a
-        narrow surface — a deeply-nested manifest dir like
+        Lives under the host temp dir rather than the project tree
+        because the sandbox makes most subdirs of the project
+        read-only at the mount-ns level (``output=cwd`` permits writes
+        only to a narrow surface — a deeply-nested manifest dir like
         ``.devcontainer/`` may hit "Read-only file system" when we
         try to mkdir inside it). ``/tmp`` is in the sandbox's default
-        writable_paths and is per-pid namespaced so concurrent runs
-        on the same project don't collide.
+        writable_paths.
 
-        ``project_dir`` is hashed into the suffix so two parallel
-        scans of different projects (e.g. CI matrix) get distinct
-        venvs even when their PIDs happen to clash across containers.
+        The path MUST be unpredictable: the pre-fix
+        ``/tmp/raptor-sca-venv-<pid>-<hash>`` name was fully
+        derivable (pid guessable, hash of the scan-target path), and
+        in sandbox lanes that share the host ``/tmp`` (the Landlock
+        containment floor) a co-resident local user could pre-create
+        it and pre-plant ``bin/pip-compile`` — which the pipeline then
+        executes with PyPI egress. ``mkdtemp`` creates the directory
+        mode 0700 with an unpredictable suffix, refusing pre-planted
+        paths by construction. In mount-ns lanes the sandbox's own
+        tmpfs at ``/tmp`` is fresh, so the host-side directory simply
+        doesn't exist inside — the setup script's ``mkdir -p`` /
+        ``python -m venv`` recreate it there; callers clean the
+        host-side dir up after the sandbox call returns.
         """
-        import hashlib
-        import os as _os
-        proj_hash = hashlib.sha256(
-            str(project_dir).encode("utf-8")
-        ).hexdigest()[:8]
-        return Path("/tmp") / f"raptor-sca-venv-{_os.getpid()}-{proj_hash}"
+        return Path(tempfile.mkdtemp(prefix="raptor-sca-venv-"))
 
     def _create_venv(
         self, project_dir: Path, _timeout: int,
@@ -289,11 +296,12 @@ class PipResolver:
         :meth:`_run_pip_compile_in_venv`, builds that pipeline with
         :meth:`_venv_setup_script` as its prefix; this helper only
         returns ``(venv_dir, None)`` so the caller can locate the venv
-        by path inside its own sandbox call. Filesystem state is
-        intentionally NOT created or inspected here (it would be gone
-        with the sandbox tmpfs anyway).
+        by path inside its own sandbox call. The host-side directory
+        ``mkdtemp`` creates exists only to reserve the unpredictable
+        name; the sandbox pipeline rebuilds it inside its own tmpfs.
         """
-        return self._venv_dir(project_dir), None
+        del project_dir  # name no longer derived from the target
+        return self._venv_dir(), None
 
     def _venv_setup_script(self, venv_dir: Path) -> str:
         """Shell snippet that creates the venv + bootstraps pip.
@@ -400,16 +408,10 @@ class PipResolver:
                 rel_manifest = manifest.relative_to(pd)
                 manifests.append((pd, rel_dir, rel_manifest))
 
-        # Use a single venv for the whole batch. Path includes the
-        # common_root hash so concurrent scans of different repos
-        # don't collide. Lives under /tmp (sandbox-writable).
-        import hashlib
-        proj_hash = hashlib.sha256(
-            str(common_root).encode("utf-8")
-        ).hexdigest()[:8]
-        venv_dir = Path(
-            f"/tmp/raptor-sca-venv-batch-{os.getpid()}-{proj_hash}"
-        )
+        # Use a single venv for the whole batch. mkdtemp gives an
+        # unpredictable, mode-0700 path (see _venv_dir — a derived
+        # name is pre-plantable in shared-/tmp sandbox lanes).
+        venv_dir = self._venv_dir()
 
         script = self._build_batch_script(venv_dir, manifests)
         try:
@@ -427,6 +429,13 @@ class PipResolver:
                 )
                 for _ in project_dirs
             ]
+        finally:
+            # Host-side cleanup: in mount-ns lanes the sandbox tmpfs
+            # already discarded the venv and this removes the empty
+            # mkdtemp reservation; in shared-/tmp lanes it removes the
+            # populated venv (mkdtemp names never dedupe across calls
+            # the way the old derived name did).
+            shutil.rmtree(venv_dir, ignore_errors=True)
 
         return self._parse_batch_output(
             proc.stdout, proc.stderr, proc.returncode, manifests,
@@ -614,6 +623,12 @@ class PipResolver:
                 ecosystem=self.ecosystem, success=False, available=True,
                 error=f"venv pipeline timed out after {timeout}s",
             )
+        finally:
+            # Remove the host-side mkdtemp reservation (and, in
+            # shared-/tmp sandbox lanes, the populated venv itself) —
+            # unpredictable names never dedupe across calls.
+            if venv_dir is not None:
+                shutil.rmtree(venv_dir, ignore_errors=True)
         raw = (proc.stdout + "\n" + proc.stderr).strip()
         if proc.returncode != 0:
             return ResolverResult(
