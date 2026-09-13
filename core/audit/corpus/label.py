@@ -123,6 +123,11 @@ class FunctionLabel:
     schema_version: int = SCHEMA_VERSION
     cwe: str = ""
     cve: str = ""
+    # Public provenance anchor when no CVE exists: the upstream fix
+    # commit (URL or sha) proving the flaw is publicly known. The lint
+    # warns when a vulnerable-class label carries neither cve nor
+    # fix_commit — finding labels need public provenance.
+    fix_commit: str = ""
     expected_mechanism: str = ""
     excerpt_scope: str = "function"
     expected_mode_results: dict[str, str] = field(default_factory=dict)
@@ -205,6 +210,7 @@ def load_label(path: Path) -> FunctionLabel:
         labeled_at=raw["labeled_at"],
         cwe=raw.get("cwe", ""),
         cve=raw.get("cve", ""),
+        fix_commit=raw.get("fix_commit", ""),
         expected_mechanism=raw.get("expected_mechanism", ""),
         excerpt_scope=raw.get("excerpt_scope", "function"),
         expected_mode_results=raw.get("expected_mode_results", {}),

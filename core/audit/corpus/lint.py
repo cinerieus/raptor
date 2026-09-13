@@ -225,6 +225,34 @@ def schema_check(pairs: Sequence[tuple[Path, FunctionLabel]]) -> list[str]:
     return errors
 
 
+# Labels whose expected grade asserts a real defect: these need PUBLIC
+# provenance (a CVE or an upstream fix commit) — the corpus must never
+# carry an undisclosed vulnerability as ground truth.
+_VULNERABLE_STATUSES = frozenset({"finding", "suspicious"})
+
+
+def provenance_check(
+    pairs: Sequence[tuple[Path, FunctionLabel]],
+) -> list[str]:
+    """WARNINGS (never failures) for vulnerable-class labels that
+    carry neither ``cve`` nor ``fix_commit``. A warning, not an error:
+    existing labels predate the field, and provenance may live in the
+    rationale prose — the warning surfaces the gap for curation."""
+    warnings: list[str] = []
+    for path, label in pairs:
+        if (
+            label.expected_status in _VULNERABLE_STATUSES
+            and not label.cve.strip()
+            and not label.fix_commit.strip()
+        ):
+            warnings.append(
+                f"{path}: {label.function_id}: vulnerable-class label "
+                f"({label.expected_status}) has no public provenance — "
+                f"set cve or fix_commit"
+            )
+    return warnings
+
+
 def expected_rule_hits_check(
     pairs: Sequence[tuple[Path, FunctionLabel]],
 ) -> list[str]:
@@ -846,6 +874,8 @@ def main(argv: list[str] | None = None) -> int:
     schema_errors.extend(expected_rule_hits_check(pairs))
 
     print(f"Loaded {len(pairs)} label(s) from {len(files)} file(s)")
+    for w in provenance_check(pairs):
+        print(f"WARNING: {w}")
     if schema_errors:
         print(f"{len(schema_errors)} schema error(s):", file=sys.stderr)
         for e in schema_errors:
