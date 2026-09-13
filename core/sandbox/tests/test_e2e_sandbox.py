@@ -328,7 +328,17 @@ class TestE2EGccCompilation(unittest.TestCase):
 
 
 class TestE2ECrashObservability(unittest.TestCase):
-    """Verify sandbox captures crash evidence."""
+    """Verify sandbox captures crash evidence.
+
+    Wall budgets here are deliberately generous (60s): the run()
+    deadline starts at the go-signal, BEFORE the child builds its
+    namespaces, so the budget covers the spawn backend's whole setup
+    (userns maps, pivot_root, pid-ns fork, fresh /proc, Landlock,
+    seccomp) — measured at 5-7s on a loaded CI worker running the
+    suite in parallel, where a 5s budget timed out healthy runs. The
+    crash assertions carry these tests; the timeout only bounds a
+    genuine hang. Tightening it back re-races the nightly tier's
+    spawn latency."""
 
     def setUp(self):
         if not check_net_available():
@@ -348,7 +358,7 @@ class TestE2ECrashObservability(unittest.TestCase):
 
             result = sandbox_run(
                 [str(binary)], block_network=True,
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=60,
             )
             self.assertTrue(result.sandbox_info["crashed"])
             self.assertEqual(result.sandbox_info["signal"], "SIGSEGV")
@@ -381,7 +391,7 @@ class TestE2ECrashObservability(unittest.TestCase):
 
             result = sandbox_run(
                 [str(binary)], block_network=True,
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=60,
             )
             self.assertTrue(result.sandbox_info["crashed"],
                             f"abort() should be detected as a crash; "
@@ -392,7 +402,7 @@ class TestE2ECrashObservability(unittest.TestCase):
         """Clean exit has no crash evidence."""
         result = sandbox_run(
             ["true"], block_network=True,
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=60,
         )
         self.assertFalse(result.sandbox_info["crashed"])
 

@@ -2292,9 +2292,20 @@ class TestSandboxObservability(unittest.TestCase):
                            capture_output=True, timeout=10, check=False)
             if not binary.exists():
                 self.skipTest("gcc not available")
-            # Run in sandbox
+            # Run in sandbox. The wall budget covers the spawn backend's
+            # whole child setup (userns maps, pivot_root, pid-ns fork,
+            # fresh /proc, Landlock, seccomp), not just the instant
+            # segfault: the run() deadline starts at the go-signal,
+            # before the child has built its namespaces. On a loaded CI
+            # worker running the full suite in parallel that setup has
+            # been measured at 5-7s (the rootfs E2E crash test, same
+            # backend, passes at those durations inside its 60s budget),
+            # so a 5s budget timed out healthy runs. Keep the budget
+            # generous — the crash assertions below carry the test; the
+            # timeout only bounds a genuine hang. Tightening it back
+            # re-races the nightly tier's spawn latency.
             result = sandbox_run([str(binary)], block_network=True,
-                                 capture_output=True, text=True, timeout=5)
+                                 capture_output=True, text=True, timeout=60)
             self.assertTrue(hasattr(result, "sandbox_info"))
             self.assertTrue(result.sandbox_info.get("crashed"))
             self.assertIn("SIGSEGV", result.sandbox_info.get("signal", ""))
@@ -2302,7 +2313,9 @@ class TestSandboxObservability(unittest.TestCase):
 
     def test_normal_exit_no_crash(self):
         """A normal process gets sandbox_info without crash."""
-        result = sandbox_run(["true"], capture_output=True, text=True, timeout=5)
+        # Same spawn-setup wall budget as test_crash_detected above.
+        result = sandbox_run(["true"], capture_output=True, text=True,
+                             timeout=60)
         self.assertTrue(hasattr(result, "sandbox_info"))
         self.assertFalse(result.sandbox_info.get("crashed"))
         self.assertNotIn("signal", result.sandbox_info)
