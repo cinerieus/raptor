@@ -26,13 +26,14 @@ from core.llm.methodology import load_methodology
 from core.llm.scorecard import fast_tier_model_name, run_cheap_fp_check
 from core.llm.task_types import TaskType
 from core.logging import get_logger
-from core.paths import path_to_module, to_repo_relative
+from core.paths import confine, path_to_module, to_repo_relative
 from core.security.prompt_defense_profiles import CONSERVATIVE
 from core.security.prompt_envelope import (
     TaintedString,
     UntrustedBlock,
     build_prompt,
 )
+from core.source import read_text_capped
 from packages.codeql.dataflow_validator import DataflowValidation, DataflowValidator
 from packages.codeql.dataflow_visualizer import DataflowVisualizer
 
@@ -532,25 +533,38 @@ class AutonomousCodeQLAnalyzer:
         # a malicious target's `qlpack.yml` could produce a query
         # whose result emits an absolute path or `../../etc/passwd`
         # style traversal. `repo_path / "../../etc/passwd"` resolves
-        # OUT of `repo_path`, and the subsequent `open()` reads
+        # OUT of `repo_path`, and the subsequent read pulls
         # arbitrary host files which then get fed into the LLM
         # prompt as "vulnerable code" — operator-visible
         # disclosure.
-        try:
-            joined = (repo_path / finding.file_path).resolve(strict=False)
-            repo_resolved = repo_path.resolve(strict=False)
-            joined.relative_to(repo_resolved)  # raises ValueError if outside
-        except (ValueError, OSError) as e:
+        file_path = confine(repo_path, finding.file_path)
+        if file_path is None:
             self.logger.warning(
-                "Refusing read_vulnerable_code on out-of-tree path %r: %s",
-                finding.file_path, e,
+                "Refusing read_vulnerable_code on out-of-tree path %r",
+                finding.file_path,
             )
             return finding.snippet
-        file_path = joined
 
         try:
-            with open(file_path, encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
+            # Capped read (shared 10 MB default): pre-fix
+            # `readlines()` loaded the whole file — a finding located
+            # in a repo's multi-hundred-MB generated/blob file was
+            # pulled into memory per finding. Sibling
+            # DataflowValidator.read_source_context carries the same
+            # cap with the full rationale.
+            got = read_text_capped(file_path)
+            if got is None:
+                self.logger.warning(
+                    "Failed to read vulnerable code at %s", file_path,
+                )
+                return finding.snippet
+            content, truncated = got
+            if truncated:
+                self.logger.warning(
+                    "Source file %s exceeded the capped read; context "
+                    "reflects the truncated prefix", file_path,
+                )
+            lines = content.splitlines(keepends=True)
 
             start = max(0, finding.start_line - context_lines - 1)
             end = min(len(lines), finding.end_line + context_lines)
