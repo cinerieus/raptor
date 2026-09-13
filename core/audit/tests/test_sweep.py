@@ -941,6 +941,32 @@ class TestSarifCache:
         assert hits == []
         assert cache.hit_count == 1
 
+    def test_lookup_returns_copies_not_live_cache_state(
+        self, tmp_path: Path,
+    ):
+        """lookup hands out deep copies: many hypotheses share one
+        ingested result set, so a consumer mutating its matches must
+        not corrupt every other hypothesis's view."""
+        self._write_sarif(tmp_path / "scan", "combined.sarif", [
+            self._make_result("src/handler.c", 42),
+        ])
+        cache = SarifCache.from_directory(tmp_path)
+
+        # Unranged branch: mutate the returned list and dict.
+        hits = cache.lookup("src/handler.c")
+        hits[0]["ruleId"] = "corrupted"
+        hits.append({"ruleId": "planted"})
+        again = cache.lookup("src/handler.c")
+        assert len(again) == 1
+        assert again[0]["ruleId"] == "test-rule"
+
+        # Ranged branch: shared dicts must be copies too.
+        ranged = cache.lookup("src/handler.c", line_start=40, line_end=50)
+        ranged[0]["locations"][0]["physicalLocation"]["region"][
+            "startLine"] = 9999
+        again = cache.lookup("src/handler.c", line_start=40, line_end=50)
+        assert len(again) == 1
+
     def test_unknown_file_returns_none(self, tmp_path: Path):
         self._write_sarif(tmp_path / "scan", "combined.sarif", [
             self._make_result("src/handler.c", 42),

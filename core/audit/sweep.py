@@ -14,6 +14,7 @@ Uses ``packages.semgrep.runner.run_rule``,
 from __future__ import annotations
 
 import contextlib
+import copy
 import json as _json
 import logging
 import os
@@ -125,11 +126,15 @@ class SarifCache:
 
         with self._counter_lock:
             self.hit_count += 1
+        # Deep copies, never the cache's own lists/dicts: many
+        # hypotheses share one ingested result set, so a consumer
+        # mutating its matches must not corrupt every other
+        # hypothesis's view (run_codeql_sweep's memo does the same).
         if not line_start:
-            return results
+            return copy.deepcopy(results)
 
         return [
-            r for r in results
+            copy.deepcopy(r) for r in results
             if _sarif_result_in_range(r, line_start, line_end)
         ]
 
@@ -2972,7 +2977,6 @@ def run_codeql_sweep(
         # The memo shares one whole-DB result list across callers —
         # hand out copies so a consumer mutating its matches cannot
         # corrupt another hypothesis's view.
-        import copy
         in_function = [copy.deepcopy(r) for r in in_function]
 
         outcome = "confirmed" if in_function else "refuted"
