@@ -42,6 +42,17 @@ from core.json import load_json, save_json  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
+def _stage_failed(stage: str, exc: Exception) -> None:
+    """One loud stderr line per failed stage. The script configures no
+    logging, so a bare logger.debug record vanishes — a raising
+    substrate then looks like "no enrichments applied" with zero
+    diagnostic, while the standalone shims print explicit skip
+    reasons. Traceback detail stays on the debug channel."""
+    print(f"raptor-enrich-context-map: {stage} failed: "
+          f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
+    logger.debug("%s failed", stage, exc_info=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="raptor-enrich-context-map",
@@ -105,7 +116,7 @@ def main() -> int:
             changed = True
             summary.append(f"callgraph: {n_edges} edges")
     except Exception as e:
-        logger.debug("callgraph enrichment failed: %s", e, exc_info=True)
+        _stage_failed("callgraph enrichment", e)
 
     # 2. Inventory shared by ast-view, forward-reachable, and sites.
     # Reuse the checklist as the inventory — no re-parse of the
@@ -120,7 +131,7 @@ def main() -> int:
             with tempfile.TemporaryDirectory() as td:
                 inventory = build_inventory(str(target_path), td)
         except Exception as e:
-            logger.debug("inventory build failed: %s", e, exc_info=True)
+            _stage_failed("inventory build", e)
 
     # 3. Forward reachability (needs target_path + inventory)
     if target_path:
@@ -135,8 +146,7 @@ def main() -> int:
                 changed = True
                 summary.append(f"forward-reachable: {n_ep} entry points")
         except Exception as e:
-            logger.debug("forward-reachable enrichment failed: %s", e,
-                         exc_info=True)
+            _stage_failed("forward-reachable enrichment", e)
 
     # 4. AST views (needs target_path + inventory)
     if inventory and target_path:
@@ -151,7 +161,7 @@ def main() -> int:
                 changed = True
                 summary.append(f"ast-view: {n_ast} entries")
         except Exception as e:
-            logger.debug("ast-view enrichment failed: %s", e, exc_info=True)
+            _stage_failed("ast-view enrichment", e)
 
     # 5. Sites (source_intel — spatch, needs target_path)
     if target_path:
@@ -189,7 +199,7 @@ def main() -> int:
                     f"{counts['privilege_model']} privilege"
                 )
         except Exception as e:
-            logger.debug("sites enrichment failed: %s", e, exc_info=True)
+            _stage_failed("sites enrichment", e)
 
     # 6. Sink discovery (needs target_path)
     if target_path:
