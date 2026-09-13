@@ -45,6 +45,15 @@ def test_unknown_tool_is_conservative():
     assert category_of("mystery-tool:v2") == "unknown"
 
 
+def test_machine_annotations_are_hint_tier_not_reviewed():
+    # Agent-written (and non-TTY-stamped) notes import under
+    # annotations:machine — hint-tier by doctrine, so llm-extent but
+    # scanned depth: they must NOT clear the LLM-review gap.
+    assert classify("annotations:machine") == ("llm", "scanned")
+    # Human-grade annotations keep full review credit (both-direction).
+    assert classify("annotations") == ("llm", "analysed")
+
+
 def test_journal_records_are_review_grade():
     # coverage-journal.json (build_from_journal; /agentic) derives every
     # functions_analysed entry from a per-function review-journal verdict,

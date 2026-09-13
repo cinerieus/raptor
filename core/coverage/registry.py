@@ -79,6 +79,20 @@ _REGISTRY = {
 }
 _DEFAULT: tuple[str, str] = (CATEGORY_UNKNOWN, DEPTH_SCANNED)
 
+# Full-label overrides, consulted before the base mapping. The machine
+# tier of annotations — agent-written notes and non-TTY-stamped
+# ``source=human`` notes, marked ``<tool>:machine`` by
+# ``import_annotations`` — is HINT-tier by the annotations doctrine:
+# real llm-extent examination evidence, but NOT an operator-grade
+# function review. Keep it at scanned depth (the same not-reviewed
+# bucket as ``read``/``understand``) so agent notes never clear
+# functions from the LLM-review gap the way human-grade annotations
+# do; without the override the label's base resolved to
+# ``annotations`` = analysed, full review credit.
+_EXACT: dict[str, tuple[str, str]] = {
+    "annotations:machine": (CATEGORY_LLM, DEPTH_SCANNED),
+}
+
 
 def _base(tool_label: str) -> str:
     return tool_label.split(":", 1)[0]
@@ -86,6 +100,9 @@ def _base(tool_label: str) -> str:
 
 def classify(tool_label: str) -> tuple[str, str]:
     """Return ``(category, depth)`` for a tool label."""
+    exact = _EXACT.get(tool_label)
+    if exact is not None:
+        return exact
     return _REGISTRY.get(_base(tool_label), _DEFAULT)
 
 
