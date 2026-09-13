@@ -26,7 +26,17 @@ logger = logging.getLogger(__name__)
 _OBSERVE_TIMEOUT_S = 30
 _ATTACH_TIMEOUT_S = 10
 _MAX_HOOKS = 64
-_MAX_LOG_BYTES = 8192
+# Session-log parse budget. Too small and observations from late in the
+# window are silently dropped — a busy process fills a few KiB in the
+# first fraction of a second, so a target function first hit late in
+# the 30s session would read as unobserved and worsen the
+# observation-window bias documented above. Unbounded and a hostile or
+# log-spamming target blows up parser memory. A few MiB covers a full
+# session of send() traffic while keeping the read bounded.
+_MAX_LOG_BYTES = 4 * 1024 * 1024
+# Independent line-count bound so a flood of tiny lines cannot pin the
+# JSON parser even inside the byte budget.
+_MAX_LOG_LINES = 100_000
 
 
 @dataclass
@@ -460,60 +470,78 @@ def _parse_observations(log_file: Path) -> list[FridaObservation]:
     The wrapper is single-quoted (not JSON), so the payload — the
     first ``{"``-opening object on the line — is decoded with
     ``raw_decode``, which tolerates the trailing wrapper text.
+
+    The log is streamed line by line under ``_MAX_LOG_BYTES`` /
+    ``_MAX_LOG_LINES`` bounds — never slurped whole — so late
+    observations are counted while memory stays bounded.  Each
+    ``readline`` is capped to the remaining byte budget, so an
+    oversized line comes back as a fragment that simply fails to
+    parse instead of ballooning memory.
     """
     observations: list[FridaObservation] = []
 
     if not log_file.exists():
         return observations
 
-    try:
-        content = log_file.read_text(errors="replace")[:_MAX_LOG_BYTES]
-    except OSError:
-        return observations
-
     call_stack: dict[str, FridaObservation] = {}
     decoder = json.JSONDecoder()
 
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            msg_start = line.find('{"')
-            if msg_start < 0:
-                msg_start = line.find("{")
-            if msg_start >= 0:
-                try:
-                    data, _end = decoder.raw_decode(line[msg_start:])
-                except json.JSONDecodeError:
+    try:
+        log_fh = log_file.open("rb")
+    except OSError:
+        return observations
+
+    read_bytes = 0
+    lines_seen = 0
+    with log_fh:
+        while read_bytes < _MAX_LOG_BYTES and lines_seen < _MAX_LOG_LINES:
+            try:
+                raw = log_fh.readline(_MAX_LOG_BYTES - read_bytes)
+            except OSError:
+                break
+            if not raw:
+                break
+            read_bytes += len(raw)
+            lines_seen += 1
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                msg_start = line.find('{"')
+                if msg_start < 0:
+                    msg_start = line.find("{")
+                if msg_start >= 0:
+                    try:
+                        data, _end = decoder.raw_decode(line[msg_start:])
+                    except json.JSONDecodeError:
+                        continue
+                else:
                     continue
-            else:
+
+            if not isinstance(data, dict):
                 continue
 
-        if not isinstance(data, dict):
-            continue
+            msg_type = data.get("type", "")
 
-        msg_type = data.get("type", "")
+            if msg_type == "call":
+                func_name = data.get("function", "")
+                if not func_name:
+                    continue
+                obs = FridaObservation(
+                    function=func_name,
+                    file="",
+                    args=data.get("args", []),
+                )
+                call_stack[func_name] = obs
+                observations.append(obs)
 
-        if msg_type == "call":
-            func_name = data.get("function", "")
-            if not func_name:
-                continue
-            obs = FridaObservation(
-                function=func_name,
-                file="",
-                args=data.get("args", []),
-            )
-            call_stack[func_name] = obs
-            observations.append(obs)
-
-        elif msg_type == "return":
-            func_name = data.get("function", "")
-            pending = call_stack.pop(func_name, None)
-            if pending is not None:
-                pending.retval = data.get("retval")
+            elif msg_type == "return":
+                func_name = data.get("function", "")
+                pending = call_stack.pop(func_name, None)
+                if pending is not None:
+                    pending.retval = data.get("retval")
 
     return observations
 

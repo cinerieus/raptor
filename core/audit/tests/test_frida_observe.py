@@ -376,3 +376,61 @@ class TestParseCliFraming:
         obs = _parse_observations(self._log(tmp_path, content))
         assert len(obs) == 1
         assert obs[0].function == "f"
+
+
+class TestParseLogBounds:
+    """A busy 30s session exceeds 8KiB within its first fraction of a
+    second, so a whole-log prefix cap dropped every observation from
+    later in the window — the target function read as unobserved
+    (evidence_strength stayed inconclusive), worsening the
+    observation-window bias. The parser now streams line by line
+    under byte + line-count bounds: late observations are counted,
+    memory stays bounded."""
+
+    def _log(self, tmp_path, content):
+        p = tmp_path / "obs.jsonl"
+        p.write_text(content)
+        return p
+
+    def test_observation_past_8kib_is_counted(self, tmp_path):
+        spam = json.dumps(
+            {"type": "call", "function": "noise", "args": [], "ts": 1},
+        )
+        # ~12 KiB of early traffic before the target's first hit.
+        lines = [spam] * 200
+        lines.append(json.dumps(
+            {"type": "call", "function": "late_target", "args": [], "ts": 2},
+        ))
+        content = "\n".join(lines) + "\n"
+        assert len(content) > 8192
+        obs = _parse_observations(self._log(tmp_path, content))
+        assert any(o.function == "late_target" for o in obs)
+
+    def test_log_over_byte_bound_truncates_safely(self, tmp_path):
+        line = json.dumps(
+            {"type": "call", "function": "f", "args": [], "ts": 1},
+        ) + "\n"
+        n = fo._MAX_LOG_BYTES // len(line) + 100
+        p = tmp_path / "obs.jsonl"
+        with p.open("w") as fh:
+            for _ in range(n):
+                fh.write(line)
+        assert p.stat().st_size > fo._MAX_LOG_BYTES
+        obs = _parse_observations(p)
+        # Parses without error, keeps a bounded prefix, drops the rest.
+        assert 0 < len(obs) < n
+
+    def test_line_count_bound(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(fo, "_MAX_LOG_LINES", 10)
+        line = json.dumps({"type": "call", "function": "f", "args": []})
+        obs = _parse_observations(
+            self._log(tmp_path, "\n".join([line] * 50) + "\n"),
+        )
+        assert len(obs) == 10
+
+    def test_oversized_single_line_fragments_safely(self, tmp_path, monkeypatch):
+        # A single line larger than the whole byte budget must come
+        # back as bounded fragments, never one giant allocation.
+        monkeypatch.setattr(fo, "_MAX_LOG_BYTES", 1024)
+        p = self._log(tmp_path, "x" * 10_000 + "\n")
+        assert _parse_observations(p) == []
