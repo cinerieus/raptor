@@ -245,6 +245,24 @@ class TestOnRealRepo:
         )
         assert result["ci_lint"]["run"]
 
+    @pytest.mark.parametrize("changed", [
+        ".github/workflows/lint.yml",
+        "CLAUDE.md",
+        ".claude/commands/scan.md",
+    ])
+    def test_asserted_content_change_triggers_ci_lint(self, repo, changed):
+        # .github/tests pins workflow content (test_ci_controls_docs)
+        # and CLAUDE.md / command-doc prose (test_lifecycle_doc_syntax);
+        # edits to those files must fire the tier that runs them.
+        result = compute_tier_dispatch([changed], repo)
+        assert result["ci_lint"]["run"], f"{changed} did not fire ci_lint"
+
+    def test_unrelated_root_file_does_not_trigger_ci_lint(self, repo):
+        # The extra_triggers are prefix-scoped: an unrelated root-level
+        # file must not drag the whole ci_lint tier in.
+        result = compute_tier_dispatch(["README.md"], repo)
+        assert not result["ci_lint"]["run"]
+
     def test_prompt_audit_trigger(self, repo):
         result = compute_tier_dispatch(
             ["packages/llm_analysis/agent.py"], repo

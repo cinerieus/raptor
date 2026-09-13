@@ -132,7 +132,18 @@ TIERS: dict[str, dict] = {
     },
     "ci_lint": {
         "test_dirs": [".github/tests", ".github/scripts/tests"],
-        "extra_triggers": [".github/scripts"],
+        # .github/tests asserts workflow CONTENT (lint.yml step shapes,
+        # workflow paths) and pins CLAUDE.md / .claude/commands prose —
+        # so edits to any of those must fire this tier too, not only
+        # .github/scripts changes; otherwise a breaking lint.yml or
+        # command-doc edit merges green and reddens the next scheduled
+        # full run, misattributed.
+        "extra_triggers": [
+            ".github/scripts",
+            ".github/workflows",
+            "CLAUDE.md",
+            ".claude",
+        ],
         "outside_graph": True,
     },
 }
