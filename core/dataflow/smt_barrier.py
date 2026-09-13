@@ -699,6 +699,16 @@ def _block_uses_raise(body: list) -> bool:
     return any(isinstance(stmt, ast.Raise) for stmt in body)
 
 
+# Plain and exception-group try statements — ``except*`` handlers
+# swallow (and run conditionally) exactly like plain ``except`` for
+# dominance purposes. ``ast.TryStar`` is 3.11+; on older runtimes
+# ``except*`` source is a SyntaxError and the parse-failure path
+# already declines.
+_TRY_NODES: tuple[type, ...] = (
+    (ast.Try, ast.TryStar) if hasattr(ast, "TryStar") else (ast.Try,)
+)
+
+
 def _raised_exception_names(body: list) -> list[str | None]:
     """Names of the exception classes the block's top-level ``raise``
     statements throw. ``None`` entries mark statically-unresolvable
@@ -772,7 +782,7 @@ def _line_in_try_body_with_catching_handler(
     soundness.
     """
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
+        if not isinstance(node, _TRY_NODES):
             continue
         # validator_line must be inside try.body specifically (NOT inside
         # an except handler or finally — those are different control paths)
@@ -893,7 +903,7 @@ def _validator_in_branch(
             elif isinstance(stmt, (ast.For, ast.While)):
                 if _spans(stmt.body, target):
                     return True
-            elif isinstance(stmt, ast.Try):
+            elif isinstance(stmt, _TRY_NODES):
                 for handler in stmt.handlers:
                     if _spans(handler.body, target):
                         return True

@@ -2436,3 +2436,89 @@ def test_try_tier0_declined_on_one_line_wrapped_java_guard(tmp_path: Path):
         language="java",
     )
     assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+# ---------------------------------------------------------------------------
+# Dominance: exception-group try (``try/except*``) — same swallow and
+# same handler-body conditionality as plain ``try``, one token away.
+# ---------------------------------------------------------------------------
+
+_EXCEPT_STAR = pytest.mark.skipif(
+    __import__("sys").version_info < (3, 11),
+    reason="except* requires Python 3.11+",
+)
+
+
+@_EXCEPT_STAR
+def test_validator_raise_swallowed_by_except_star_declines(tmp_path: Path):
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise ValueError\n"
+        "    except* ValueError:\n"
+        "        pass\n"
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise ValueError\n"
+        "+    except* ValueError:\n"
+        "+        pass\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+
+
+@_EXCEPT_STAR
+def test_validator_raise_with_reraising_except_star_still_dominates(tmp_path: Path):
+    """Two-direction: a re-raising ``except*`` handler keeps the
+    failure path exiting."""
+    (tmp_path / "app.py").write_text(
+        "def f(x):\n"
+        "    try:\n"
+        '        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "            raise ValueError\n"
+        "    except* ValueError:\n"
+        "        raise\n"
+        "    return open(x)\n"
+    )
+    diff = (
+        "@@ -1,3 +1,7 @@\n"
+        " def f(x):\n"
+        "+    try:\n"
+        '+        if not re.match(r"^[A-Za-z0-9_+-]+$", x):\n'
+        "+            raise ValueError\n"
+        "+    except* ValueError:\n"
+        "+        raise\n"
+        "     return open(x)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=7, sink_class="pathtrav",
+    )
+    assert r.status is sb.Tier0Status.SOUND
+
+
+@_EXCEPT_STAR
+def test_substitution_in_except_star_handler_does_not_dominate():
+    """An ``except*`` handler body runs only when its group matched —
+    a sanitizer inside it is branch-wrapped exactly like a plain
+    ``except`` handler's."""
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    try:\n"
+        "        risky()\n"
+        "    except* ValueError:\n"
+        "        x = re.sub(r'[/.]+', '', x)\n"   # line 6 — conditional
+        "    return open(x)\n"                    # line 7 = sink
+    )
+    assert sb.substitution_dominates_sink(src, 6, 7, "x") is False
