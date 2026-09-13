@@ -673,15 +673,11 @@ def discover_sinks(
                 forward_edges[caller_key].add(callee_key)
                 reverse_edges[callee_key].add(caller_key)
                 # Cross-file: callee defined in other inventory files
-                resolved = False
                 for other_file in _func_defined_in.get(callee_name, ()):
-                    resolved = True
                     if other_file != filepath:
                         cross_key: FuncKey = (other_file, callee_name)
                         forward_edges[caller_key].add(cross_key)
                         reverse_edges[cross_key].add(caller_key)
-                if not resolved and callee_name in _func_defined_in:
-                    resolved = True
             elif len(call.chain) == 2 and call.chain[0] in ("self", "this"):
                 callee_key = (filepath, call.chain[1])
                 forward_edges[caller_key].add(callee_key)
