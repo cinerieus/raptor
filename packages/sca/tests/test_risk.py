@@ -79,6 +79,29 @@ def _finding(
     )
 
 
+@pytest.fixture(autouse=True)
+def _flushed_calibration_cache():
+    """Flush the per-process calibration-status cache before AND after
+    every test in this module.
+
+    The pre-flush isolates a test from whatever an earlier test in the
+    same worker process left cached. The post-flush is the important
+    half: the calibration-status tests monkeypatch
+    ``_load_latest_validation_verdict`` and compute a risk estimate,
+    which refills the cache THROUGH the patched loader — monkeypatch
+    restores the loader at teardown, but the cache still holds the
+    patched verdict, and every later ``compute_risk_estimate`` in the
+    worker inherited it. Under pytest-xdist that made any downstream
+    test reading ``risk_components["calibration_status"]`` (the golden
+    byte-pins) order-dependent: green or red depending on which worker
+    the poisoning test landed on first.
+    """
+    from packages.sca import risk
+    risk._reset_calibration_cache_for_tests()
+    yield
+    risk._reset_calibration_cache_for_tests()
+
+
 # ---------------------------------------------------------------------------
 # Worked examples from design §1316
 # ---------------------------------------------------------------------------
@@ -246,10 +269,11 @@ def test_calibration_status_in_components(tmp_path, monkeypatch):
 
     Hermetic: redirects the validation-report lookup at a tmp
     dir so this test's assertion is stable regardless of what's
-    under the in-tree ``data/calibration/validation/`` directory.
+    under the in-tree ``data/calibration/validation/`` directory
+    (the autouse ``_flushed_calibration_cache`` fixture owns the
+    cache flush on both sides).
     """
     from packages.sca import risk
-    risk._reset_calibration_cache_for_tests()
     monkeypatch.setattr(
         risk, "_load_latest_validation_verdict",
         lambda: "unverified",
@@ -340,14 +364,14 @@ class TestCalibrationStatusFromValidation:
     ``validation/<date>.json`` and surfaces its verdict in the
     components breakdown.
 
-    Tests use the test helper to flush the cache; in production the
-    verdict is read once per process.
+    The autouse ``_flushed_calibration_cache`` fixture flushes the
+    cache around every test; in production the verdict is read once
+    per process.
     """
 
     def _patch_validation_dir(self, monkeypatch, tmp_path):
         """Redirect the validation-reports lookup to a tmp dir."""
         from packages.sca import risk
-        risk._reset_calibration_cache_for_tests()
 
         # The lookup uses ``Path(__file__).resolve().parent /
         # "data" / "calibration" / "validation"``. Monkey-patch
