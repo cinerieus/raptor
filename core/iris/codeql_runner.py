@@ -72,8 +72,25 @@ def _parse_sarif_matches(sarif_path: Path) -> list[dict[str, Any]]:
     return matches
 
 
-def _match_to_spec_key(match: dict, specs: list[TaintSpec]) -> str | None:
-    """Map a CodeQL match back to the spec that produced it.
+#: ``src=<token>`` / ``sink=<token>`` markers the generated query
+#: (``specs.compile_codeql_config``) binds into result messages.
+_MESSAGE_TOKEN_RE = re.compile(r"\b(?:src|sink)=([0-9a-f]{12})\b")
+
+
+def _match_to_spec_keys(match: dict, specs: list[TaintSpec]) -> list[str]:
+    """Map a CodeQL match back to the spec(s) that produced it.
+
+    The generated query binds a ``spec_message_token`` for each
+    matched endpoint into the result message (``[src=<token>
+    sink=<token>]``), bound from the same ``hasName()`` constraint
+    its Config predicate uses. The join extracts those tokens and
+    maps them back — NOT a free-text function-name search: names are
+    LLM-derived from the studied repo, so a spec named after message
+    boilerplate ("data", "sink", "IRIS") would confirm on every
+    result, and same-named specs in other files/roles would
+    cross-bleed. The token hashes the full (file, function, role)
+    identity, so only the exact spec confirms. A path result carries
+    both endpoint tokens and confirms both specs.
 
     Keys MUST be built by ``store._spec_key`` — every consumer
     (``refine._promote_confirmed``, ``store._drop_refuted``, the
@@ -81,11 +98,18 @@ def _match_to_spec_key(match: dict, specs: list[TaintSpec]) -> str | None:
     key silently never matches any spec: no promotion, no scorecard
     outcome, and a confirmation that cannot cancel a refutation.
     """
+    from .specs import spec_message_token
+
     msg = match.get("message", "")
-    for spec in specs:
-        if re.search(r'\b' + re.escape(spec.function) + r'\b', msg):
-            return _spec_key(spec)
-    return None
+    token_to_key = {
+        spec_message_token(spec): _spec_key(spec) for spec in specs
+    }
+    keys: list[str] = []
+    for token in _MESSAGE_TOKEN_RE.findall(msg):
+        key = token_to_key.get(token)
+        if key is not None and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def make_codeql_tool_runner(
@@ -149,10 +173,10 @@ def make_codeql_tool_runner(
                 confirmed_keys = []
                 seen = set()
                 for match in matches:
-                    key = _match_to_spec_key(match, specs)
-                    if key and key not in seen:
-                        confirmed_keys.append(key)
-                        seen.add(key)
+                    for key in _match_to_spec_keys(match, specs):
+                        if key not in seen:
+                            confirmed_keys.append(key)
+                            seen.add(key)
 
                 return RefinementFeedback(
                     confirmed_keys=confirmed_keys,

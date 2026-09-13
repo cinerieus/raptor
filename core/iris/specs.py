@@ -11,6 +11,7 @@ taint specifications doubled CodeQL's finding count vs stock rules.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -423,25 +424,92 @@ def compile_codeql_config(specs: list[TaintSpec], *, language: str = "cpp") -> s
         lines.append("")
         lines.append("import Flow::PathGraph")
         lines.append("")
-        lines.append("from Flow::PathNode source, Flow::PathNode sink")
-        lines.append("where Flow::flowPath(source, sink)")
+        # The result message MUST carry a machine-joinable identity
+        # for the matched source/sink specs: the runner's confirmation
+        # match-back (core.iris.codeql_runner._match_to_spec_keys)
+        # extracts the `[src=<token> sink=<token>]` suffix and maps
+        # each token back to its spec via spec_message_token. Fixed
+        # messages made confirmed_keys always empty — no XREF_BACKED
+        # promotion, no scorecard outcome, ever. Tokens (not free-text
+        # function names) are the join: names are LLM-derived from the
+        # studied repo, so a spec named after message boilerplate
+        # ("data", "sink") or a same-named spec in another file/role
+        # would false-confirm off a name search. Each token is bound
+        # from the same hasName() constraint its Config predicate
+        # uses; the human-readable name rides along for the operator.
+        src_parts = []
+        for s in sources:
+            safe = _escape_codeql(s.function)
+            tok = spec_message_token(s)
+            src_parts.append(
+                f'    (source.getNode().(DataFlow::CallNode).getTarget()'
+                f'.hasName("{safe}") and srcName = "{safe}" '
+                f'and srcKey = "{tok}")'
+            )
+        snk_parts = []
+        for s in sinks:
+            safe = _escape_codeql(s.function)
+            tok = spec_message_token(s)
+            snk_parts.append(
+                f'    (exists(DataFlow::CallNode c | '
+                f'c.getTarget().hasName("{safe}") and '
+                f'sink.getNode() = c.getAnArgument()) and '
+                f'snkName = "{safe}" and snkKey = "{tok}")'
+            )
+        lines.append("from Flow::PathNode source, Flow::PathNode sink, "
+                     "string srcName, string srcKey, "
+                     "string snkName, string snkKey")
+        lines.append("where")
+        lines.append("  Flow::flowPath(source, sink) and")
+        lines.append("  (")
+        lines.append(" or\n".join(src_parts))
+        lines.append("  ) and")
+        lines.append("  (")
+        lines.append(" or\n".join(snk_parts))
+        lines.append("  )")
         lines.append('select sink.getNode(), source, sink,')
-        lines.append('  "IRIS: tainted data from $@ reaches project-specific sink",')
-        lines.append('  source.getNode(), "this source"')
+        lines.append('  "IRIS: tainted data from $@ reaches '
+                     'project-specific sink " + snkName')
+        lines.append('    + " [src=" + srcKey + " sink=" + snkKey + "]",')
+        lines.append('  source.getNode(), srcName')
     elif sinks:
-        lines.append("from DataFlow::Node sink")
+        # Same match-back contract as the path-problem branch: the
+        # message must carry the sink spec's join token.
+        lines.append("from DataFlow::Node sink, string snkName, "
+                     "string snkKey")
         lines.append("where")
         sink_parts = []
         for s in sinks:
             safe = _escape_codeql(s.function)
+            tok = spec_message_token(s)
             sink_parts.append(
-                f'    exists(DataFlow::CallNode c | '
-                f'c.getTarget().hasName("{safe}") and sink = c.getAnArgument())'
+                f'    (exists(DataFlow::CallNode c | '
+                f'c.getTarget().hasName("{safe}") and '
+                f'sink = c.getAnArgument()) and '
+                f'snkName = "{safe}" and snkKey = "{tok}")'
             )
         lines.append(" or\n".join(sink_parts))
-        lines.append('select sink, "Argument to IRIS-identified project sink"')
+        lines.append('select sink, "Argument to IRIS-identified '
+                     'project sink " + snkName')
+        lines.append('    + " [sink=" + snkKey + "]"')
 
     return "\n".join(lines)
+
+
+def spec_message_token(spec: TaintSpec) -> str:
+    """Stable join token binding a generated-query result to its spec.
+
+    Hash of the spec's full identity — the same ``file\\0function\\
+    0role`` triple ``store._spec_key`` uses — so same-named specs in
+    different files/roles get distinct tokens and cannot cross-bleed
+    a confirmation. Emitted into query result messages as
+    ``src=<token>`` / ``sink=<token>`` by ``compile_codeql_config``;
+    ``codeql_runner._match_to_spec_keys`` maps it back. 48 bits over
+    a per-run spec list (tens of rows) — collision-safe for the join.
+    Hex-only, so it needs no CodeQL string escaping.
+    """
+    identity = f"{spec.file}\0{spec.function}\0{spec.role}"
+    return hashlib.sha256(identity.encode()).hexdigest()[:12]
 
 
 def _escape_codeql(name: str) -> str:

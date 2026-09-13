@@ -6,8 +6,9 @@ import json
 import os
 from pathlib import Path
 
-from core.iris.codeql_runner import _match_to_spec_key, _parse_sarif_matches
-from core.iris.specs import TaintSpec
+from core.evidence import EvidenceTier
+from core.iris.codeql_runner import _match_to_spec_keys, _parse_sarif_matches
+from core.iris.specs import TaintSpec, compile_codeql_config, spec_message_token
 from core.iris.store import _spec_key
 
 
@@ -58,12 +59,120 @@ def test_match_key_uses_store_spec_key_format() -> None:
     promoted, no scorecard outcome recorded, and a CodeQL confirmation
     cannot cancel a Joern refutation."""
     spec = TaintSpec(function="read_pkt", file="src/net.c", role="source")
-    key = _match_to_spec_key(
-        {"message": "tainted value from read_pkt reaches sink"}, [spec],
+    keys = _match_to_spec_keys(
+        {"message": f"flow found [src={spec_message_token(spec)}]"},
+        [spec],
     )
-    assert key == _spec_key(spec)
+    assert keys == [_spec_key(spec)]
 
 
-def test_match_key_none_when_no_spec_matches() -> None:
+def test_match_key_empty_when_no_spec_matches() -> None:
     spec = TaintSpec(function="read_pkt", file="src/net.c", role="source")
-    assert _match_to_spec_key({"message": "unrelated flow"}, [spec]) is None
+    assert _match_to_spec_keys({"message": "unrelated flow"}, [spec]) == []
+
+
+# ------------------------------------------------------------------
+# Query-message ↔ match-back join contract
+# ------------------------------------------------------------------
+#
+# The join only works if the GENERATED query's result messages carry
+# the per-spec join token — a fixed message string means
+# confirmed_keys is always empty and CodeQL-backed XREF_BACKED
+# promotion never fires; a free-text NAME search over the message
+# false-confirms specs named after message boilerplate.
+
+
+def _src() -> TaintSpec:
+    return TaintSpec(function="read_input", file="io.c", role="source")
+
+
+def _snk() -> TaintSpec:
+    return TaintSpec(function="exec_cmd", file="cmd.c", role="sink")
+
+
+def _path_msg(src: TaintSpec, snk: TaintSpec) -> str:
+    # message.text as CodeQL renders the generated select: the $@
+    # placeholder becomes a [label](N) link carrying srcName; the
+    # sink name and the [src= sink=] token suffix are concatenated.
+    return (
+        f"IRIS: tainted data from [{src.function}](1) reaches "
+        f"project-specific sink {snk.function} "
+        f"[src={spec_message_token(src)} sink={spec_message_token(snk)}]"
+    )
+
+
+def test_path_query_binds_spec_tokens_into_message() -> None:
+    src, snk = _src(), _snk()
+    query = compile_codeql_config([src, snk])
+    # Per-endpoint join tokens are bound beside the hasName()
+    # constraint and concatenated into the message; the human-readable
+    # name rides along as the $@ link label.
+    assert f'srcKey = "{spec_message_token(src)}"' in query
+    assert f'snkKey = "{spec_message_token(snk)}"' in query
+    assert '" [src=" + srcKey + " sink=" + snkKey + "]"' in query
+    assert "source.getNode(), srcName" in query
+
+
+def test_sink_only_query_binds_spec_token_into_message() -> None:
+    snk = _snk()
+    query = compile_codeql_config([snk])
+    assert f'snkKey = "{spec_message_token(snk)}"' in query
+    assert '" [sink=" + snkKey + "]"' in query
+
+
+def test_matching_result_confirms_both_endpoints_and_promotes() -> None:
+    """End-to-end join: a result row whose message the generated query
+    would produce → both endpoint keys confirmed → promotion fires."""
+    from core.iris.refine import RefinementFeedback, _promote_confirmed
+
+    src, snk = _src(), _snk()
+    keys = _match_to_spec_keys({"message": _path_msg(src, snk)}, [src, snk])
+    assert set(keys) == {_spec_key(src), _spec_key(snk)}
+
+    promoted = _promote_confirmed(
+        [src, snk], RefinementFeedback(confirmed_keys=keys),
+    )
+    assert all(
+        s.evidence_tier == EvidenceTier.XREF_BACKED for s in promoted
+    )
+
+
+def test_non_matching_result_confirms_nothing() -> None:
+    keys = _match_to_spec_keys(
+        {"message": "IRIS: tainted data from [other_fn](1) reaches "
+                    "project-specific sink another_fn"},
+        [_src(), _snk()],
+    )
+    assert keys == []
+
+
+def test_boilerplate_named_spec_not_false_confirmed() -> None:
+    """Spec function names are LLM-derived from the studied repo —
+    a spec named after query-message boilerplate ('data', 'sink',
+    'IRIS', 'Argument') must NOT be confirmed by every result."""
+    src, snk = _src(), _snk()
+    boilerplate = [
+        TaintSpec(function=w, file="x.c", role="sink")
+        for w in ("data", "sink", "IRIS", "from", "reaches",
+                  "project", "tainted", "specific", "Argument")
+    ]
+    keys = _match_to_spec_keys(
+        {"message": _path_msg(src, snk)}, [src, snk, *boilerplate],
+    )
+    assert set(keys) == {_spec_key(src), _spec_key(snk)}
+
+
+def test_same_name_specs_do_not_cross_bleed() -> None:
+    """The token hashes (file, function, role): a same-named spec in
+    a different file/role must not inherit the confirmation."""
+    snk = _snk()
+    twin_other_file = TaintSpec(
+        function="exec_cmd", file="other.c", role="sink")
+    twin_other_role = TaintSpec(
+        function="exec_cmd", file="cmd.c", role="sanitiser")
+    msg = (f"Argument to IRIS-identified project sink exec_cmd "
+           f"[sink={spec_message_token(snk)}]")
+    keys = _match_to_spec_keys(
+        {"message": msg}, [snk, twin_other_file, twin_other_role],
+    )
+    assert keys == [_spec_key(snk)]
