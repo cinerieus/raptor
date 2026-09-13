@@ -384,6 +384,22 @@ def _link_by_call_graph(
     return links
 
 
+# Field names too generic to imply a producer-consumer relationship on
+# their own: they occur in nearly every module, so a shared spelling is
+# coincidence, not a link. Trade-off cuts both ways — excluding MORE
+# names loses genuine links on codebases that really route state
+# through e.g. `status`; excluding FEWER cross-products unrelated
+# functions into quadratic medium-confidence links that drown review.
+# This set is only the names that match on essentially every package.
+_GENERIC_FIELD_NAMES = frozenset({"type", "result", "method", "status"})
+
+# Cap on producer×consumer pairs emitted per field name within one
+# package: past this the field is package-wide plumbing and more pairs
+# add noise, not signal. Too low drops real fan-out pairs; too high
+# re-opens the quadratic pair explosion the cap exists to stop.
+_MAX_PAIRS_PER_FIELD = 25
+
+
 def _link_by_field_heuristic(
     all_funcs: dict[str, list[_FunctionLiterals]],
 ) -> list[tuple[_FunctionLiterals, _FunctionLiterals, str]]:
@@ -392,6 +408,8 @@ def _link_by_field_heuristic(
     When function A assigns ``ecosystem = "PyPI"`` and function B tests
     ``if ecosystem == "npm":``, and both are in the same package, they
     are likely a producer-consumer pair for the ``ecosystem`` field.
+    Generic field names are excluded and pairs are capped per field —
+    see _GENERIC_FIELD_NAMES / _MAX_PAIRS_PER_FIELD.
     """
     links: list[tuple[_FunctionLiterals, _FunctionLiterals, str]] = []
 
@@ -413,12 +431,20 @@ def _link_by_field_heuristic(
             for fname in fl.field_consumed:
                 consumers.setdefault(fname, []).append(fl)
 
-        for field_name in set(producers) & set(consumers):
+        for field_name in sorted(set(producers) & set(consumers)):
+            if field_name.lower() in _GENERIC_FIELD_NAMES:
+                continue
+            emitted = 0
             for p in producers[field_name]:
                 for c in consumers[field_name]:
                     if p is c:
                         continue
                     links.append((p, c, "medium"))
+                    emitted += 1
+                    if emitted >= _MAX_PAIRS_PER_FIELD:
+                        break
+                if emitted >= _MAX_PAIRS_PER_FIELD:
+                    break
 
     return links
 

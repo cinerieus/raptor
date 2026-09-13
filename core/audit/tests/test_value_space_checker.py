@@ -118,16 +118,19 @@ class TestDeadBranches:
     """Consumer handles values nobody produces."""
 
     def test_consumer_has_unreachable_branch(self):
+        # Fixture field is "severity", not "status": the field-link
+        # heuristic excludes the most generic field names by design
+        # (_GENERIC_FIELD_NAMES).
         source = {
             "pkg/producer.py": (
                 'def produce():\n'
-                '    status = "ok"\n'
+                '    severity = "ok"\n'
             ),
             "pkg/consumer.py": (
-                'def consume(status):\n'
-                '    if status == "ok":\n'
+                'def consume(severity):\n'
+                '    if severity == "ok":\n'
                 '        pass\n'
-                '    elif status == "never_produced":\n'
+                '    elif severity == "never_produced":\n'
                 '        pass\n'
             ),
         }
@@ -777,3 +780,52 @@ class TestDeadVisitorFlagsRemoved:
         extractor = _LiteralExtractor("a.py", "f")
         assert not hasattr(extractor, "_in_compare")
         assert not hasattr(extractor, "_in_membership")
+
+
+class TestFieldHeuristicNoise:
+    """Generic field names must not cross-product unrelated functions;
+    pairs per field are capped."""
+
+    @staticmethod
+    def _fl(fn, *, prod_field=None, cons_field=None):
+        from core.audit.value_space_checker import _FunctionLiterals
+        fl = _FunctionLiterals(file="pkg/a.py", function=fn)
+        if prod_field:
+            fl.produced.add("x")
+            fl.field_produced.add(prod_field)
+        if cons_field:
+            fl.consumed.add("y")
+            fl.field_consumed.add(cons_field)
+        return fl
+
+    def test_generic_field_names_do_not_link(self):
+        from core.audit.value_space_checker import _link_by_field_heuristic
+        funcs = [
+            self._fl("p", prod_field="type"),
+            self._fl("c", cons_field="type"),
+        ]
+        assert _link_by_field_heuristic({"pkg/a.py": funcs}) == []
+
+    def test_specific_field_names_still_link(self):
+        from core.audit.value_space_checker import _link_by_field_heuristic
+        funcs = [
+            self._fl("p", prod_field="ecosystem"),
+            self._fl("c", cons_field="ecosystem"),
+        ]
+        links = _link_by_field_heuristic({"pkg/a.py": funcs})
+        assert len(links) == 1
+
+    def test_pairs_capped_per_field(self):
+        from core.audit import value_space_checker as vsc
+        producers = [
+            self._fl(f"p{i}", prod_field="ecosystem") for i in range(10)
+        ]
+        consumers = [
+            self._fl(f"c{i}", cons_field="ecosystem") for i in range(10)
+        ]
+        links = vsc._link_by_field_heuristic(
+            {"pkg/a.py": producers + consumers},
+        )
+        # 10x10 raw pairs collapse to the cap; under-cap fields are
+        # unaffected (previous test emits exactly its 1 raw pair).
+        assert len(links) == vsc._MAX_PAIRS_PER_FIELD
