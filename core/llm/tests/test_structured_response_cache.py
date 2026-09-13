@@ -439,6 +439,7 @@ def test_entries_without_timestamp_serve_as_fresh(tmp_path: Path) -> None:
 def test_eviction_drops_oldest_when_over_cap(tmp_path: Path) -> None:
     """Save N+overflow entries with cache_max_entries=N → directory
     settles at exactly N files, with the oldest evicted."""
+    import os
     import time
     client = _client(tmp_path, cache_max_entries=5)
     fake = _FakeProvider({"k": "v"})
@@ -446,11 +447,17 @@ def test_eviction_drops_oldest_when_over_cap(tmp_path: Path) -> None:
 
     schema = {"type": "object"}
     # 8 distinct entries → after eviction we should keep 5.
-    # time.sleep between writes so mtimes are distinct enough that
-    # "oldest" is unambiguous.
+    # Back-date each new entry's mtime explicitly (like the TTL test
+    # above) so "oldest" is unambiguous even on filesystems with
+    # coarse mtime granularity — sleeping 10ms between writes was not
+    # enough on 1s-granularity mounts.
+    base = time.time() - 1000
+    seen: set[Path] = set()
     for i in range(8):
         client.generate_structured(f"prompt-{i}", schema)
-        time.sleep(0.01)
+        for p in set(client.config.cache_dir.glob("*.json")) - seen:
+            os.utime(p, (base + i, base + i))
+            seen.add(p)
 
     files = list(client.config.cache_dir.glob("*.json"))
     assert len(files) == 5, f"expected 5 entries after eviction, got {len(files)}"
