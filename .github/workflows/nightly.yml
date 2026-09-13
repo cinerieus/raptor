@@ -99,6 +99,12 @@ jobs:
           uv pip install -r requirements-grammars.txt
 
       - name: Install binary-analysis toolchain (radare2 + LLVM 21)
+        # continue-on-error so a transient apt/LLVM mirror outage doesn't
+        # abort the whole nightly before the (toolchain-independent) test
+        # families run; the "Refuse a toolchain-less..." step below still
+        # reddens the RUN afterwards so the outage can't silently convert
+        # the r2/llvm families into permanent skips (same rationale as
+        # weekly_corpus.yml's all-skipped guard).
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -156,6 +162,34 @@ jobs:
           sleep 60
           python -m pytest -m integration core packages --durations=25 \
             --tb=short --junitxml="$RUNNER_TEMP/integration-attempt-2.xml"
+
+      # Backstop for the continue-on-error toolchain install above: the
+      # r2 / llvm-cov test families skip-with-reason when their binaries
+      # are absent, so a persistently broken install would read as a
+      # green nightly with those families never executing. Verify the
+      # tools actually landed and fail the run with a named reason if
+      # not. Runs AFTER the test steps (and even when they failed) so
+      # the toolchain-independent signal is still collected either way.
+      # Trade-off both ways: checking earlier would save the ~30 min of
+      # tests on a broken mirror day but would also discard the healthy
+      # families' signal; checking here keeps the signal and still
+      # refuses the silent-skip rot.
+      - name: Refuse a toolchain-less binary-analysis nightly
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          missing=""
+          command -v r2 >/dev/null 2>&1 || missing="$missing radare2"
+          /usr/lib/llvm-21/bin/llvm-cov --version >/dev/null 2>&1 \
+            || missing="$missing llvm-21"
+          if [ -n "$missing" ]; then
+            echo "::error::binary-analysis toolchain missing:${missing} —" \
+              "the r2/llvm test families above can only skip, so this" \
+              "nightly produced no binary-analysis signal. Check the" \
+              "toolchain install step's log."
+            exit 1
+          fi
+          echo "Toolchain present: r2 + llvm-21."
 
       - name: Upload test results
         if: always()
