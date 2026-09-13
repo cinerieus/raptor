@@ -705,6 +705,22 @@ _WRAP_CAPABLE_OP_KW = re.compile(
 )
 
 
+def _find_bounded_name_token(text: str, func_name: str) -> int:
+    """Position of *func_name* as a standalone token in *text*, or -1.
+
+    A plain substring search matched the libc name INSIDE a custom
+    identifier ("utf8_tolower", "net_ntohs_unaligned") and applied the
+    libc return-range guarantee — a proof-grade, clean-demoting fact —
+    to a function it says nothing about. Word-boundary matching keeps
+    the guarantee scoped to the named libc function ("ntohs(x)",
+    "the ntohs value" still match); an embedding identifier reads as an
+    unknown function and the gate stands down — inconclusive, never
+    refuted.
+    """
+    m = re.search(rf"\b{re.escape(func_name)}\b", text)
+    return m.start() if m else -1
+
+
 def _refute_by_known_return_type(
     outcome,
     _config,
@@ -764,7 +780,7 @@ def _refute_by_known_return_type(
     best: tuple[str, str, int, int] | None = None  # (name, type, max, dist)
     for func_name, (ret_type, _min_val, max_val) in \
             _KNOWN_RETURN_BOUNDS.items():
-        func_pos = hyp_lower.find(func_name)
+        func_pos = _find_bounded_name_token(hyp_lower, func_name)
         if func_pos < 0:
             continue
 
@@ -1332,7 +1348,7 @@ def _bounded_name_near_overflow_claim(mechanism_lower: str) -> bool:
     mention of ntohs() three sentences away from an unrelated
     overflow claim must not read as a range proof for that claim."""
     for func_name in _KNOWN_RETURN_BOUNDS:
-        pos = mechanism_lower.find(func_name)
+        pos = _find_bounded_name_token(mechanism_lower, func_name)
         if pos < 0:
             continue
         window = mechanism_lower[max(0, pos - 100):pos + 100]

@@ -502,6 +502,35 @@ class TestRefuteByKnownReturnType:
         r = _refute_by_known_return_type(outcome, _Config())
         assert r is None
 
+    def test_embedded_libc_name_not_refuted(self):
+        """A custom identifier merely EMBEDDING a bounded libc name
+        (utf8_tolower, net_ntohs_unaligned) carries none of the libc
+        return-range guarantee — the gate must stand down, not
+        proof-refute on a range that says nothing about the custom
+        function."""
+        for hyp in (
+            "utf8_tolower() return value causes arithmetic overflow "
+            "when stored in the int loop counter",
+            "integer wraparound: net_ntohs_unaligned() return value "
+            "used in arithmetic that overflows the loop counter",
+        ):
+            outcome = _Outcome(hypothesis=hyp)
+            assert _refute_by_known_return_type(outcome, _Config()) \
+                is None, hyp
+
+    def test_bare_call_with_argument_still_refuted(self):
+        """The token match keeps matching a real call shape with an
+        argument (``ntohs(x)``), not just the bare name."""
+        outcome = _Outcome(
+            hypothesis=(
+                "integer wraparound: ntohs(x) return value used in "
+                "arithmetic that overflows the loop counter"
+            ),
+        )
+        r = _refute_by_known_return_type(outcome, _Config())
+        assert r is not None
+        assert r.gate == "input_bound_t0"
+
     def test_cwe_190_triggers_without_keywords(self):
         """CWE-190 in review_result triggers even without keywords."""
         outcome = _Outcome(
