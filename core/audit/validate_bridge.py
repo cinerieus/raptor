@@ -10,11 +10,13 @@ Search order for sibling output (similar to understand_bridge):
   2. Project siblings (same project, different run type)
   3. Global out/ by target path match (newest name first)
 
-Unlike understand_bridge there is NO freshness check: candidates
-match purely on target path, so a run against an older checkout of
-the same path is imported as current evidence. A build-ID keyed
-cache exists (core/audit/build_id_cache.py) but is not wired into
-this flow — binaries may be re-analysed across commands.
+Freshness: verdict HISTORY is freshness-gated per file (SHA-256 via
+``_stale_history_files``); feasibility verdicts, runtime evidence and
+mitigation profiles remain freshness-blind — candidates match purely
+on target path, so a run against an older checkout of the same path
+still contributes those as current evidence. A build-ID keyed cache
+exists (core/audit/build_id_cache.py) but is not wired into this
+flow — binaries may be re-analysed across commands.
 """
 
 from __future__ import annotations
@@ -607,15 +609,10 @@ def _run_in_flight(candidate: Path) -> bool:
     """True when the candidate run is still status=running — a
     NEIGHBOUR session's in-flight validate run has a partial
     findings.json that must never be imported as evidence (the target
-    gate alone admitted it)."""
-    try:
-        from core.json import load_json
-        meta = load_json(candidate / ".raptor-run.json",
-                         max_bytes=1024 * 1024)
-        return bool(isinstance(meta, dict)
-                    and meta.get("status") == "running")
-    except Exception:  # noqa: BLE001 — unreadable metadata: not in flight
-        return False
+    gate alone admitted it). Unreadable metadata reads as not in
+    flight (_load_json's warn+None contract)."""
+    meta = _load_json(candidate / ".raptor-run.json")
+    return bool(isinstance(meta, dict) and meta.get("status") == "running")
 
 
 def import_validate_evidence(
