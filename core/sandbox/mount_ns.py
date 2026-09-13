@@ -660,7 +660,32 @@ def _mount_etc_tmpfs_copy(root: str, host_dir: str, inside: str,
                 or os.path.normpath(ns_target) != ns_target):
             continue
         stub = f"{root}{ns_target}"
-        if not os.path.exists(stub):
+        # lstat, not exists(): _copy_etc_tree recreates host symlinks
+        # verbatim, and the stock /etc/resolv.conf ->
+        # /run/systemd/resolve/stub-resolv.conf shape resolves in the
+        # PRE-pivot namespace — exists() follows it off-path (to the
+        # HOST /run), the stub step skips, and the 8d bind then lands
+        # at the link's host-side destination instead of
+        # {root}/etc/<name>, leaving the post-pivot view dangling and
+        # the overlay silently absent. The private tmpfs copy is
+        # still RW here: drop the link and let the stub creation
+        # below give the bind a real mount point.
+        try:
+            _stub_st = os.lstat(stub)
+        except OSError:
+            _stub_st = None
+        if (_stub_st is not None
+                and stat_module.S_ISLNK(_stub_st.st_mode)):
+            try:
+                os.unlink(stub)
+                _stub_st = None
+            except OSError as exc:
+                warn_post_fork(
+                    b"sandbox: mount_ns: etc_overlay pre-create "
+                    b"failed (errno=%d)\n" % (exc.errno or 0,)
+                )
+                continue
+        if _stub_st is None:
             try:
                 host_source = etc_overlay[ns_target]
                 if isinstance(host_source, str) and os.path.isdir(host_source):
@@ -1628,6 +1653,28 @@ def setup_mount_ns(target: str | None, output: str | None,
                         b"create in-sandbox target; skipping bind\n"
                     )
                     continue
+            # Refuse to bind onto a symlink: mount(2) takes a
+            # pathname and resolves it in the PRE-pivot namespace, so
+            # a symlinked target (the host /etc plain-bind lane
+            # serving the stock resolv.conf link) lands the overlay
+            # at the link's HOST-side destination — silently
+            # off-path, with the post-pivot view dangling. The
+            # tmpfs-copy lane replaces such links with stubs before
+            # this loop; anything still a symlink here sits on a
+            # read-only view this code must not follow (fail closed:
+            # same honest un-overlaid outcome as a failed bind).
+            try:
+                if stat_module.S_ISLNK(os.lstat(inside).st_mode):
+                    warn_post_fork(
+                        b"sandbox: mount_ns: etc_overlay target is a "
+                        b"symlink in the sandbox view; refusing to "
+                        b"follow it - overlay entry absent, target "
+                        b"sees the un-overlaid view of this path\n"
+                    )
+                    continue
+            except OSError:
+                # Missing/vanished: the bind below reports it.
+                pass
             try:
                 _bind_pinned_source(host_source, inside, MS_BIND)
             except OSError:
