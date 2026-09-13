@@ -360,15 +360,24 @@ def _load_edge_obligations(out_dir: Path) -> dict[str, Any] | None:
     try:
         from core.audit.edge_review import edge_key
         from core.coverage.journal import load_entries
+        # Latest entry per edge key BEFORE classifying (same discipline
+        # as _load_review_state): the journal is append-only, so a
+        # re-reviewed finding->clean edge would otherwise keep listing
+        # the stale finding row from the superseded entry.
+        latest: dict[str, Any] = {}
         for entry in load_entries(out_dir):
             callee_id = getattr(entry, "edge_callee", None)
             if not callee_id or entry.verdict == "error":
                 continue
-            reviewed_keys.add(entry.key)
+            prev = latest.get(entry.key)
+            if prev is None or entry.ts > prev.ts:
+                latest[entry.key] = entry
+        reviewed_keys = set(latest)
+        for entry in latest.values():
             if entry.verdict == "finding":
                 findings.append({
                     "caller": f"{entry.file}:{entry.function}",
-                    "callee": callee_id,
+                    "callee": entry.edge_callee,
                     "cwe": entry.cwe,
                 })
         unreviewed = [

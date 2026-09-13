@@ -657,3 +657,57 @@ class TestRemainingGapsSetDifference:
             {"functions_analysed": [
                 {"file": "a.c", "function": "f", "status": "clean"}]},
         ) == 4
+
+
+class TestEdgeObligationsBlock:
+    """_load_edge_obligations journal join — latest verdict per edge."""
+
+    @staticmethod
+    def _write_obligations(out_dir: Path) -> None:
+        (out_dir / "edge-obligations.json").write_text(json.dumps({
+            "tier1": [{
+                "caller_file": "src/a.c", "caller": "caller_fn",
+                "callee_file": "src/b.c", "callee": "callee_fn",
+            }],
+            "tier2": [],
+            "blind_spots": [],
+        }))
+
+    @staticmethod
+    def _edge_entry(ts: str, verdict: str):
+        from core.audit.edge_review import edge_callee_id
+        from core.coverage.journal import ReviewJournalEntry
+        return ReviewJournalEntry(
+            ts=ts, run_id="r1", file="src/a.c", function="caller_fn",
+            verdict=verdict, source_hash="",
+            edge_callee=edge_callee_id("src/b.c", "callee_fn"),
+        )
+
+    def test_re_reviewed_finding_to_clean_drops_stale_row(self, tmp_path):
+        from core.audit.report import _load_edge_obligations
+        from core.coverage.journal import append_entry
+        self._write_obligations(tmp_path)
+        append_entry(tmp_path, self._edge_entry(
+            "2026-01-01T00:00:00", "finding"))
+        append_entry(tmp_path, self._edge_entry(
+            "2026-01-02T00:00:00", "clean"))
+        block = _load_edge_obligations(tmp_path)
+        assert block is not None
+        assert "edge_findings" not in block
+        assert block["tier1_unreviewed"] == 0
+
+    def test_latest_finding_listed_exactly_once(self, tmp_path):
+        from core.audit.report import _load_edge_obligations
+        from core.coverage.journal import append_entry
+        self._write_obligations(tmp_path)
+        append_entry(tmp_path, self._edge_entry(
+            "2026-01-01T00:00:00", "clean"))
+        append_entry(tmp_path, self._edge_entry(
+            "2026-01-02T00:00:00", "finding"))
+        block = _load_edge_obligations(tmp_path)
+        assert block is not None
+        assert block.get("edge_findings") == [{
+            "caller": "src/a.c:caller_fn",
+            "callee": self._edge_entry("t", "finding").edge_callee,
+            "cwe": None,
+        }]
