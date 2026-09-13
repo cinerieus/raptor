@@ -239,8 +239,11 @@ class NpmClient:
             _CACHE_KEY_PREFIX, name, base_url=self._base_url,
         )
         if self._cache is not None:
-            cached = self._cache.get(cache_key, ttl_seconds=self._ttl)
-            if cached is not None:
+            # try_get + MISSING is the canonical read everywhere else in
+            # this package; the bare .get worked here only because the
+            # negative sentinel happens to be [] (truthiness-safe).
+            cached = self._cache.try_get(cache_key, ttl_seconds=self._ttl)
+            if cached is not MISSING and cached is not None:
                 return list(cached)
 
         if self._offline:
