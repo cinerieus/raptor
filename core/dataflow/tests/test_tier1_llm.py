@@ -728,3 +728,91 @@ def test_sink_uri_inner_dotdot_resolving_inside_still_reads(tmp_path: Path):
         complete=_fake_complete(reply),
     )
     assert r.status is t1.Tier0Status.SOUND
+
+
+def test_charset_branch_wrapped_declines_js(tmp_path: Path):
+    """Tier 1B charset (guard) kind, non-Python: the guard-and-exit
+    line sits inside an ``if (opts.strict) { ... }`` block that closes
+    before the sink — the flow is live whenever the branch is skipped,
+    so the same conditional-execution gate the known_safe_call kind
+    carries must decline."""
+    (tmp_path / "app.js").write_text(
+        "function serve(req, res, opts) {\n"                          # 1
+        "    let name = req.query.name;\n"                             # 2
+        "    if (opts.strict) {\n"                                     # 3
+        "        if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }\n"     # 4 — wrapped guard
+        "    }\n"                                                      # 5
+        "    return fs.readFile('/data/' + name);\n"                   # 6 — sink
+        "}\n"
+    )
+    diff = "+        if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }\n"
+    reply = json.dumps({
+        "kind": "charset",
+        "validator_source_line":
+            "if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }",
+        "variable_name": "name",
+        "charset": "A-Za-z0-9_", "forbidden": "", "library_call": "",
+    })
+    r = t1.try_tier1b(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.js", sink_line=6, sink_class="pathtrav",
+        language="javascript", complete=_fake_complete(reply),
+    )
+    assert r.status is t1.Tier0Status.NOT_APPLICABLE
+    assert "unconditionally" in r.reasoning
+
+
+def test_charset_unconditional_guard_still_sound_js(tmp_path: Path):
+    """Two-direction: the same guard executed unconditionally in the
+    sink's function keeps its SOUND verdict (the guard's own
+    exit-on-fail block is not an enclosing conditional)."""
+    (tmp_path / "app.js").write_text(
+        "function serve(req, res) {\n"                                 # 1
+        "    let name = req.query.name;\n"                              # 2
+        "    if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }\n"          # 3 — guard
+        "    return fs.readFile('/data/' + name);\n"                    # 4 — sink
+        "}\n"
+    )
+    diff = "+    if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }\n"
+    reply = json.dumps({
+        "kind": "charset",
+        "validator_source_line":
+            "if (!/^[A-Za-z0-9_]+$/.test(name)) { return; }",
+        "variable_name": "name",
+        "charset": "A-Za-z0-9_", "forbidden": "", "library_call": "",
+    })
+    r = t1.try_tier1b(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.js", sink_line=4, sink_class="pathtrav",
+        language="javascript", complete=_fake_complete(reply),
+    )
+    assert r.status is t1.Tier0Status.SOUND
+
+
+def test_charset_branch_wrapped_declines_python_tier1b(tmp_path: Path):
+    """Tier 1B charset kind, Python: dominance flows through
+    validator_dominates_sink, which now carries the enclosing-
+    conditional gate."""
+    (tmp_path / "app.py").write_text(
+        "def serve(request):\n"                                        # 1
+        "    name = request.args.get('name')\n"                        # 2
+        "    if request.strict:\n"                                     # 3
+        "        if not re.fullmatch(r'[A-Za-z0-9_]+', name):\n"       # 4 — wrapped guard
+        "            raise ValueError()\n"                             # 5
+        "    return open('/data/' + name)\n"                           # 6 — sink
+    )
+    diff = "+        if not re.fullmatch(r'[A-Za-z0-9_]+', name):\n"
+    reply = json.dumps({
+        "kind": "charset",
+        "validator_source_line":
+            "if not re.fullmatch(r'[A-Za-z0-9_]+', name):",
+        "variable_name": "name",
+        "charset": "A-Za-z0-9_", "forbidden": "", "library_call": "",
+    })
+    r = t1.try_tier1b(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=6, sink_class="pathtrav",
+        language="python", complete=_fake_complete(reply),
+    )
+    assert r.status is t1.Tier0Status.NOT_APPLICABLE
+    assert "dominate" in r.reasoning

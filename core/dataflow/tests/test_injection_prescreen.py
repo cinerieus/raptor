@@ -460,3 +460,62 @@ class TestNonPythonRebindKill:
         refuted, reason, _conf = self._refute(src, 3, 5)
         assert refuted is False
         assert "value chain" in reason
+
+
+# ---------------------------------------------------------------------------
+# Branch-wrapped validators must never refute a live finding.
+# ---------------------------------------------------------------------------
+
+BRANCH_GUARD_APP = """\
+import os
+import re
+
+
+def handler(request):
+    name = request.args.get('name')
+    if request.strict:
+        if not re.match(r'^[A-Za-z0-9_+-]+$', name):
+            return None
+    cfg = os.path.join('/etc/app', name)
+    open(cfg)
+"""
+BRANCH_GUARD_VALIDATOR_LINE = 8
+BRANCH_GUARD_SINK_LINE = 11
+
+BRANCH_SUB_APP = """\
+import os
+import re
+
+
+def handler(request):
+    name = request.args.get('name')
+    if request.clean:
+        name = re.sub(r'[/\\\\.]+', '', name)
+    open('/etc/app/' + name)
+"""
+BRANCH_SUB_VALIDATOR_LINE = 8
+BRANCH_SUB_SINK_LINE = 9
+
+
+class TestBranchWrappedValidatorNeverRefutes:
+    """`if cond: <sanitizer>` sanitizes only on some paths — the sink
+    stays live whenever the branch is skipped, so the prescreen must
+    yield NO signal (a refutation here suppresses a real finding)."""
+
+    def test_branch_wrapped_guard_no_signal(self, tmp_path):
+        repo = _write_app(tmp_path, BRANCH_GUARD_APP)
+        path = _path("app.py", 6, [BRANCH_GUARD_VALIDATOR_LINE],
+                     BRANCH_GUARD_SINK_LINE)
+        assert prescreen_finding(
+            paths=[path], repo_root=repo,
+            rule_id="py/path-injection",
+        ) is None
+
+    def test_branch_wrapped_sub_no_signal(self, tmp_path):
+        repo = _write_app(tmp_path, BRANCH_SUB_APP)
+        path = _path("app.py", 6, [BRANCH_SUB_VALIDATOR_LINE],
+                     BRANCH_SUB_SINK_LINE)
+        assert prescreen_finding(
+            paths=[path], repo_root=repo,
+            rule_id="py/path-injection",
+        ) is None

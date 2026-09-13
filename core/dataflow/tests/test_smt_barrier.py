@@ -1903,3 +1903,140 @@ def test_try_tier0_assign_mixing_not_sound(tmp_path: Path):
         sink_uri="app.py", sink_line=7, sink_class="cmdi",
     )
     assert r.status is not sb.Tier0Status.SOUND
+
+
+# ---------------------------------------------------------------------------
+# Dominance: enclosing-conditional (branch-wrap) gate.
+#
+# A validator that itself executes only on SOME paths cannot dominate:
+# `if strict: <validator>` followed by an unguarded sink leaves the
+# sink live on every branch-skipping path, and certifying SOUND there
+# suppresses a real finding pre-LLM. The known_safe_call kind carried
+# this gate from birth; these tests pin it on the charset kinds too.
+# ---------------------------------------------------------------------------
+
+def test_branch_wrapped_guard_does_not_dominate():
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    if strict:\n"                                # line 3
+        "        if not re.match(r'^x$', x):\n"           # line 4 = validator
+        "            return error()\n"
+        "    return open(x)\n"                            # line 6 = sink
+    )
+    assert sb.validator_dominates_sink(src, validator_line=4, sink_line=6) is False
+
+
+def test_single_line_guard_is_not_its_own_branch():
+    """A one-line guard's body shares the guard's line; the guard must
+    not read as wrapped by itself (yield guard for the exclusion)."""
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    if not re.match(r'^x$', x): return error()\n"  # line 3
+        "    return open(x)\n"                              # line 4 = sink
+    )
+    assert sb.validator_dominates_sink(src, validator_line=3, sink_line=4) is True
+
+
+def test_branch_wrapped_substitution_does_not_dominate():
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    if opts.clean:\n"                     # line 3
+        "        x = re.sub(r'[/.]+', '', x)\n"    # line 4 = validator
+        "    return open(x)\n"                     # line 5 = sink
+    )
+    assert sb.substitution_dominates_sink(src, 4, 5, "x") is False
+
+
+def test_unconditional_substitution_still_dominates():
+    src = (
+        "def f():\n"
+        "    x = req()\n"
+        "    x = re.sub(r'[/.]+', '', x)\n"        # line 3 = validator
+        "    return open(x)\n"                     # line 4 = sink
+    )
+    assert sb.substitution_dominates_sink(src, 3, 4, "x") is True
+
+
+def test_lexical_branch_wrap_flags_enclosing_conditional():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        "    if (strict) {\n"                                       # line 3
+        '      if (!name.matches("[a-z]+")) { return; }\n'          # line 4 = guard
+        "    }\n"
+        "    open(name);\n"                                         # line 6 = sink
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 4, 6, guard_shaped=True) is True
+
+
+def test_lexical_branch_wrap_exempts_guards_own_block():
+    src = (
+        "class A {\n"
+        "  void f(String name) {\n"
+        '    if (!name.matches("[a-z]+")) {\n'                      # line 3 = guard
+        "      return;\n"
+        "    }\n"
+        "    open(name);\n"                                         # line 6 = sink
+        "  }\n"
+        "}\n"
+    )
+    assert sb._lexical_validator_in_branch(src, 3, 6, guard_shaped=True) is False
+
+
+def test_try_tier0_declined_when_java_guard_branch_wrapped(tmp_path: Path):
+    """End-to-end Java: the guard-and-exit line sits inside an
+    `if (strict) { ... }` block that closes before the sink — the sink
+    runs on paths that skipped the guard, so Tier 0 must decline."""
+    (tmp_path / "App.java").write_text(
+        "void load(String name) {\n"                                                           # line 1
+        "    if (strict) {\n"                                                                  # line 2
+        '        if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException();\n'  # line 3
+        "    }\n"                                                                              # line 4
+        "    Files.readAllBytes(Paths.get(BASE, name));\n"                                     # line 5 = sink
+        "}\n"
+    )
+    diff = (
+        "@@ -1,3 +1,5 @@\n"
+        " void load(String name) {\n"
+        "     if (strict) {\n"
+        '+        if (!name.matches("^[A-Za-z0-9_+-]+$")) throw new IllegalArgumentException();\n'
+        "     }\n"
+        "     Files.readAllBytes(Paths.get(BASE, name));\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="App.java", sink_line=5, sink_class="pathtrav",
+        language="java",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+    assert "enclosing conditional" in r.reasoning
+
+
+def test_try_tier0_declined_when_python_guard_branch_wrapped(tmp_path: Path):
+    (tmp_path / "app.py").write_text(
+        "def load(name):\n"                                     # line 1
+        "    if strict:\n"                                      # line 2
+        "        if not re.match(r'^[A-Za-z0-9_+-]+$', name):\n"  # line 3 = guard
+        "            raise ValueError()\n"                      # line 4
+        "    return open(BASE + name)\n"                        # line 5 = sink
+    )
+    diff = (
+        "@@ -1,3 +1,5 @@\n"
+        " def load(name):\n"
+        "     if strict:\n"
+        "+        if not re.match(r'^[A-Za-z0-9_+-]+$', name):\n"
+        "+            raise ValueError()\n"
+        "     return open(BASE + name)\n"
+    )
+    r = sb.try_tier0(
+        fix_diff=diff, repo_root=tmp_path,
+        sink_uri="app.py", sink_line=5, sink_class="pathtrav",
+        language="python",
+    )
+    assert r.status is sb.Tier0Status.NOT_APPLICABLE
+    assert "does not dominate" in r.reasoning

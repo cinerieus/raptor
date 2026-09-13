@@ -774,6 +774,171 @@ def _validator_block_exits_on_failure(
     return False
 
 
+def _validator_in_branch(
+    tree: ast.AST, validator_line: int, sink_line: int,
+    *, exclude_guard_at: int | None = None,
+) -> bool:
+    """Return True if ``validator_line`` is inside a conditional branch
+    of the function containing the sink — meaning the validator does NOT
+    dominate the sink unconditionally.
+
+    ``exclude_guard_at`` names the line of the validator's OWN ``if``
+    statement for guard-shaped validators (``kind="charset"``): a
+    single-line guard (``if not re.match(...): return``) has its body
+    on the guard's own line, and without the exclusion the guard would
+    read as wrapped by itself. Substitution / safe-call validators are
+    plain statements — callers leave the exclusion unset.
+    """
+    fn = _function_containing(tree, sink_line)
+    body = fn.body if fn else tree.body
+
+    def _in_branch(stmts, target) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, ast.If):
+                if stmt.lineno == exclude_guard_at:
+                    continue
+                if _spans(stmt.body, target) or _spans(stmt.orelse, target):
+                    return True
+            elif isinstance(stmt, (ast.For, ast.While)):
+                if _spans(stmt.body, target):
+                    return True
+            elif isinstance(stmt, ast.Try):
+                for handler in stmt.handlers:
+                    if _spans(handler.body, target):
+                        return True
+                # A conditional nested inside the try body / else /
+                # finally still wraps the validator — descend.
+                if (_in_branch(stmt.body, target)
+                        or _in_branch(stmt.orelse, target)
+                        or _in_branch(stmt.finalbody, target)):
+                    return True
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                # ``with`` executes unconditionally, but its body can
+                # contain conditionals — descend rather than skip.
+                if _in_branch(stmt.body, target):
+                    return True
+            elif isinstance(stmt, ast.Match):
+                # Every case arm is conditional.
+                if any(_spans(case.body, target) for case in stmt.cases):
+                    return True
+        return False
+
+    def _spans(stmts, target) -> bool:
+        for stmt in stmts:
+            if hasattr(stmt, "lineno") and hasattr(stmt, "end_lineno"):
+                if stmt.lineno <= target <= (stmt.end_lineno or stmt.lineno):
+                    return True
+            elif hasattr(stmt, "lineno") and stmt.lineno == target:
+                return True
+        return False
+
+    return _in_branch(body, validator_line)
+
+
+# Block-opening keywords that make a brace block CONDITIONAL (or
+# repeated) — a safe-call inside one does not dominate a sink outside
+# it.  ``else``/``catch``/``case``/``default`` are conditional arms;
+# loops are included because a loop body may execute zero times.
+_COND_BLOCK_KEYWORD = _re.compile(
+    r"\b(?:if|else|for|while|switch|case|default|catch|do)\b"
+)
+# Crude string/comment scrubber for the lexical brace tracker: brace
+# characters inside literals or comments must not perturb the stack.
+_LEXICAL_NOISE = _re.compile(
+    r'"(?:[^"\\]|\\.)*"'
+    r"|'(?:[^'\\]|\\.)*'"
+    r"|`(?:[^`\\]|\\.)*`"
+    r"|/\*.*?\*/"
+    r"|//.*$"
+)
+
+
+def _lexical_validator_in_branch(
+    source_text: str, validator_line: int, sink_line: int,
+    *, guard_shaped: bool = False,
+) -> bool:
+    """Brace-language (JS/TS/Java/C/C++) analogue of
+    :func:`_validator_in_branch`: True when the validator line is
+    conditionally executed relative to the sink.
+
+    Tracks a stack of ``{`` blocks tagged conditional by the keyword
+    preceding the brace.  The validator is branch-wrapped when a
+    conditional block open at the validator line has closed again
+    before the sink line (``if (opts.clean) { x = escape(x); }
+    send(x)``) — sharing the block is fine (whenever the sink runs the
+    validator ran).  A conditional keyword on the validator line
+    itself (braceless ``if (c) x = escape(x);``) also flags, as does a
+    DANGLING guard — ``if (c)`` alone on the nearest preceding
+    non-blank line with no ``{``, whose guarded statement is the
+    validator line (legal Java/JS braceless form the brace tracker
+    never sees).  Residual, not modeled: ternaries, and dangling
+    guards whose condition spans multiple lines (the keyword is then
+    not on the nearest preceding line).  CONSERVATIVE on tracker
+    confusion (unbalanced braces after scrubbing): returns True —
+    "not proven unconditional" must never read as dominance.
+
+    ``guard_shaped=True`` is for ``kind="charset"`` guard validators
+    whose exit-on-fail lives ON the matched line (``if
+    (!x.matches("[a-z]+")) return;``): the guard line legitimately
+    carries a conditional keyword and legitimately opens its own
+    conditional block, so the keyword-on-line / dangling-guard checks
+    are skipped and blocks OPENED on the validator line itself are
+    exempt from the closed-before-sink test.  Enclosing conditional
+    blocks (opened on earlier lines) still flag.
+    """
+    lines = source_text.splitlines()
+    if not (0 < validator_line <= len(lines) and 0 < sink_line <= len(lines)):
+        return True
+    if not guard_shaped:
+        if _COND_BLOCK_KEYWORD.search(
+                _LEXICAL_NOISE.sub(" ", lines[validator_line - 1])):
+            return True
+        # Dangling braceless guard: the nearest preceding non-blank
+        # scrubbed line carries a conditional keyword and opens no
+        # block — the validator line IS its guarded statement.
+        for prev_idx in range(validator_line - 2, -1, -1):
+            prev = _LEXICAL_NOISE.sub(" ", lines[prev_idx])
+            if not prev.strip():
+                continue
+            if _COND_BLOCK_KEYWORD.search(prev) and "{" not in prev:
+                return True
+            break
+    # Each block gets a unique id so "still open at the sink" means the
+    # SAME block, not merely the same nesting depth.
+    stack: list[tuple[int, bool, int]] = []  # (block id, conditional?, open line)
+    at_validator: list[tuple[int, bool, int]] | None = None
+    next_id = 0
+    prev_tail = ""                       # scrubbed text since the last brace
+    for idx, raw in enumerate(lines[:sink_line], start=1):
+        text = _LEXICAL_NOISE.sub(" ", raw)
+        for ch in text:
+            if ch == "{":
+                conditional = bool(_COND_BLOCK_KEYWORD.search(prev_tail))
+                stack.append((next_id, conditional, idx))
+                next_id += 1
+                prev_tail = ""
+            elif ch == "}":
+                if not stack:
+                    return True          # tracker confused — conservative
+                stack.pop()
+                prev_tail = ""
+            else:
+                prev_tail += ch
+        if idx == validator_line:
+            at_validator = list(stack)
+    if at_validator is None:
+        return True
+    # Every conditional block open at the validator must STILL be open
+    # at the sink — one that closed in between means the sink runs on
+    # paths that skipped the validator.
+    open_at_sink = {block_id for block_id, _, _ in stack}
+    return any(
+        conditional and block_id not in open_at_sink
+        for block_id, conditional, open_line in at_validator
+        if not (guard_shaped and open_line == validator_line)
+    )
+
+
 def find_validator_line(source_text: str, spec: ValidatorSpec) -> int | None:
     """Locate the validator's 1-based line number in the post-fix source
     text.  Matches by the stripped line-text the extractor saved on the
@@ -1240,7 +1405,18 @@ def _lexical_validator_dominates(
         return False
     if not _same_function_in_order(tree, validator_line, sink_line):
         return False
-    return _validator_block_exits_on_failure(tree, validator_line)
+    if not _validator_block_exits_on_failure(tree, validator_line):
+        return False
+    # Enclosing-conditional gate: an exit-on-fail guard nested inside
+    # another conditional (``if cond: if not re.match(...): raise``)
+    # executes only on some paths — the sink still runs on paths that
+    # skipped the guard, so certifying dominance would suppress a live
+    # flow. The guard's OWN ``if`` is excluded (a single-line guard
+    # spans its own body). Same gate the known_safe_call kind already
+    # carries in tier1_llm.
+    return not _validator_in_branch(
+        tree, validator_line, sink_line, exclude_guard_at=validator_line,
+    )
 
 
 # Function-definition markers per non-Python language.  Used by the
@@ -1617,6 +1793,13 @@ def _lexical_substitution_dominates(
         return False
     if _variable_reassigned_between(tree, var_name, validator_line, sink_line):
         return False
+    # Enclosing-conditional gate: ``if cond: x = re.sub('[/.]', '', x)``
+    # sanitizes only on some paths — a branch-skipping path reaches the
+    # sink with the raw value, so certifying dominance would suppress a
+    # live flow. Same gate the known_safe_call kind already carries in
+    # tier1_llm.
+    if _validator_in_branch(tree, validator_line, sink_line):
+        return False
     # Loop back-edge: a rebind outside the flat interval still reaches
     # the sink on the next iteration when both share a loop.
     return not _rebound_in_loop_containing_sink(
@@ -1922,21 +2105,34 @@ def try_tier0(
         )
     if language != "python":
         # Non-Python extractors require guard-and-exit on one diff line —
-        # dominance is partly established by the diff itself.  Two
+        # dominance is partly established by the diff itself.  Three
         # additional checks:
         #   1. source order in the post-fix file (cheap textual);
         #   2. no function boundary between validator and sink — without
         #      an AST per language, a regex-based function-definition
         #      heuristic plugs the cross-function-dominance hole that
-        #      source-order alone would create.
-        dominates = (line < sink_line and not _crosses_function_boundary(
-            source_text, line, sink_line, language,
-        ))
-        why = (f"either out of source order, or a function boundary "
+        #      source-order alone would create;
+        #   3. the guard is not wrapped in an ENCLOSING conditional that
+        #      closes before the sink (``if (opts.strict) { if (!ok)
+        #      return; } use(x)``) — the sink then runs on paths that
+        #      skipped the guard.  guard_shaped exempts the guard's own
+        #      exit-on-fail block.
+        dominates = (
+            line < sink_line
+            and not _crosses_function_boundary(
+                source_text, line, sink_line, language,
+            )
+            and not _lexical_validator_in_branch(
+                source_text, line, sink_line,
+                guard_shaped=(spec.kind == "charset"),
+            )
+        )
+        why = (f"either out of source order, a function boundary "
                f"appears between the validator at line {line} and the "
                f"sink at line {sink_line} (the validator's exit-on-fail "
                f"would then return from a different function than the "
-               f"sink's)")
+               f"sink's), or the validator is wrapped in an enclosing "
+               f"conditional the sink does not share")
     elif spec.kind == "charset_sub":
         # Phase 7 plumbing: pass the resolved absolute path + CWE +
         # language through so the dominance function can consult the

@@ -55,6 +55,7 @@ from core.dataflow.smt_barrier import (
     _STR_LITERAL,
     ValidatorSpec,
     _crosses_function_boundary,
+    _lexical_validator_in_branch,
     _python_chain_reaches_sink,
     _lexical_var_reaches_sink,
     extract_validator_from_line,
@@ -309,9 +310,17 @@ def _step_refutes_path(
     else:
         # Non-Python guard shapes carry exit-on-fail in the matched
         # line itself; source order + no intervening function boundary
-        # is the remaining dominance evidence (same as the patch flow).
-        dominates = step_line < sink_line and not _crosses_function_boundary(
-            source_text, step_line, sink_line, language,
+        # + not wrapped in an enclosing conditional the sink does not
+        # share is the remaining dominance evidence (same as the patch
+        # flow).
+        dominates = (
+            step_line < sink_line
+            and not _crosses_function_boundary(
+                source_text, step_line, sink_line, language,
+            )
+            and not _lexical_validator_in_branch(
+                source_text, step_line, sink_line, guard_shaped=True,
+            )
         )
     if not dominates:
         return False, "validator does not dominate the sink", 0.0
