@@ -1098,13 +1098,19 @@ class TestPromoteCleanRefuted:
         r.sweep_promoted = 0
         return r
 
-    def _config(self, tmp_path):
+    def _config(self, tmp_path, caller_gate=False):
+        # caller_gate defaults off here: this class's subject is the
+        # SMT-confirm promotion mechanics; the caller-side gate has
+        # its own suite (test_smt_caller_gate.py).
         from core.audit.orchestrator import OrchestratorConfig
         src = tmp_path / "src.c"
         src.write_text("int f(int x) { return x + 1; }\n")
         out = tmp_path / "out"
-        out.mkdir()
-        return OrchestratorConfig(target_path=tmp_path, out_dir=out)
+        out.mkdir(exist_ok=True)
+        return OrchestratorConfig(
+            target_path=tmp_path, out_dir=out,
+            smt_promotion_caller_gate=caller_gate,
+        )
 
     def test_skips_non_clean(self, tmp_path):
         from core.audit.orchestrator import _promote_clean_refuted

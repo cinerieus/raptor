@@ -200,6 +200,16 @@ from .record import (
     load_audit_log,
 )
 from .shared_state import SharedState
+# Hoisted (not lazy): the caller-gate crash handler must be able to
+# construct a fail-closed hold decision even when a lazy import of
+# this module is the failure itself — a broken module fails loudly at
+# orchestrator import instead of taking down the sweep-promotion
+# phase mid-run.  evaluate_caller_gate stays lazily imported at the
+# consult site so tests can monkeypatch the module attribute.
+from .smt_promotion_gate import (
+    GATE_VERDICT as _SMT_CALLER_GATE_VERDICT,
+    CallerGateDecision,
+)
 from .sweep import (
     SarifCache,
     run_coccinelle_sweep,
@@ -611,6 +621,24 @@ class OrchestratorConfig:
     # writes a suppressions.jsonl record; pinned gaps are exempt.
     vendored_triage: bool = True
     sweep_validate_findings: bool = True
+    # Caller-side gate on clean-refuted SMT promotions: before an SMT
+    # receipt earned against a self-refuted hypothesis lifts a clean
+    # outcome to finding, re-derive the receipt's own precondition
+    # (the callee parameter the verb solved over) and adjudicate it at
+    # the in-repo call sites via the api_boundary channel (see
+    # core.audit.smt_promotion_gate). On: a receipt whose flagged
+    # state every enumerated caller upholds — pinned constants,
+    # sizeof-bounded lengths, range checks above the call — stays
+    # suspicious-with-receipt instead of minting a finding; the
+    # intra-procedural solver cannot see caller invariants, and this
+    # lane's confirms are exactly the shape that over-promotes on
+    # them. Off: every SMT confirm in the lane promotes directly —
+    # maximum recall for trees whose in-repo call sites are not
+    # representative of the real consumers (exported-API libraries
+    # with hostile out-of-tree callers), at the cost of caller-proof
+    # false positives shipping as findings. Never demotes below
+    # suspicious in either setting.
+    smt_promotion_caller_gate: bool = True
     # Wall-time bound for the zero-dispatch re-sweep: the post-loop
     # receipt-supply pass that dispatches the CWE-mapped mechanical
     # chain for every suspicious outcome whose review dispatched no
@@ -23422,6 +23450,188 @@ def _note_premise_blocked_validation(
     _queue_premise_study_question(config, outcome, h)
 
 
+def _smt_caller_gate_decision(
+    config: OrchestratorConfig,
+    outcome: ReviewOutcome,
+    verb: str,
+    mechanism: str,
+    source: str,
+    *,
+    line_end: int | None = None,
+) -> CallerGateDecision | None:
+    """Caller-side gate consult for one clean-refuted SMT confirm.
+
+    Returns the gate decision, or ``None`` ONLY when the gate is
+    disabled by config — ``None`` restores the pre-gate direct
+    promotion.  Errors fail CLOSED: the evaluator returns an
+    error-class hold itself, and this wrapper's own belt-and-braces
+    catch converts any remaining crash into the same hold — an errored
+    caller-side check leaves the receipt with no counter-evidence
+    channel in either direction, and on this lane a wrong promotion
+    mints a false finding while a wrong hold keeps everything at
+    suspicious-with-receipt.  The errored consult is stamped with its
+    error class (body marker, audit log, suppressions record), so an
+    errored-gate outcome is never artifact-identical to a knob-off
+    run.
+    """
+    if not getattr(config, "smt_promotion_caller_gate", True):
+        return None
+    try:
+        from .smt_promotion_gate import evaluate_caller_gate
+
+        return evaluate_caller_gate(
+            config.target_path,
+            outcome.file,
+            outcome.function,
+            verb,
+            mechanism,
+            source=source or "",
+            def_span=(
+                (outcome.line, line_end)
+                if outcome.line and line_end else None
+            ),
+            inventory=getattr(config, "inventory", None),
+        )
+    except Exception as e:
+        logger.warning(
+            "smt caller gate errored for %s:%s — holding the "
+            "promotion (fail-closed)",
+            outcome.file, outcome.function, exc_info=True,
+        )
+        # CallerGateDecision comes from the module-top import: this
+        # handler must work even when the lazy import above IS the
+        # failure (a re-import here would re-raise and take down the
+        # whole sweep-promotion phase).
+        return CallerGateDecision(
+            action="hold",
+            reason=(
+                f"caller-contract gate: evaluation errored "
+                f"({type(e).__name__}) — receipt held at suspicious; "
+                "an errored check is not caller evidence in either "
+                "direction"
+            ),
+            channel_outcome="error",
+            error_class=type(e).__name__,
+        )
+
+
+def _hold_smt_promotion(
+    result: OrchestratorResult,
+    config: OrchestratorConfig,
+    i: int,
+    outcome: ReviewOutcome,
+    tool: str,
+    mechanism: str,
+    gate: CallerGateDecision,
+) -> None:
+    """Hold one clean-refuted SMT promotion at suspicious-with-receipt.
+
+    The receipt is preserved verbatim (``clean-refuted:<tool>`` stays
+    the evidence stamp — a mechanical receipt is never talked away),
+    the journal body carries the gate's caller-side reason, and the
+    held promotion is recorded through the suppressions.jsonl
+    chokepoint with ``dropped: false`` so the decision is auditable.
+    Promotion-only by construction: clean → suspicious, never below.
+    A later hypothesis of the same function may hold again (markers
+    accumulate on the body; verdict counters move only on the first
+    clean → suspicious transition).
+    """
+    stamp = f"clean-refuted:{tool}"
+    base = result.outcomes[i]
+    prior_status = base.status
+    held = ReviewOutcome(
+        file=outcome.file,
+        function=outcome.function,
+        status="suspicious",
+        body=(
+            f"[smt-caller-gate: {gate.reason}] "
+            f"LLM self-refuted this hypothesis; {tool} confirmed it "
+            f"intra-procedurally; the caller-side check held the "
+            f"promotion: {mechanism[:200]}\n\n{base.body}"
+        ),
+        hypothesis=mechanism,
+        hypotheses=outcome.hypotheses,
+        evidence_tool=stamp,
+        cost_usd=outcome.cost_usd,
+        model=outcome.model,
+        duration_s=outcome.duration_s,
+        review_result=outcome.review_result,
+        line=outcome.line,
+    )
+    held.tools_dispatched = outcome.tools_dispatched
+    held.tools_errored = outcome.tools_errored
+    held.tools_skipped = outcome.tools_skipped
+    held.semantic_confidence = outcome.semantic_confidence
+    held.function_qualified = getattr(outcome, "function_qualified", "")
+    if held.review_result is not None:
+        held.review_result["evidence_tool"] = stamp
+        held.review_result["smt_caller_gate"] = {
+            "action": "hold",
+            "reason": gate.reason,
+            "precondition": gate.precondition,
+            "site_count": gate.site_count,
+            "channel_outcome": gate.channel_outcome,
+            "error_class": gate.error_class,
+        }
+    result.outcomes[i] = held
+    if prior_status == "clean":
+        result.refuted_rescued += 1
+        result.clean -= 1
+        result.suspicious += 1
+    _increment_tier_dict(
+        result.tier_counters, "refuted_sweep", "caller_gate_held",
+    )
+    append_audit_log(config.out_dir, {
+        "action": "smt_promotion_caller_gate_held",
+        "key": f"{outcome.file}:{outcome.function}:{outcome.line or 0}",
+        "file": outcome.file,
+        "function": outcome.function,
+        "status": "suspicious",
+        "prior_status": prior_status,
+        "evidence_tool": stamp,
+        "hypothesis": mechanism,
+        # site_count and error_class travel on the suppressions.jsonl
+        # record; the gate reason here already names both in prose.
+        "reason": gate.reason,
+    })
+    try:
+        from core.analysis.reach_chokepoint import record_suppression
+
+        record_suppression(
+            Path(config.out_dir),
+            finding={
+                "finding_id": (
+                    f"audit-smt-caller-gate:{outcome.file}:"
+                    f"{outcome.function}:{outcome.line or 0}"
+                ),
+                "rule_id": stamp,
+                "file_path": outcome.file,
+                "line": outcome.line or 0,
+                "function": outcome.function,
+            },
+            verdict=_SMT_CALLER_GATE_VERDICT,
+            reason=gate.reason,
+            dropped=False,
+            extra={
+                "stage": "clean-refuted-promotion",
+                "precondition": gate.precondition,
+                "site_count": gate.site_count,
+                "channel_outcome": gate.channel_outcome,
+                "error_class": gate.error_class,
+                "held_at": "suspicious",
+            },
+        )
+    except Exception:
+        logger.debug(
+            "smt caller gate suppression record failed", exc_info=True,
+        )
+    logger.info(
+        "clean-refuted promotion held %s:%s via %s — %s "
+        "(clean → suspicious with receipt)",
+        outcome.file, outcome.function, tool, gate.reason,
+    )
+
+
 def _promote_clean_refuted(
     result: OrchestratorResult,
     config: OrchestratorConfig,
@@ -23437,7 +23647,13 @@ def _promote_clean_refuted(
     per function, ranked by mechanism specificity):
 
     1. SMT verification-role verb (the historical lane): a confirm is
-       strong enough to promote clean → finding.
+       strong enough to promote clean → finding, subject to the
+       caller-side gate (``config.smt_promotion_caller_gate``): the
+       receipt's own precondition is adjudicated at the in-repo call
+       sites, and a receipt every caller upholds — or one that binds
+       no caller-checkable precondition — holds at
+       suspicious-with-receipt instead (see
+       :mod:`core.audit.smt_promotion_gate`).
     2. Cheap-channel tool chain (semgrep/SMT/coccinelle/compiler; the
        expensive Joern/CodeQL channels are included only when the
        refutation is NOT high-confidence): a confirm on a self-refuted
@@ -23564,11 +23780,62 @@ def _promote_clean_refuted(
                         continue
 
                     tool = "+".join(confirmed)
-                    result.outcomes[i] = _promote_outcome(
+                    gate = _smt_caller_gate_decision(
+                        config, outcome, smt_verb, mechanism, source,
+                        line_end=line_end,
+                    )
+                    if gate is not None and gate.action == "hold":
+                        _hold_smt_promotion(
+                            result, config, i, outcome, tool,
+                            mechanism, gate,
+                        )
+                        # A hold resolves only THIS receipt — the
+                        # remaining ranked hypotheses (one may carry
+                        # a caller-VIOLATING precondition) keep both
+                        # lanes; only a genuine promotion
+                        # short-circuits the function.  Lane 2 for
+                        # the SAME hypothesis is skipped: its SMT
+                        # receipt already stands on the held outcome,
+                        # and a cheap-channel rescue would overwrite
+                        # that stamp with a weaker one.
+                        continue
+                    promoted_outcome = _promote_outcome(
                         outcome, f"clean-refuted:{tool}",
                     )
+                    if gate is not None and gate.citation:
+                        promoted_outcome.body = (
+                            f"[smt-caller-gate: {gate.citation}]\n\n"
+                            f"{promoted_outcome.body}"
+                        )
+                    # The gate record must describe THIS promotion —
+                    # an earlier hypothesis' hold record surviving on
+                    # a status=finding outcome would contradict the
+                    # verdict for every consumer of review_result.
+                    if isinstance(promoted_outcome.review_result, dict):
+                        if gate is not None:
+                            promoted_outcome.review_result[
+                                "smt_caller_gate"
+                            ] = {
+                                "action": "promote",
+                                "reason": gate.reason,
+                                "precondition": gate.precondition,
+                                "site_count": gate.site_count,
+                                "channel_outcome": gate.channel_outcome,
+                                "error_class": gate.error_class,
+                            }
+                        else:
+                            promoted_outcome.review_result.pop(
+                                "smt_caller_gate", None,
+                            )
+                    # An earlier hypothesis' gate hold may have moved
+                    # this slot to suspicious already.
+                    prior_status = result.outcomes[i].status
+                    result.outcomes[i] = promoted_outcome
                     result.sweep_promoted += 1
-                    result.clean -= 1
+                    if prior_status == "suspicious":
+                        result.suspicious -= 1
+                    else:
+                        result.clean -= 1
                     result.findings += 1
                     logger.info(
                         "clean-refuted promoted %s:%s via %s (LLM refuted, SMT confirmed)",
@@ -23657,6 +23924,30 @@ def _promote_clean_refuted(
                 continue
 
             tool = "+".join(high_prec)
+            # An earlier hypothesis' caller-gate hold may have moved
+            # this slot to suspicious already: build on the current
+            # body (markers accumulate) and move the verdict counters
+            # only on a genuine clean → suspicious transition.
+            _l2_base = result.outcomes[i]
+            _l2_prior = _l2_base.status
+            # A standing tool receipt on the slot (e.g. the held
+            # verification-role clean-refuted stamp) must not be
+            # displaced by a cheap-channel confirm for a different
+            # hypothesis: provenance-append instead — the stronger
+            # stamp keeps grading, the new channel stays visible.
+            _l2_stamp = tool
+            if (
+                _l2_base.evidence_tool
+                and _l2_base.evidence_tool != tool
+            ):
+                from .evidence_grade import is_tool_evidence
+                if is_tool_evidence(_l2_base.evidence_tool):
+                    _l2_parts = _l2_base.evidence_tool.split("+")
+                    _l2_stamp = "+".join(
+                        _l2_parts
+                        + [p for p in tool.split("+")
+                           if p not in _l2_parts],
+                    )
             rescued = ReviewOutcome(
                 file=outcome.file,
                 function=outcome.function,
@@ -23665,11 +23956,11 @@ def _promote_clean_refuted(
                     f"[refuted-hypothesis-confirmed via {tool}] "
                     f"LLM self-refuted this hypothesis; a mechanical "
                     f"tool confirmed it: {mechanism[:200]}\n\n"
-                    f"{outcome.body}"
+                    f"{_l2_base.body}"
                 ),
                 hypothesis=mechanism,
                 hypotheses=outcome.hypotheses,
-                evidence_tool=tool,
+                evidence_tool=_l2_stamp,
                 cost_usd=outcome.cost_usd,
                 model=outcome.model,
                 duration_s=outcome.duration_s,
@@ -23680,20 +23971,23 @@ def _promote_clean_refuted(
                 outcome, "function_qualified", "",
             )
             if rescued.review_result is not None:
-                rescued.review_result["evidence_tool"] = tool
+                rescued.review_result["evidence_tool"] = _l2_stamp
                 rescued.review_result["refuted_hypothesis_confirmed"] = True
             result.outcomes[i] = rescued
-            result.refuted_rescued += 1
-            result.clean -= 1
-            result.suspicious += 1
+            if _l2_prior == "clean":
+                # A slot an earlier gate hold already rescued to
+                # suspicious counts once.
+                result.refuted_rescued += 1
+                result.clean -= 1
+                result.suspicious += 1
             append_audit_log(config.out_dir, {
                 "action": "refuted_hypothesis_confirmed",
                 "key": f"{outcome.file}:{outcome.function}:{outcome.line or 0}",
                 "file": outcome.file,
                 "function": outcome.function,
                 "status": "suspicious",
-                "prior_status": "clean",
-                "evidence_tool": tool,
+                "prior_status": _l2_prior,
+                "evidence_tool": _l2_stamp,
                 "hypothesis": mechanism,
             })
             logger.info(

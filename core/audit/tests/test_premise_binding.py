@@ -100,7 +100,13 @@ class TestCleanRefutedLaneIntegration:
         (target / "a.c").write_text("int f(int n) { return n * 4; }\n")
         out = tmp_path / "out"
         out.mkdir()
-        config = OrchestratorConfig(target_path=target, out_dir=out)
+        # Caller gate off: this class's subject is premise binding;
+        # the caller-side gate has its own suite
+        # (test_smt_caller_gate.py).
+        config = OrchestratorConfig(
+            target_path=target, out_dir=out,
+            smt_promotion_caller_gate=False,
+        )
         outcome = ReviewOutcome(
             file="a.c", function="f", status="clean",
             body="clean after refutation",
