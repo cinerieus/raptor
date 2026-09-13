@@ -63,6 +63,9 @@ def extract_conditions_from_flow_trace(
     conditions = []
 
     for step in trace.get("steps", trace.get("hops", [])):
+        if not isinstance(step, dict):
+            # LLM-authored traces can carry malformed steps.
+            continue
         raw_conditions = step.get("path_conditions", [])
         for cond in raw_conditions:
             if isinstance(cond, str):
