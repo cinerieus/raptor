@@ -1124,6 +1124,10 @@ def _write_ledger(pid: int, records: list[dict],
     unknown = list(unknown or [])
 
     def _render() -> list[str]:
+        # Ordering contract: run records BEFORE pin witnesses (then
+        # unknown lines). The hook readers (raptor-hook-read and
+        # core/coverage/track_read.py) early-stop their run-record
+        # scan at the first pin line on this invariant.
         out = [
             f"{r['status']} {r['epoch']} {r['run_id']} {r['run_dir']}"
             for r in records

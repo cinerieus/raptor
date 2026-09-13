@@ -86,6 +86,12 @@ def _find_session_run(session_pid):
         if "\r" in line:
             continue  # CRLF lines: the bash twin drops them too
         parts = line.split(" ", 3)
+        if parts and parts[0] == "pin":
+            # Writer invariant: run records render BEFORE pin records,
+            # so nothing below a pin line is a run record. The bash
+            # twin early-stops here too; without this the twins
+            # diverge on a (writer-bug) running-after-pin line.
+            break
         if len(parts) != 4 or parts[0] != "running":
             continue
         epoch, run_dir = parts[1], parts[3]

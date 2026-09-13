@@ -101,6 +101,20 @@ class PythonTwinSessionTest(_LedgerCase):
         run_dir, _target = self._resolve()
         self.assertEqual(run_dir, str(ok))
 
+    def test_scan_stops_at_first_pin_line(self):
+        # Writer invariant: run records render BEFORE pin witnesses,
+        # so nothing below a pin is a run record. The bash twin
+        # early-stops there; the python twin must match — a
+        # (writer-bug) running line after a pin is ignored by both.
+        before = self._mk_run("scan_before")
+        after = self._mk_run("scan_after")
+        (self.sessions_dir / f"{self.pid}.run").write_text(
+            f"running 100 {before.name} {before}\n"
+            f"pin 100 {before.name} - {before}\n"
+            f"running 200 {after.name} {after}\n")
+        run_dir, _ = self._resolve()
+        self.assertEqual(run_dir, str(before))
+
     def test_newest_valid_live_run_wins(self):
         old = self._mk_run("old_run")
         new = self._mk_run("new_run")
