@@ -783,6 +783,29 @@ class TestPhase5SessionIntegrity(unittest.TestCase):
             self.assertIn("skipping ALL authenticated checks", joined)
 
 
+class TestValidatePostpassFailureSurfacing(unittest.TestCase):
+    def test_validate_crash_is_loud_and_recorded(self):
+        """The operator opted into --validate; its crash must show at
+        default log level and in the report's phase list, not DEBUG."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scanner = _make_scanner(tmpdir)
+            finding = _oracle_finding(status="needs_review")
+            with patch(
+                "core.security.rule_of_two.is_interactive",
+                return_value=True,
+            ), patch(
+                "shutil.which", return_value="/usr/bin/claude",
+            ), patch(
+                "core.orchestration.agentic_passes.run_validate_postpass",
+                side_effect=RuntimeError("stage runner crashed"),
+            ), self.assertLogs("raptor", level="WARNING") as captured:
+                result = scanner._phase_validate([finding])
+            self.assertEqual(result, [finding])
+            self.assertIn("validate_failed", scanner._phases_completed)
+            self.assertNotIn("validate", set(scanner._phases_completed) - {"validate_failed"})
+            self.assertIn("/validate failed", "\n".join(captured.output))
+
+
 class TestPreflightSchemeUpgradeGuidance(unittest.TestCase):
     """An http target that 301s to its own https origin must produce an
     actionable error naming that origin, not a generic unreachable."""

@@ -2380,7 +2380,15 @@ class WebScanner:
                 logger.info("Phase 7a: /validate complete")
                 self._phases_completed.append("validate")
         except Exception as e:
-            logger.debug("Phase 7a: /validate failed: %s", self._redact(str(e)))
+            # The operator explicitly opted into --validate: a crash of
+            # the post-pass is coverage loss, surfaced at WARNING and in
+            # the report's phase list (same doctrine as check failures),
+            # never a debug-only detail.
+            self._phases_completed.append("validate_failed")
+            logger.warning(
+                "Phase 7a: /validate failed -- findings keep their "
+                "pre-validation status: %s", self._redact(str(e)),
+            )
 
         return findings
 
