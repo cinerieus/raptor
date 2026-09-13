@@ -519,7 +519,7 @@ class TestAnnotationsDirWiring:
         (ann_dir / "auth.c.md").write_text(
             "## old_fn\n"
             "<!-- meta: status=clean hash=0000000000 "
-            "line_start=1 line_end=1 -->\n\n"
+            "start_line=1 end_line=1 -->\n\n"
             "Reviewed before the rewrite.\n",
             encoding="utf-8",
         )

@@ -1188,9 +1188,14 @@ def cmd_stale(args: argparse.Namespace) -> int:
             stale_count += 1
             continue
 
+        # The annotation writer (raptor-annotate) stamps the span as
+        # start_line/end_line — NOT the checklist's line_start/line_end
+        # spelling. Reading the wrong keys resolved both to 0, so the
+        # hash recompute below never ran and drifted annotations were
+        # reported fresh.
         try:
-            line_start = int(ann.metadata.get("line_start", "0") or "0")
-            line_end = int(ann.metadata.get("line_end", "0") or "0")
+            line_start = int(ann.metadata.get("start_line", "0") or "0")
+            line_end = int(ann.metadata.get("end_line", "0") or "0")
         except (ValueError, TypeError):
             line_start, line_end = 0, 0
         if line_start and line_end:
