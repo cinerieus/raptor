@@ -75,6 +75,19 @@ _DOC_TEXT_SCHEMAS = {
 }
 
 
+def _ruling(finding):
+    """The finding's ruling dict, or {} when absent or non-dict.
+
+    LLM-authored stage files sometimes carry a bare-string ruling
+    ("confirmed"); calling .get() on it raised AttributeError and
+    wedged the helper mid-merge. A non-dict ruling is NO ruling — it
+    neither confirms nor rules out (fail closed: malformed shapes
+    never mint a verdict).
+    """
+    r = finding.get("ruling")
+    return r if isinstance(r, dict) else {}
+
+
 def _save_artifact(path, data):
     """Sanitise free text, stamp provenance, and save a working doc.
 
@@ -1340,7 +1353,10 @@ def prepare_D(workdir, target=None):
         b = b if isinstance(b, dict) else {}
         c = c if isinstance(c, dict) else {}
         if a or b or c:
-            finding.setdefault("ruling", {})
+            # A non-dict ruling (bare LLM string) is no ruling; replace
+            # rather than crash on the item assignment below.
+            if not isinstance(finding.get("ruling"), dict):
+                finding["ruling"] = {}
             finding["ruling"]["evidence_synthesis"] = {
                 "stage_a_confidence": a.get("confidence", ""),
                 "stage_b_hypothesis": b.get("hypothesis_status", "none"),
@@ -1715,7 +1731,7 @@ def _discover_and_match_binaries(workdir, target, data, build=None,
     for finding in data.get("findings", []):
         if finding.get("status") == "disproven":
             continue
-        if finding.get("ruling", {}).get("status") == "ruled_out":
+        if _ruling(finding).get("status") == "ruled_out":
             continue
         if finding.get("vuln_type", "") not in MEMORY_CORRUPTION_TYPES:
             finding.setdefault("feasibility", {})["status"] = "not_applicable"
@@ -1884,7 +1900,7 @@ def _finding_binaries(findings):
     for f in findings or []:
         if not isinstance(f, dict) or f.get("status") == "disproven":
             continue
-        if f.get("ruling", {}).get("status") == "ruled_out":
+        if _ruling(f).get("status") == "ruled_out":
             continue
         bp = f.get("feasibility", {}).get("binary_path", "")
         if not bp or bp in binaries or not Path(bp).is_file():
@@ -1919,7 +1935,7 @@ def _finding_poc_payload(findings, binary):
     for f in findings or []:
         if not isinstance(f, dict) or f.get("status") == "disproven":
             continue
-        if f.get("ruling", {}).get("status") == "ruled_out":
+        if _ruling(f).get("status") == "ruled_out":
             continue
         if f.get("feasibility", {}).get("binary_path", "") != binary:
             continue
@@ -2167,7 +2183,7 @@ def prepare_E(workdir, target=None, dynamic=None, build=None,
     for finding in data["findings"]:
         if finding.get("status") == "disproven":
             continue
-        if finding.get("ruling", {}).get("status") == "ruled_out":
+        if _ruling(finding).get("status") == "ruled_out":
             continue
         fid = finding.get("id", "?")
         sd = finding.get("stage_d_summary")
@@ -2177,9 +2193,9 @@ def prepare_E(workdir, target=None, dynamic=None, build=None,
             print(f"  WARN: {fid} stage_d_summary missing 'ruling' key", file=sys.stderr)
 
     ruled_out = sum(1 for f in data["findings"]
-                    if f.get("ruling", {}).get("status") == "ruled_out")
+                    if _ruling(f).get("status") == "ruled_out")
     confirmed = sum(1 for f in data["findings"]
-                    if f.get("ruling", {}).get("status") in ("confirmed", "exploitable"))
+                    if _ruling(f).get("status") in ("confirmed", "exploitable"))
     print(f"Ruling: {confirmed} confirmed, {ruled_out} ruled out")
 
     _save_findings(workdir, data)
@@ -2332,8 +2348,7 @@ def prepare_F(workdir, target=None):
             continue
         if not (feas.get("chain_breaks") or feas.get("what_would_help")):
             continue
-        ruling = finding.get("ruling") or {}
-        if ruling.get("status") not in ("confirmed", "exploitable"):
+        if _ruling(finding).get("status") not in ("confirmed", "exploitable"):
             continue
         verdict = _derive_verdict_from_source(feas)
         feas["status"] = "analyzed"

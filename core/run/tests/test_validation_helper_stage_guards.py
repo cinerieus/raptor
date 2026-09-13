@@ -338,3 +338,45 @@ class TestStageSchemaHints:
         for stage in ("A", "B", "C", "D", "E", "F"):
             assert stage in mod.STAGE_SCHEMA_HINTS, stage
         assert "stage-e.json" in mod.STAGE_SCHEMA_HINTS["E"]
+
+
+class TestNonDictRulingShapes:
+    """A bare-string / non-dict ``ruling`` (LLM-authored) is NO
+    ruling: consumers must neither crash nor read it as a verdict."""
+
+    def test_ruling_accessor_tolerates_every_shape(self):
+        mod = _load_helper()
+        assert mod._ruling({"ruling": {"status": "confirmed"}}) == {
+            "status": "confirmed",
+        }
+        for junk in ("confirmed", ["confirmed"], 7, None, True):
+            assert mod._ruling({"ruling": junk}) == {}
+        assert mod._ruling({}) == {}
+
+    def test_string_ruling_never_counts_as_verdict(self):
+        # Fail closed: a malformed shape neither confirms nor rules
+        # out — both directions matter (a string "ruled_out" must not
+        # drop the finding; a string "confirmed" must not promote it).
+        mod = _load_helper()
+        f_conf = {"ruling": "confirmed"}
+        f_ruled = {"ruling": "ruled_out"}
+        assert mod._ruling(f_conf).get("status") != "confirmed"
+        assert mod._ruling(f_ruled).get("status") != "ruled_out"
+
+    def test_finding_binaries_survives_string_ruling(self, tmp_path):
+        mod = _load_helper()
+        bx = tmp_path / "x.bin"
+        by = tmp_path / "y.bin"
+        for p in (bx, by):
+            p.write_bytes(b"\x7fELF" + b"\x00" * 12)
+        findings = [
+            _finding("F-1", ruling="confirmed",
+                     feasibility={"binary_path": str(bx)}),
+            _finding("F-2", ruling={"status": "ruled_out"},
+                     feasibility={"binary_path": str(by)}),
+        ]
+        binaries = mod._finding_binaries(findings)
+        # No AttributeError; the dict-shaped ruled_out finding is
+        # skipped, the string-ruling finding stays in play.
+        assert str(bx) in binaries
+        assert str(by) not in binaries
