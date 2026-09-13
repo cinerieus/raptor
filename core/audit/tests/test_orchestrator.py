@@ -5267,6 +5267,118 @@ class TestSageCombinedPathway:
             assert obs["kind"] == "tool_confirmation"
 
 
+class TestSageRecallGate:
+    """The pre-LLM SAGE recall gate in review_one_function.
+
+    A prior clean/dormant hypothesis verdict with a matching source
+    hash skips the LLM review entirely; findings/suspicious always
+    re-test; ``config.sage_recall`` and the force bypasses gate it.
+    Hermetic: the hook function is stubbed at its module seam, so no
+    SAGE client is ever contacted.
+    """
+
+    def _run(self, tmp_path: Path, recall, *, config_kw=None):
+        from unittest.mock import patch as _patch
+
+        target, out = _setup_target(tmp_path)
+        calls: list[str] = []
+
+        def review_fn(ctx, config):
+            calls.append(ctx["function"])
+            return ReviewOutcome(
+                file=ctx["file"], function=ctx["function"],
+                status="clean", body="looked fine",
+            )
+
+        config = OrchestratorConfig(
+            target_path=target, out_dir=out, resume=False,
+            sweep_validate_findings=False, batch_sloc_threshold=0,
+            joern_overrides={"enabled": False},
+            **(config_kw or {}),
+        )
+        with _patch(
+            "core.sage.hooks.recall_audit_hypothesis_verdict",
+            side_effect=recall,
+        ) as mock_recall:
+            result = run_orchestrator(config, review_fn)
+        return result, calls, mock_recall
+
+    def test_prior_clean_verdict_skips_llm(self, tmp_path: Path):
+        from core.audit.journal import latest_entries
+
+        result, calls, mock_recall = self._run(
+            tmp_path,
+            lambda **kw: {
+                "status": "clean",
+                "tool": "semgrep:x",
+                "source_hash": kw["source_hash"],
+            },
+        )
+
+        assert calls == []  # LLM never invoked
+        assert result.prefilter_skipped == 2
+        assert mock_recall.call_count == 2
+        kw = mock_recall.call_args[1]
+        assert kw["file_path"] == "src/auth.c"
+        assert kw["function"] in ("check_pw", "validate")
+        assert kw["source_hash"]  # real hash from the real source
+
+        # The skip is journaled as a real outcome with the recall
+        # provenance stamp — coverage and reports see it.
+        entries = latest_entries(tmp_path / "out")
+        entry = entries.get("src/auth.c:check_pw")
+        assert entry is not None
+        assert entry.verdict == "clean"
+        assert entry.evidence_tools == ["sage:recall:semgrep:x"]
+
+    def test_prior_dormant_verdict_skips_as_dormant(self, tmp_path: Path):
+        result, calls, _ = self._run(
+            tmp_path,
+            lambda **kw: {"status": "dormant", "tool": ""},
+        )
+        assert calls == []
+        assert all(o.status == "dormant" for o in result.outcomes)
+
+    def test_prior_finding_status_never_skips(self, tmp_path: Path):
+        """Findings and suspicious verdicts always re-test — even if a
+        hook ever returned one, the gate must not skip on it."""
+        _, calls, _ = self._run(
+            tmp_path,
+            lambda **kw: {"status": "finding", "tool": "semgrep:x"},
+        )
+        assert sorted(calls) == ["check_pw", "validate"]
+
+    def test_no_prior_verdict_reviews_normally(self, tmp_path: Path):
+        _, calls, mock_recall = self._run(tmp_path, lambda **kw: None)
+        assert sorted(calls) == ["check_pw", "validate"]
+        assert mock_recall.call_count == 2
+
+    def test_sage_recall_flag_disables_gate(self, tmp_path: Path):
+        _, calls, mock_recall = self._run(
+            tmp_path,
+            lambda **kw: {"status": "clean", "tool": ""},
+            config_kw={"sage_recall": False},
+        )
+        assert sorted(calls) == ["check_pw", "validate"]
+        mock_recall.assert_not_called()
+
+    def test_force_bypasses_recall(self, tmp_path: Path):
+        _, calls, mock_recall = self._run(
+            tmp_path,
+            lambda **kw: {"status": "clean", "tool": ""},
+            config_kw={"force": True},
+        )
+        assert sorted(calls) == ["check_pw", "validate"]
+        mock_recall.assert_not_called()
+
+    def test_recall_failure_never_blocks_review(self, tmp_path: Path):
+        def _boom(**kw):
+            raise RuntimeError("sage unavailable")
+
+        _, calls, _ = self._run(tmp_path, _boom)
+        assert sorted(calls) == ["check_pw", "validate"]
+
+
 class TestDeadCodeReason:
     """Tests for _dead_code_reason helper."""
 
