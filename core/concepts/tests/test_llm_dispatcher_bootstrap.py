@@ -180,3 +180,89 @@ class TestMinConfidenceValidation:
         )
         assert res.returncode == 2
         assert "invalid choice" in res.stderr
+
+
+# ------------------------------------------------------------------
+# raptor-study-prep concept seeding
+# ------------------------------------------------------------------
+
+
+class TestStudyPrepSeedingClient:
+    """Concept seeding must honour a keyless --model pin (Bedrock /
+    claudecode / ollama are keyless BY DESIGN — study-run's gate
+    documents the set) and bootstrap the dispatcher route like its
+    siblings; pre-fix a pinned Bedrock run seeded concepts with a
+    DIFFERENT model than it studied with, and standalone prep on a
+    Bedrock default silently degraded to unseeded extraction."""
+
+    @pytest.fixture
+    def prep_mod(self) -> ModuleType:
+        return _load_script(
+            RAPTOR_DIR / "libexec" / "raptor-study-prep",
+            "raptor_study_prep_bootstrap",
+        )
+
+    def _seed(self, monkeypatch, prep_mod, *, api_key, provider,
+              model="pinned-model"):
+        seen: dict = {}
+
+        class _Client:
+            config = SimpleNamespace(primary_model=None,
+                                     fallback_models=[])
+
+            def generate(self, prompt, max_tokens=0):
+                return SimpleNamespace(content="[]")
+
+        client = _Client()
+
+        def fake_get_client(config=None):
+            seen["config"] = config
+            return client
+
+        mod = ModuleType("packages.llm_analysis")
+        mod.get_client = fake_get_client
+        monkeypatch.setitem(sys.modules, "packages.llm_analysis", mod)
+
+        class _FakeLLMConfig:
+            def __init__(self, primary_model=None, fallback_models=None):
+                self.primary_model = primary_model
+                self.fallback_models = fallback_models or []
+
+            def config_for_model(self, name):
+                return SimpleNamespace(api_key=api_key,
+                                       provider=provider, name=name)
+
+        import core.llm.config as llm_config
+        monkeypatch.setattr(llm_config, "LLMConfig", _FakeLLMConfig)
+
+        routes: list = []
+        import core.llm.dispatcher.lifecycle as lifecycle
+        monkeypatch.setattr(
+            lifecycle, "ensure_route_for_model_configs",
+            lambda configs, **kw: routes.append(list(configs)),
+        )
+        prep_mod._llm_seed_concepts_from_names(
+            ["ownership"], ["a_fn", "b_fn"], model=model)
+        return seen, routes
+
+    def test_keyless_pin_reaches_get_client(self, monkeypatch, prep_mod):
+        seen, routes = self._seed(
+            monkeypatch, prep_mod, api_key=None, provider="bedrock")
+        assert seen["config"] is not None, (
+            "keyless --model pin was silently dropped"
+        )
+        assert seen["config"].primary_model.provider == "bedrock"
+        assert routes, "dispatcher route bootstrap never ran"
+
+    def test_keyed_pin_still_reaches_get_client(self, monkeypatch,
+                                                prep_mod):
+        seen, _ = self._seed(
+            monkeypatch, prep_mod, api_key="k", provider="test")
+        assert seen["config"] is not None
+        assert seen["config"].primary_model.api_key == "k"
+
+    def test_unknown_keyless_provider_falls_back(self, monkeypatch,
+                                                 prep_mod):
+        seen, _ = self._seed(
+            monkeypatch, prep_mod, api_key=None, provider="mystery")
+        assert seen["config"] is None

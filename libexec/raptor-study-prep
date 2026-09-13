@@ -2005,13 +2005,34 @@ def _llm_seed_concepts_from_names(
             from core.llm.config import LLMConfig
             cfg = LLMConfig()
             mc = cfg.config_for_model(model)
-            if mc.api_key:
+            # Keyless providers (Bedrock, claudecode, ollama) are
+            # legitimate pins — study-run's gate documents the set.
+            # Pre-fix `if mc.api_key` silently dropped the pin for
+            # them, so a pinned Bedrock/CC run seeded concepts with a
+            # DIFFERENT model than it studied with.
+            keyless_ok = {"bedrock", "claudecode",
+                          "claudecode-resumable", "ollama"}
+            if mc.api_key or mc.provider in keyless_ok:
                 client = get_client(config=LLMConfig(
                     primary_model=mc, fallback_models=[]))
             else:
                 client = get_client()
         else:
             client = get_client()
+        if client is not None:
+            # Dispatcher-only providers (Bedrock-routed) need an
+            # in-process route — both sibling CLIs bootstrap it; prep
+            # was the copy that was never made, so standalone prep on
+            # a Bedrock default silently degraded to unseeded
+            # extraction. Same shape as study-run's helper.
+            from core.llm.dispatcher.lifecycle import (
+                ensure_route_for_model_configs,
+            )
+            configs = [getattr(client.config, "primary_model", None)]
+            configs += list(
+                getattr(client.config, "fallback_models", []) or [])
+            ensure_route_for_model_configs(
+                configs, label="raptor-study-prep")
     except Exception:  # noqa: BLE001 - seeding is best-effort
         print("study-prep: WARNING: no LLM available for concept seeding",
               file=sys.stderr)
