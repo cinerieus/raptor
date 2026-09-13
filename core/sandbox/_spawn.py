@@ -1881,12 +1881,21 @@ def run_sandboxed(
         # mount-ns (fresh tmpfs masks /run's pathname sockets; the rest
         # of the host is read-only under pivot_root) on top of its
         # netns (abstract sockets are namespace-scoped). Mirrors the
-        # child-side engagement condition at step 9; a mount failure
-        # aborts the child before the payload runs, and the caller's
-        # fallback re-runs through the preexec path where AF_UNIX
-        # stays blocked. Needed for Python >= 3.14 multiprocessing
-        # (forkserver listener) inside sandboxed tools.
-        _allow_unix = bool((target or output) and not skip_mount_ns)
+        # child-side engagement condition at step 9 — INCLUDING
+        # rootfs-only spawns (cve-env / fuzzing image runs pass
+        # neither target nor output): rootfs mode mounts the same
+        # per-sandbox /tmp + /run tmpfs (step 7) and minimal-dev
+        # /dev/shm, so the allowance rationale and the supervisor's
+        # tmpfs-dev pins hold identically; excluding it left
+        # unix-socket IPC (postgres/php-fpm entrypoints, Python >=
+        # 3.14 forkserver) EPERM-blocked inside image workloads. A
+        # mount failure aborts the child before the payload runs, and
+        # the caller's fallback re-runs through the preexec path
+        # where AF_UNIX stays blocked. Needed for Python >= 3.14
+        # multiprocessing (forkserver listener) inside sandboxed
+        # tools.
+        _allow_unix = bool((target or output or rootfs)
+                           and not skip_mount_ns)
         # CONNECT SCOPING for the allowed AF_UNIX sockets (enforcement
         # mode). allow_unix's harmlessness rationale has one hole: the
         # OUTPUT dir is a READ-WRITE bind, so a host-side (or sibling-
