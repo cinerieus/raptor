@@ -53,6 +53,7 @@ from core.llm.semantic_entropy import divergence
 from core.security.redaction import redact_secrets
 
 from . import _MAX_REASONING_CHARS
+from ._batch import record_event_batch
 from .scorecard import EventType, ModelScorecard
 
 logger = logging.getLogger(__name__)
@@ -95,9 +96,10 @@ def record_reasoning_divergence(
     mutate records the orchestrator later serialises into
     ``orchestrated_report.json``.
 
-    Failure path: any per-event ``record_event`` exception is logged
-    at debug level and swallowed; one bad event must not abort the
-    whole batch and must never block the calling orchestrator's flow.
+    Failure path: events are written through ``record_event_batch``,
+    whose contract is never-raise — a rejected batch degrades to
+    isolated per-event writes with per-event warnings, so one bad
+    event cannot abort the rest or block the calling orchestrator.
     """
     if scorecard is None or not correlation or not per_finding_results:
         return 0
@@ -105,7 +107,7 @@ def record_reasoning_divergence(
     if not confidence:
         return 0
 
-    n_recorded = 0
+    pending: list[dict] = []
     for fid, signal in confidence.items():
         if signal not in ("high", "high-negative"):
             # Disputed findings → handled by ``record_consensus_outcomes``.
@@ -175,23 +177,19 @@ def record_reasoning_divergence(
                         f"outlier of {int(metric['n_models'])} models"
                     ),
                 }
-            try:
-                scorecard.record_event(
-                    decision_class=decision_class,
-                    model=model,
-                    event_type=EventType.REASONING_DIVERGENCE,
-                    outcome=outcome,
-                    sample=sample,
-                )
-                n_recorded += 1
-            except Exception as e:                       # noqa: BLE001
-                # WARNING (not DEBUG): see consensus.py for rationale.
-                logger.warning(
-                    "record_reasoning_divergence: failed to record "
-                    "%s/%s on %s: %s",
-                    model, decision_class, fid, e,
-                )
-    return n_recorded
+            pending.append({
+                "decision_class": decision_class,
+                "model": model,
+                "event_type": EventType.REASONING_DIVERGENCE,
+                "outcome": outcome,
+                "sample": sample,
+            })
+    # One lock/load/verify/rewrite cycle for the whole walk instead of
+    # one per event (see _batch's rationale).
+    return record_event_batch(
+        scorecard, pending, log=logger,
+        producer="record_reasoning_divergence",
+    )
 
 
 __all__ = [

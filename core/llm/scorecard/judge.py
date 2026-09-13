@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 
 from . import _MAX_REASONING_CHARS
+from ._batch import record_event_batch
 from .scorecard import EventType, ModelScorecard
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ def record_judge_outcomes(
     if scorecard is None or not results_by_id:
         return 0
 
-    n_recorded = 0
+    pending: list[dict] = []
     for fid, result in results_by_id.items():
         if not isinstance(result, dict) or "error" in result:
             continue
@@ -103,8 +104,7 @@ def record_judge_outcomes(
 
         # Primary's outcome
         primary_correct = (primary_vote == final_verdict)
-        if _record_one(
-            scorecard,
+        pending.append(_event(
             decision_class=decision_class,
             model=primary_model,
             model_version=result.get("resolved_model"),
@@ -117,16 +117,14 @@ def record_judge_outcomes(
                 f"panel of {len(judge_analyses)} judge(s) voted "
                 f"{'exploitable' if final_verdict else 'not exploitable'}"
             ),
-        ):
-            n_recorded += 1
+        ))
 
         # Each judge's outcome
         for ja in judge_analyses:
             judge_model = str(ja.get("model") or "?")
             judge_vote = bool(ja.get("is_exploitable"))
             judge_correct = (judge_vote == final_verdict)
-            if _record_one(
-                scorecard,
+            pending.append(_event(
                 decision_class=decision_class,
                 model=judge_model,
                 model_version=ja.get("resolved_model"),
@@ -139,13 +137,16 @@ def record_judge_outcomes(
                     f"panel majority voted "
                     f"{'exploitable' if final_verdict else 'not exploitable'}"
                 ),
-            ):
-                n_recorded += 1
-    return n_recorded
+            ))
+    # One lock/load/verify/rewrite cycle for the whole run — a
+    # disputed multi-judge run over hundreds of findings previously
+    # paid that full cycle per event (see _batch's rationale).
+    return record_event_batch(
+        scorecard, pending, log=logger, producer="record_judge_outcomes",
+    )
 
 
-def _record_one(
-    scorecard: ModelScorecard,
+def _event(
     *,
     decision_class: str,
     model: str,
@@ -153,30 +154,22 @@ def _record_one(
     sample_reasoning: str | None,
     other_summary: str,
     model_version: str | None = None,
-) -> bool:
+) -> dict:
+    """Build one ``record_events`` entry for a JUDGE_REVIEW outcome."""
     sample = None
     if outcome == "incorrect" and sample_reasoning is not None:
         sample = {
             "this_reasoning": sample_reasoning[:_MAX_REASONING_CHARS],
             "other_reasoning": other_summary,
         }
-    try:
-        scorecard.record_event(
-            decision_class=decision_class,
-            model=model,
-            event_type=EventType.JUDGE_REVIEW,
-            outcome=outcome,
-            model_version=model_version,
-            sample=sample,
-        )
-        return True
-    except Exception as e:                              # noqa: BLE001
-        # WARNING (not DEBUG): see consensus.py for rationale.
-        logger.warning(
-            "record_judge_outcomes: failed to record %s/%s: %s",
-            model, decision_class, e,
-        )
-        return False
+    return {
+        "decision_class": decision_class,
+        "model": model,
+        "event_type": EventType.JUDGE_REVIEW,
+        "outcome": outcome,
+        "model_version": model_version,
+        "sample": sample,
+    }
 
 
 __all__ = ["record_judge_outcomes"]

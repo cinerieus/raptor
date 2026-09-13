@@ -30,6 +30,7 @@ import logging
 from typing import Any
 
 from . import _MAX_REASONING_CHARS
+from ._batch import record_event_batch
 from .scorecard import EventType, ModelScorecard
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,40 @@ def classify_outcome(
     return None
 
 
+def _build_event(
+    *,
+    model: str,
+    cwe: str | None,
+    prior_verdict: str,
+    validate_verdict: str,
+    file: str = "",
+    function: str = "",
+    reason: str = "",
+) -> dict[str, Any] | None:
+    """``record_events`` entry for one feedback record, or ``None``
+    when the pair carries no reliability signal."""
+    if not model:
+        return None
+    outcome = classify_outcome(prior_verdict, validate_verdict)
+    if outcome is None:
+        return None
+    sample = None
+    if outcome == "incorrect":
+        sample = {
+            "function_id": f"{file}:{function}",
+            "prior_verdict": prior_verdict,
+            "validate_verdict": validate_verdict,
+            "reason": (reason or "")[:_MAX_REASONING_CHARS],
+        }
+    return {
+        "decision_class": _decision_class(cwe),
+        "model": str(model),
+        "event_type": EventType.VALIDATE_FEEDBACK,
+        "outcome": outcome,
+        "sample": sample,
+    }
+
+
 def record_validate_feedback_outcome(
     scorecard: ModelScorecard | None,
     *,
@@ -78,26 +113,19 @@ def record_validate_feedback_outcome(
     reason: str = "",
 ) -> bool:
     """Record one VALIDATE_FEEDBACK event. Returns True when recorded."""
-    if scorecard is None or not model:
+    if scorecard is None:
         return False
-    outcome = classify_outcome(prior_verdict, validate_verdict)
-    if outcome is None:
+    ev = _build_event(
+        model=model, cwe=cwe, prior_verdict=prior_verdict,
+        validate_verdict=validate_verdict, file=file, function=function,
+        reason=reason,
+    )
+    if ev is None:
         return False
-    sample = None
-    if outcome == "incorrect":
-        sample = {
-            "function_id": f"{file}:{function}",
-            "prior_verdict": prior_verdict,
-            "validate_verdict": validate_verdict,
-            "reason": (reason or "")[:_MAX_REASONING_CHARS],
-        }
     try:
         scorecard.record_event(
-            decision_class=_decision_class(cwe),
-            model=str(model),
-            event_type=EventType.VALIDATE_FEEDBACK,
-            outcome=outcome,
-            sample=sample,
+            ev["decision_class"], ev["model"], ev["event_type"],
+            ev["outcome"], sample=ev["sample"],
         )
         return True
     except Exception as e:  # noqa: BLE001 — telemetry must never break the feedback import
@@ -130,10 +158,9 @@ def record_validate_feedback_outcomes(
             logger.debug("validate_feedback: scorecard unavailable",
                          exc_info=True)
             return 0
-    n = 0
+    pending: list[dict[str, Any]] = []
     for rec in records:
-        if record_validate_feedback_outcome(
-            scorecard,
+        ev = _build_event(
             model=rec.get("model") or "",
             cwe=rec.get("cwe"),
             prior_verdict=rec.get("prior_verdict") or "",
@@ -141,8 +168,14 @@ def record_validate_feedback_outcomes(
             file=rec.get("file") or "",
             function=rec.get("function") or "",
             reason=rec.get("reason") or "",
-        ):
-            n += 1
+        )
+        if ev is not None:
+            pending.append(ev)
+    # One lock/load/verify/rewrite cycle for the whole import instead
+    # of one per event (see _batch's rationale).
+    n = record_event_batch(
+        scorecard, pending, log=logger, producer="validate-feedback",
+    )
     if n:
         logger.info("validate-feedback scorecard: %d events", n)
     return n

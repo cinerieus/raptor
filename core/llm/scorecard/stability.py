@@ -21,6 +21,7 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from . import _MAX_REASONING_CHARS
+from ._batch import record_event_batch
 from .scorecard import EventType, ModelScorecard
 
 if TYPE_CHECKING:
@@ -140,7 +141,7 @@ def record_cross_run_stability(
     if not prior_verdicts:
         return 0
 
-    n_recorded = 0
+    pending: list[dict] = []
     for fid, result in results_by_id.items():
         if result.get("is_exploitable") is None:
             continue
@@ -180,20 +181,17 @@ def record_cross_run_stability(
                 "this_reasoning": reasoning[:_MAX_REASONING_CHARS],
             }
 
-        try:
-            scorecard.record_event(
-                decision_class,
-                model,
-                EventType.CROSS_RUN_STABILITY,
-                outcome,
-                model_version=model_version,
-                sample=sample,
-            )
-            n_recorded += 1
-        except Exception:
-            logger.warning(
-                "cross-run stability: record_event failed for %s",
-                fid, exc_info=True,
-            )
+        pending.append({
+            "decision_class": decision_class,
+            "model": model,
+            "event_type": EventType.CROSS_RUN_STABILITY,
+            "outcome": outcome,
+            "model_version": model_version,
+            "sample": sample,
+        })
 
-    return n_recorded
+    # One lock/load/verify/rewrite cycle for the whole comparison
+    # instead of one per event (see _batch's rationale).
+    return record_event_batch(
+        scorecard, pending, log=logger, producer="cross-run stability",
+    )

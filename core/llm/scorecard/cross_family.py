@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from . import _MAX_REASONING_CHARS
+from ._batch import record_event_batch
 from .scorecard import EventType, ModelScorecard
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ def record_cross_family_outcomes(
     if scorecard is None:
         return 0
 
-    n_recorded = 0
+    pending: list[dict] = []
     for fid, result in results_by_id.items():
         cf = result.get("cross_family_check")
         if not isinstance(cf, dict):
@@ -91,20 +92,17 @@ def record_cross_family_outcomes(
                 )[:_MAX_REASONING_CHARS],
             }
 
-        try:
-            scorecard.record_event(
-                decision_class,
-                str(checker_model),
-                EventType.CROSS_FAMILY_CONSISTENCY,
-                outcome,
-                model_version=model_version,
-                sample=sample,
-            )
-            n_recorded += 1
-        except Exception:
-            logger.warning(
-                "cross-family check: record_event failed for %s",
-                fid, exc_info=True,
-            )
+        pending.append({
+            "decision_class": decision_class,
+            "model": str(checker_model),
+            "event_type": EventType.CROSS_FAMILY_CONSISTENCY,
+            "outcome": outcome,
+            "model_version": model_version,
+            "sample": sample,
+        })
 
-    return n_recorded
+    # One lock/load/verify/rewrite cycle for the whole walk instead of
+    # one per event (see _batch's rationale).
+    return record_event_batch(
+        scorecard, pending, log=logger, producer="cross-family check",
+    )
