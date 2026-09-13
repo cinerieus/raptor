@@ -91,7 +91,24 @@ def _resolve_project_dir(explicit: str | None = None) -> Path | None:
         p = Path(explicit)
         if p.is_dir():
             return p
-        return None
+        # Accept a registry NAME like the rest of the operator
+        # surface (project doctrine: explicit values are a hard
+        # error when invalid, never a silent fallback — pre-fix a
+        # bad --project degraded every layer to "no data").
+        try:
+            from core.json import load_json
+            from core.startup import PROJECTS_DIR
+            data = load_json(PROJECTS_DIR / f"{explicit}.json")
+            if isinstance(data, dict) and data.get("output_dir"):
+                candidate = Path(data["output_dir"])
+                if candidate.is_dir():
+                    return candidate
+        except Exception:  # noqa: BLE001 — fall through to the hard error
+            pass
+        print(f"raptor-review: --project {explicit!r} is neither a "
+              "project directory nor a registered project name",
+              file=sys.stderr)
+        sys.exit(2)
     # The active-project pointer lives at ~/.raptor/projects/.active and
     # is a symlink to the project's <name>.json FILE; the project
     # directory is that JSON's output_dir (the same derivation the run
@@ -309,7 +326,11 @@ def cmd_show(args) -> None:
 
 
 def _show_function(file, function, cm, entries, index, ann_dir, args, out_dir=None):
-    key = f"{file}:{function}"
+    # Shared injective key (file component percent-encoded) — a raw
+    # f-string key misses journal entries for paths containing ':'
+    # or '%'.
+    from core.coverage.journal import make_function_key
+    key = make_function_key(file, function)
     role = _context_map_role(cm, file, function)
     ann = _load_annotation(ann_dir, file, function)
     suppressions = _load_suppression_records(out_dir, file, function)
@@ -571,7 +592,8 @@ def cmd_history(args):
     """Show all reviews of a function over time."""
     out_dir = _resolve_out_dir(args)
     project_dir = _project_dir_for(args)
-    key = f"{args.file}:{args.function}"
+    from core.coverage.journal import make_function_key
+    key = make_function_key(args.file, args.function)
 
     entries = [e for e in _load_journal_entries(out_dir) if e.key == key]
 
