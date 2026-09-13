@@ -457,25 +457,3 @@ class TestOutput:
         assert report.matches == []
         assert report.errors == ["semgrep sg @ %s: sandbox unavailable"
                                  % target]
-
-
-class TestCli:
-    def test_missing_target_exits_2(self, tmp_path, capsys):
-        rc = rs.main([str(tmp_path / "nope")])
-        assert rc == 2
-        assert "do not exist" in capsys.readouterr().err
-
-    def test_empty_library_happy_path(self, tmp_path, capsys):
-        target = tmp_path / "t"
-        target.mkdir()
-        out = tmp_path / "out"
-        rc = rs.main([
-            str(target),
-            "--library-dir", str(tmp_path / "no-library"),
-            "--out", str(out),
-            "--no-record",
-        ])
-        assert rc == 0
-        assert (out / "matches.jsonl").exists()
-        assert (out / "summary.json").exists()
-        assert "0 match(es)" in capsys.readouterr().out

@@ -20,6 +20,10 @@ Engine coverage:
   (packages/codeql/database_manager) and run against CACHED databases
   only — a sweep must never trigger new database builds.
 
+Library API only: the raptor-variant-sweep CLI that used to front
+this module was removed as an undiscoverable orphan; run_sweep /
+write_report are the supported entry points for future wiring.
+
 Feedback: matches are recorded back into the library via
 ``RuleLibrary.update`` with an EMPTY triage list — that records target
 coverage and match counts while leaving ``tp_rate`` untouched
@@ -31,11 +35,9 @@ would corrupt the precision the replay gate is built on.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import logging
-import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -490,83 +492,3 @@ def write_report(report: SweepReport, out_dir: Path) -> Path:
     summary_path = out_dir / "summary.json"
     save_json(summary_path, report.summary_dict(), sort_keys=True)
     return matches_path
-
-
-def _print_summary(report: SweepReport) -> None:
-    by_rule: dict[str, list[SweepMatch]] = {}
-    for m in report.matches:
-        by_rule.setdefault(m.rule_id, []).append(m)
-    print(
-        f"variant-sweep: {len(report.targets)} target(s), "
-        f"{report.rules_semgrep} semgrep + {report.rules_coccinelle} "
-        f"coccinelle library rule(s) + {report.rules_graduated} "
-        f"graduated, {len(report.matches)} match(es)"
-    )
-    for rule_id in sorted(by_rule):
-        ms = by_rule[rule_id]
-        hit_targets = len({m.target for m in ms})
-        first = ms[0]
-        tp = f"{first.tp_rate:.0%}" if first.tp_rate is not None else "n/a"
-        print(
-            f"  {rule_id}  [{first.engine} {first.cwe or '-'} "
-            f"{first.provenance} tp={tp}]  "
-            f"{len(ms)} match(es) across {hit_targets} target(s)"
-        )
-    if report.capped:
-        print(f"  ⚠ {len(report.capped)} rule/target pair(s) hit the "
-              f"{MATCH_CAP}-match cap; see summary.json")
-    if report.cocci_skipped_targets:
-        print(
-            "  coccinelle skipped (no C sources): "
-            + ", ".join(report.cocci_skipped_targets)
-        )
-    if report.errors:
-        print(f"  ⚠ {len(report.errors)} error(s); see summary.json")
-
-
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(
-        prog="raptor-variant-sweep",
-        description=(
-            "Replay the proven rule library (and optionally graduated "
-            "engine rules) across multiple targets — zero-LLM variant "
-            "hunting. Matches are ranked by each rule's earned "
-            "precision tier."
-        ),
-    )
-    p.add_argument("targets", nargs="+", type=Path,
-                   help="target directories/files to sweep")
-    p.add_argument("--library-dir", type=Path, default=None,
-                   help="rule library dir (default: out/rule-library)")
-    p.add_argument("--engine-rules-dir", type=Path, default=None,
-                   help=("project engine-rules dir; its "
-                         "semgrep/rules/*.yaml graduated rules join "
-                         "the sweep"))
-    p.add_argument("--out", type=Path, default=None,
-                   help=("output dir (default: "
-                         "out/variant-sweep/runs/<ts>)"))
-    p.add_argument("--no-record", action="store_true",
-                   help=("do not record sweep matches back onto library "
-                         "entries (coverage/match counts only; "
-                         "precision is never touched either way)"))
-    args = p.parse_args(argv)
-
-    missing = [str(t) for t in args.targets if not Path(t).exists()]
-    if missing:
-        print(f"targets do not exist: {missing}", file=sys.stderr)
-        return 2
-
-    if args.out is None:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        args.out = Path("out/variant-sweep/runs") / ts
-
-    report = run_sweep(
-        [Path(t) for t in args.targets],
-        library_dir=args.library_dir,
-        engine_rules_dir=args.engine_rules_dir,
-        record=not args.no_record,
-    )
-    matches_path = write_report(report, args.out)
-    _print_summary(report)
-    print(f"matches: {matches_path}")
-    return 0
