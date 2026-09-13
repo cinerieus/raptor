@@ -407,11 +407,11 @@ class LogStreamer:
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._stopped = threading.Event()
-        # Scope-required + lineage state (see class docstring). All of
-        # it is guarded by _scope_lock. The process-tree probes are
+        # Lineage state (see class docstring; _require_scope itself is
+        # assigned with the PID-scoping block below). All of it is
+        # guarded by _scope_lock. The process-tree probes are
         # injectable so tests drive attribution deterministically
         # without a real /proc, ps, or getpgid.
-        self._require_scope = bool(require_scope)
         # Fail-closed warm-up: when True, a warm-up gate miss raises
         # AuditWarmUpError from start() instead of proceeding
         # best-effort (see start()'s docstring for the trade-offs).
