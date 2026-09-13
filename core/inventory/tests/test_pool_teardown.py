@@ -35,8 +35,29 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _wedge() -> None:
+def _wedge(sentinel: str = "") -> None:
+    if sentinel:
+        Path(sentinel).touch()
     time.sleep(600)
+
+
+def _submit_wedge_started(pool: ProcessPoolExecutor, tmp_path: Path) -> None:
+    """Submit the wedge task and wait — deadline-polled, never a fixed
+    sleep — until the worker has STARTED it. The SIGTERM-timing
+    assertions need the worker inside the task body (initializer done,
+    handler/mask state installed); the fixed 0.5s sleep this replaces
+    was the file's one sleep-based sync and flaked on starved runners
+    (teardown raced the worker bootstrap, so a SIGTERM-immune worker
+    died to plain SIGTERM instead of the asserted SIGKILL escalation).
+    """
+    sentinel = tmp_path / "wedge-task-started"
+    pool.submit(_wedge, str(sentinel))
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        if sentinel.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError("worker never started the wedge task")
 
 
 def _blocking_handler(signum: int, frame: FrameType | None) -> None:
@@ -58,7 +79,7 @@ def _wait_dead(procs: list, timeout_s: float) -> bool:
     return False
 
 
-def test_teardown_kills_sigterm_immune_worker_via_sigkill() -> None:
+def test_teardown_kills_sigterm_immune_worker_via_sigkill(tmp_path: Path) -> None:
     """A worker whose inherited SIGTERM handler blocks must still die:
     the teardown escalates to SIGKILL after its grace window."""
     ctx = multiprocessing.get_context("fork")
@@ -68,8 +89,7 @@ def test_teardown_kills_sigterm_immune_worker_via_sigkill() -> None:
     )
     procs: list = []
     try:
-        pool.submit(_wedge)
-        time.sleep(0.5)  # let the worker start the task
+        _submit_wedge_started(pool, tmp_path)
         procs = list(pool._processes.values())
         assert procs, "worker never spawned"
         t0 = time.monotonic()
@@ -95,7 +115,7 @@ def test_teardown_kills_sigterm_immune_worker_via_sigkill() -> None:
 # and test_production_worker_unblocks_inherited_sigterm_mask (identical
 # assertion, adversarial parent state).
 @pytest.mark.slow
-def test_teardown_lets_responsive_worker_die_on_sigterm() -> None:
+def test_teardown_lets_responsive_worker_die_on_sigterm(tmp_path: Path) -> None:
     """A production-shaped worker dies to terminate() — no gratuitous
     SIGKILL inside the grace window.
 
@@ -114,8 +134,7 @@ def test_teardown_lets_responsive_worker_die_on_sigterm() -> None:
     )
     procs: list = []
     try:
-        pool.submit(_wedge)
-        time.sleep(0.5)
+        _submit_wedge_started(pool, tmp_path)
         procs = list(pool._processes.values())
         assert procs, "worker never spawned"
         _shutdown_pool_nowait(pool, kill_grace_s=10.0)
@@ -133,7 +152,7 @@ def _salvage_shaped_handler(signum: int, frame: FrameType | None) -> None:
     time.sleep(600)
 
 
-def test_production_worker_sheds_inherited_salvage_handler() -> None:
+def test_production_worker_sheds_inherited_salvage_handler(tmp_path: Path) -> None:
     """Deterministic replay of the observed poisoning: the parent
     carries a salvage-shaped SIGTERM handler at fork; a
     production-initialized worker must still die BY SIGTERM, fast —
@@ -147,8 +166,7 @@ def test_production_worker_sheds_inherited_salvage_handler() -> None:
             max_workers=1, mp_context=ctx,
             initializer=_init_inventory_worker, initargs=_INIT_ARGS,
         )
-        pool.submit(_wedge)
-        time.sleep(0.5)
+        _submit_wedge_started(pool, tmp_path)
         procs = list(pool._processes.values())
         assert procs, "worker never spawned"
         _shutdown_pool_nowait(pool, kill_grace_s=10.0)
@@ -161,7 +179,7 @@ def test_production_worker_sheds_inherited_salvage_handler() -> None:
                 p.kill()
 
 
-def test_production_worker_unblocks_inherited_sigterm_mask() -> None:
+def test_production_worker_unblocks_inherited_sigterm_mask(tmp_path: Path) -> None:
     """The sibling hole: the MASK is inherited separately from the
     disposition — SIGTERM blocked in the forking thread leaves the
     signal pending-forever in the child even with SIG_DFL. The
@@ -175,8 +193,7 @@ def test_production_worker_unblocks_inherited_sigterm_mask() -> None:
             max_workers=1, mp_context=ctx,
             initializer=_init_inventory_worker, initargs=_INIT_ARGS,
         )
-        pool.submit(_wedge)
-        time.sleep(0.5)
+        _submit_wedge_started(pool, tmp_path)
         procs = list(pool._processes.values())
         assert procs, "worker never spawned"
         _shutdown_pool_nowait(pool, kill_grace_s=10.0)
@@ -197,7 +214,7 @@ def test_production_worker_unblocks_inherited_sigterm_mask() -> None:
 # same helper end-to-end and its worker only dies at all when the
 # snapshot preceded shutdown().
 @pytest.mark.slow
-def test_teardown_snapshot_precedes_shutdown() -> None:
+def test_teardown_snapshot_precedes_shutdown(tmp_path: Path) -> None:
     """The regression itself: shutdown() nulls ``_processes``, so a
     post-shutdown snapshot sees nothing to kill and a plainly wedged
     worker leaks. The helper must reap it regardless.
@@ -213,8 +230,7 @@ def test_teardown_snapshot_precedes_shutdown() -> None:
     )
     procs: list = []
     try:
-        pool.submit(_wedge)
-        time.sleep(0.5)
+        _submit_wedge_started(pool, tmp_path)
         procs = list(pool._processes.values())
         assert procs
         _shutdown_pool_nowait(pool, kill_grace_s=5.0)
