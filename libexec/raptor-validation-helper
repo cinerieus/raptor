@@ -142,7 +142,13 @@ def _is_validated(workdir, filename):
     current = hashlib.sha256(filepath.read_bytes()).hexdigest()
     for line in vfile.read_text().splitlines():
         if line.startswith(f"{filename}:"):
-            return line.split(":", 1)[1].strip() == current
+            recorded = line.split(":", 1)[1].strip()
+            # raptor-validate-schema records ``type:hash`` (the cache
+            # is keyed by WHICH validator passed); older records are a
+            # bare hash. Compare the hash component — a reader pinned
+            # to one form silently never matches the other and the
+            # documented skip becomes dead code.
+            return recorded.rsplit(":", 1)[-1] == current
     return False
 
 
