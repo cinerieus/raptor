@@ -67,6 +67,22 @@ def main() -> int:
         )
         return 0
 
+    # checklist.json is a mutable run artefact — corroborate against
+    # the target_path sealed into .raptor-run.json at run start, like
+    # every other checklist consumer. Without this a tampered
+    # checklist steers joern-parse at an arbitrary tree and poisons
+    # the project CPG cache that the taint enricher imports as ground
+    # truth.
+    from core.run.metadata import corroborate_target_path
+    mismatch = corroborate_target_path(understand_dir, target_path)
+    if mismatch:
+        print(
+            f"raptor-build-cpg-cache: {mismatch}; refusing recovered "
+            "target",
+            file=sys.stderr,
+        )
+        return 1
+
     project_dir = understand_dir.parent
     # The CPG cache is one slot per cache dir. Only managed project
     # dirs may host it — for a standalone run the parent is the shared
