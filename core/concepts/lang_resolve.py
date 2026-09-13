@@ -263,6 +263,15 @@ def include_scope_files(
         root_res = root.resolve()
     except OSError:
         return []
+    # The chase START file must satisfy the same containment the
+    # candidates do — source_file is a reading-list item field
+    # (LLM/audit-derived), and an absolute or ``..``-carrying value
+    # otherwise escapes the pinned tree before the first candidate is
+    # ever checked (the escaped file's text would be read and scanned
+    # for #include lines).
+    from core.paths import confine
+    if confine(root, source_file) is None:
+        return []
     if not start.is_file():
         return []
 

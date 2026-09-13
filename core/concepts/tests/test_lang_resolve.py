@@ -690,6 +690,41 @@ static inline int widget_ref_get(void) { return 0; }
         files = include_scope_files(root, "a.c")
         assert outside not in files
 
+    def test_escaping_start_file_refused(self, tmp_path: Path) -> None:
+        """source_file is a reading-list item field (LLM/audit-
+        derived) — the chase START must be confined to the root like
+        every candidate, or the escaped file is read and its includes
+        chased."""
+        from core.concepts.lang_resolve import include_scope_files
+
+        # If the escaped start file were read, its include ref would
+        # resolve against the root fallback and surface in the output
+        # — making the out-of-tree read observable.
+        _write(tmp_path, "secrets/priv.c", '#include "leak.h"\n')
+        root = tmp_path / "tree"
+        _write(root, "dummy.c", "int x;\n")
+        _write(root, "leak.h", "#define L 1\n")
+
+        # Relative traversal out of the root.
+        assert include_scope_files(root, "../secrets/priv.c") == []
+        # Absolute path outside the root (Path join lets the absolute
+        # candidate win).
+        assert include_scope_files(
+            root, str(tmp_path / "secrets" / "priv.c"),
+        ) == []
+
+    def test_absolute_start_inside_root_allowed(
+        self, tmp_path: Path,
+    ) -> None:
+        from core.concepts.lang_resolve import include_scope_files
+
+        root = tmp_path / "tree"
+        _write(root, "a.c", '#include "a.h"\n')
+        _write(root, "a.h", "#define A 1\n")
+        files = include_scope_files(root, str(root / "a.c"))
+        rel = {str(p.relative_to(root)) for p in files}
+        assert rel == {"a.h"}
+
     def test_file_cap_respected(self, tmp_path: Path) -> None:
         from core.concepts.lang_resolve import include_scope_files
 
