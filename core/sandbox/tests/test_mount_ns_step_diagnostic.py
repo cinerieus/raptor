@@ -29,7 +29,6 @@ Two groups:
 import os
 import re
 import shutil
-import sys as _sys
 from pathlib import Path
 
 import pytest
@@ -154,10 +153,10 @@ def test_step_labels_are_bytes_not_str():
 # the mount/pivot syscall wrappers mocked out)
 # ---------------------------------------------------------------------------
 
-_linux_only = pytest.mark.skipif(
-    _sys.platform != "linux",
-    reason="mount-ns setup logic is Linux-only",
-)
+# mount-ns setup logic is Linux-only
+# Real-Linux-kernel binding: these tests carry the linux_native
+# marker (pytest.ini) instead of an ad hoc skipif — honest skip on
+# other native platforms, deselected under the darwin-emulation gate.
 
 
 def _run_setup(monkeypatch, tmp_path, extra_ro_paths, cwd=None):
@@ -192,7 +191,7 @@ def _run_setup(monkeypatch, tmp_path, extra_ro_paths, cwd=None):
     return root, mounts
 
 
-@_linux_only
+@pytest.mark.linux_native
 def test_dotdot_entry_cannot_evade_shadow_check(monkeypatch, tmp_path):
     # "/tmp/../etc" normalises to "/etc", which is a per-ns
     # shadow path and must be skipped entirely.
@@ -210,7 +209,7 @@ def test_dotdot_entry_cannot_evade_shadow_check(monkeypatch, tmp_path):
     )
 
 
-@_linux_only
+@pytest.mark.linux_native
 def test_relative_entry_no_malformed_bind_target(monkeypatch, tmp_path):
     # A relative entry used to produce inside=f"{root}etc" — a
     # SIBLING of the sandbox root, not a path within it.
@@ -228,7 +227,7 @@ def test_relative_entry_no_malformed_bind_target(monkeypatch, tmp_path):
     assert bound[0][1] == expected_inside
 
 
-@_linux_only
+@pytest.mark.linux_native
 def test_relative_and_absolute_spellings_equivalent(monkeypatch, tmp_path):
     (tmp_path / "ro").mkdir()
     _, rel_mounts = _run_setup(

@@ -11,10 +11,10 @@ import sys as _sys
 import pytest as _pytest
 
 pytestmark = [
-    _pytest.mark.skipif(
-        _sys.platform != "linux",
-        reason="Linux-only sandbox internals (mount-ns / Landlock / seccomp / ptrace tracer) — see core/sandbox/_macos_spawn.py for the macOS path",
-    ),
+    # Linux-only sandbox internals (mount-ns / Landlock / seccomp /
+    # ptrace tracer) on real subprocesses — see core/sandbox/
+    # _macos_spawn.py for the macOS path. Real-kernel binding.
+    _pytest.mark.linux_native,
     # Every test in this file exercises real sandbox primitives
     # (namespaces, Landlock, seccomp, ptrace) on real subprocesses.
     # Opt-in via ``pytest -m integration``.

@@ -779,10 +779,9 @@ class TestPublicObserveKwarg:
     Verified at the audit_mode-resolution layer (no real spawn
     needed — that's the E2E test)."""
 
-    @pytest.mark.skipif(
-        __import__("sys").platform == "darwin",
-        reason="Linux mount-ns spawn path; macOS variant is signature-parity only",
-    )
+    # Linux mount-ns spawn path (real userns/Landlock work); the macOS
+    # variant is signature-parity only.
+    @pytest.mark.linux_native
     @requires_userns
     def test_observe_implies_audit(self, tmp_path):
         # The audit_mode/audit_verbose_active resolution lives at
@@ -831,10 +830,9 @@ class TestPublicObserveKwarg:
             "observe=True must reach _spawn.run_sandboxed as observe_mode=True"
         )
 
-    @pytest.mark.skipif(
-        __import__("sys").platform == "darwin",
-        reason="Linux mount-ns spawn path; macOS variant is signature-parity only",
-    )
+    # Linux mount-ns spawn path (real userns/Landlock work); the macOS
+    # variant is signature-parity only.
+    @pytest.mark.linux_native
     @requires_landlock
     def test_observe_off_by_default(self, tmp_path):
         from unittest.mock import patch

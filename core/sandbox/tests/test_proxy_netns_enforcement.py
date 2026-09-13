@@ -271,7 +271,8 @@ class TestProxyBridge:
             import shutil
             shutil.rmtree(str(self._short_dir), ignore_errors=True)
 
-    @pytest.mark.skipif(sys.platform != "linux", reason="os.unshare is Linux-only")
+    # os.unshare is Linux-only — real-kernel netns binding.
+    @pytest.mark.linux_native
     def test_bring_up_loopback_in_netns(self):
         """bring_up_loopback works inside a fresh netns (requires
         CAP_NET_ADMIN in a user-ns)."""

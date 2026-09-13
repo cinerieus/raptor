@@ -22,10 +22,10 @@ import pytest
 
 from core.sandbox import _macos_spawn
 
-darwin_only = pytest.mark.skipif(
-    sys.platform != "darwin",
-    reason="macOS-only — sandbox-exec is Apple-specific",
-)
+# macOS-only — sandbox-exec is Apple-specific: real-kernel tests carry
+# the darwin_native marker (pytest.ini) instead of an ad hoc skipif, so
+# the darwin-emulation gate deselects them and native non-darwin hosts
+# skip them.
 
 
 # --- Cross-platform sanity tests (signature parity, no exec) ----------
@@ -292,7 +292,7 @@ def test_tmpdir_not_steered_without_write_isolation(tmp_path,
 
 # --- Darwin-only behavioural tests ------------------------------------
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_smoke_test_invocation_succeeds(tmp_path):
     """Most basic smoke test: run /usr/bin/true under the sandbox.
     Confirms sandbox-exec invocation works AND our kwarg threading
@@ -307,7 +307,7 @@ def test_smoke_test_invocation_succeeds(tmp_path):
     assert r.sandbox_info["backend"] == "macos-seatbelt"
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_write_outside_output_blocked(tmp_path):
     """Enforcement: write to a path OUTSIDE the writable allowlist
     must fail (sandbox-exec returns the kernel sandbox error)."""
@@ -338,7 +338,7 @@ def test_write_outside_output_blocked(tmp_path):
     assert not target_file.exists()
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_write_inside_output_allowed(tmp_path):
     """Inverse of the above: writes INSIDE output= must succeed.
     Catches over-restrictive profile generation."""
@@ -356,7 +356,7 @@ def test_write_inside_output_allowed(tmp_path):
     assert target_file.read_text() == "ok"
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_write_to_private_tmp_allowed():
     """The default exception list always includes /private/tmp so
     standard temp-file APIs keep working. Regression catch: if we
@@ -377,7 +377,7 @@ def test_write_to_private_tmp_allowed():
     assert "OK" in r.stdout
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_block_network_actually_blocks(tmp_path):
     """block_network=True must cause network connect to fail. Use a
     non-routable address with a short timeout to keep the test fast
@@ -402,7 +402,7 @@ def test_block_network_actually_blocks(tmp_path):
     assert "LEAK" not in r.stdout
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_audit_mode_writes_jsonl(tmp_path):
     """End-to-end: with audit_mode=True the LogStreamer must
     capture sandbox kext entries and append them as JSONL records
@@ -455,7 +455,7 @@ def test_audit_mode_writes_jsonl(tmp_path):
     )
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_fake_home_redirects_HOME(tmp_path):
     """fake_home=True must override HOME inside the child. The
     profile itself doesn't restrict HOME (env-side concern); the
@@ -475,7 +475,7 @@ def test_fake_home_redirects_HOME(tmp_path):
     assert actual == expected
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_rlimits_applied(tmp_path):
     """Resource limits must apply via the preexec_fn pattern. Test
     with a small max_file_mb (file size cap)."""
@@ -496,7 +496,7 @@ def test_rlimits_applied(tmp_path):
     assert soft == 10 * 1024 * 1024
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_audit_verbose_records_extended_categories(tmp_path):
     """End-to-end: with audit_verbose=True, the SBPL profile gets
     `(allow X (with report))` for an extended set of categories
@@ -565,7 +565,7 @@ def test_audit_verbose_records_extended_categories(tmp_path):
     )
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_audit_summary_record_emitted(tmp_path):
     """LogStreamer.stop() must always emit an audit_summary record
     so the sandbox-summary aggregator can distinguish "audit ran
@@ -608,7 +608,7 @@ def test_audit_summary_record_emitted(tmp_path):
     assert "global_cap" in s
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_audit_budget_drops_when_cap_hit(tmp_path):
     """End-to-end budget enforcement: pass a tiny global cap and
     verify the JSONL contains a budget_exceeded marker. Uses the
@@ -667,7 +667,7 @@ def test_audit_budget_drops_when_cap_hit(tmp_path):
     assert summary["dropped_by_category"]["file-write"] == 5
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_seccomp_kwargs_silently_ignored(tmp_path):
     """seccomp_profile= and seccomp_block_udp= are Linux-only;
     accepted on macOS for signature parity but must NOT raise.
@@ -689,7 +689,7 @@ def test_seccomp_kwargs_silently_ignored(tmp_path):
 # and killpg teardown when the orchestrator dies. They can only run on a
 # macOS host — smoke-test here before relying on the macOS sandbox.
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_setup_status_none_on_successful_engage(tmp_path):
     """A normal run must come back with result._setup_status is None — i.e.
     the in-sandbox readiness byte arrived, proving the inner shim ran INSIDE
@@ -704,7 +704,7 @@ def test_setup_status_none_on_successful_engage(tmp_path):
     assert getattr(r, "_setup_status", "missing") is None
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_exit_code_mirrored_through_shim(tmp_path):
     """The outer+inner shim layering must mirror the target's exit code
     unchanged (regression guard on status propagation)."""
@@ -717,7 +717,7 @@ def test_exit_code_mirrored_through_shim(tmp_path):
     assert getattr(r, "_setup_status", "missing") is None
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_fail_loud_via_context_when_profile_cannot_apply(tmp_path):
     """End-to-end fail-loud: when the sandbox cannot engage, sandbox().run
     must raise SandboxSetupError rather than silently returning a result.
@@ -739,7 +739,7 @@ def test_fail_loud_via_context_when_profile_cannot_apply(tmp_path):
     assert SandboxSetupError is not None
 
 
-@darwin_only
+@pytest.mark.darwin_native
 def test_orphan_teardown_on_orchestrator_kill():
     """Integration: an orchestrator running a long target via the seatbelt
     backend, SIGKILLed mid-run, must leave NO lingering sandbox process —

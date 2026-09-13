@@ -22,10 +22,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="seatbelt-shim POSIX-core tests use /proc; integration is darwin-only",
-)
+# seatbelt-shim POSIX-core tests use /proc (real-Linux binding);
+# integration is darwin-only and lives in test_macos_spawn.py.
+pytestmark = pytest.mark.linux_native
 
 SHIM_PATH = Path(__file__).resolve().parents[3] / "libexec" / "raptor-seatbelt-shim"
 _READY_BYTE = b"K"

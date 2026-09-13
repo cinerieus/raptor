@@ -22,7 +22,6 @@ them, following test_engagement_failloud's gating.
 """
 
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -31,9 +30,10 @@ import pytest
 from core.sandbox import check_unshare_engages, sandbox
 from core.sandbox.tests.capability import requires_landlock
 
-_linux_only = pytest.mark.skipif(
-    sys.platform != "linux", reason="mount-ns sandbox is Linux-only",
-)
+# mount-ns sandbox is Linux-only
+# Real-Linux-kernel binding: these tests carry the linux_native
+# marker (pytest.ini) instead of an ad hoc skipif — honest skip on
+# other native platforms, deselected under the darwin-emulation gate.
 
 
 def _require_namespaces():
@@ -43,7 +43,7 @@ def _require_namespaces():
 
 
 @requires_landlock
-@_linux_only
+@pytest.mark.linux_native
 class TestReadableFileBindUnderTmp:
 
     def test_file_under_tmp_readable_inside_sandbox(self, tmp_path):
@@ -80,7 +80,7 @@ class TestReadableFileBindUnderTmp:
 
 
 @requires_landlock
-@_linux_only
+@pytest.mark.linux_native
 class TestInheritedTmpdirUnderTmp:
 
     def test_custom_tmpdir_usable_inside_sandbox(self, tmp_path,

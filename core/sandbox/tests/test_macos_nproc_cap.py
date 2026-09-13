@@ -46,9 +46,14 @@ import pytest
 
 from core.sandbox import _macos_spawn
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX-only",
-)
+# Every test here does a real setrlimit through the shim, with the
+# REAL kernel clamp (captured below) folded into its expectations —
+# a real-kernel binding on BOTH platforms. Carrying both native
+# markers keeps the file running natively on Linux and Darwin while
+# the darwin-emulation gate deselects it: a monkeypatched darwin
+# clamp with the real kernel's clamp applying underneath measures
+# neither platform.
+pytestmark = [pytest.mark.linux_native, pytest.mark.darwin_native]
 
 _SOFT_DUMP = [sys.executable, "-c",
               "import resource; "
