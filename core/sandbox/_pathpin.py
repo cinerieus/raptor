@@ -82,7 +82,37 @@ import errno
 import os
 import stat as _stat
 
-__all__ = ["open_pinned"]
+__all__ = ["is_per_process_procfs", "open_pinned"]
+
+# procfs magic links whose resolution is a property of the WALKING
+# process: /proc/self and /proc/thread-self name a different pid dir
+# for every reader, so no two processes' walks of the same path land
+# on the same inode.
+_PER_PROCESS_PROCFS = ("/proc/self", "/proc/thread-self")
+
+
+def is_per_process_procfs(path: str) -> bool:
+    """True for paths at or beneath a per-process procfs magic link.
+
+    ``path`` must already be absolute and normalized (all callers
+    ``os.path.abspath`` / ``normpath`` first). These paths are
+    volatile by construction — the file identity changes with every
+    reader — so no cross-process identity pin, inode-bound rule, or
+    parent-resolved grant can ever hold for them:
+
+    * the mount-ns bind pin skips them (a parent-taken pin can never
+      match the forked child's walk; procfs serves the paths
+      per-reader, so there is nothing to bind either);
+    * Landlock grant resolution skips them (a parent-side realpath
+      would bind the inode rule to the PARENT's pid dir — granting
+      the child the parent's files while never matching the child's
+      own reads).
+
+    Real-filesystem paths are never in this class; every pin and
+    tamper refusal stays intact for them.
+    """
+    return any(path == p or path.startswith(p + "/")
+               for p in _PER_PROCESS_PROCFS)
 
 # O_PATH is Linux-only; the pinned walk backs the mount-ns bind
 # machinery, which never engages on platforms without it (macOS uses

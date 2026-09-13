@@ -54,6 +54,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
 from ._fork_safe_warn import warn_post_fork
+from ._pathpin import is_per_process_procfs
 
 # See core/sandbox/context.py (_BRANDED_TMP_RE) — same shape.
 _BRANDED_TMP_RE = re.compile(r"/[^/]*raptor[^/]*(/|$)", re.IGNORECASE)
@@ -305,26 +306,12 @@ def _shadows_per_ns(path: str) -> bool:
     return norm in _SHADOW_PATHS
 
 
-# procfs magic links whose resolution is a property of the WALKING
-# process: /proc/self and /proc/thread-self name a different pid dir
-# for every reader, so no two processes' walks of the same path land
-# on the same inode.
-_PER_PROCESS_PROCFS = ("/proc/self", "/proc/thread-self")
-
-
-def _is_per_process_procfs(path: str) -> bool:
-    """True for paths at or beneath a per-process procfs magic link.
-
-    ``path`` must already be absolute and normalized (both callers
-    ``os.path.abspath`` first). These paths are volatile by
-    construction — the file identity changes across every fork — so
-    the validation-time inode pin can never hold for them and they
-    are excluded from both pinning and the extra_ro bind (procfs
-    already serves them per-reader). Real-filesystem paths are never
-    in this class; the pin's tamper refusal stays intact for them.
-    """
-    return any(path == p or path.startswith(p + "/")
-               for p in _PER_PROCESS_PROCFS)
+# Shared per-reader procfs classifier (also consumed by the parent-
+# side pin skip and the Landlock grant resolution) — see
+# _pathpin.is_per_process_procfs for the volatility contract. Bound
+# at module import: the extra_ro loop runs post-fork in the mount-ns
+# child, where imports are forbidden.
+_is_per_process_procfs = is_per_process_procfs
 
 
 def _refuse_image_symlink_components(root: str, abs_path: str) -> None:

@@ -29,7 +29,7 @@ import platform
 import stat
 
 from . import state
-from ._pathpin import open_pinned
+from ._pathpin import is_per_process_procfs, open_pinned
 from .exit_codes import SANDBOX_EXIT_LANDLOCK_DOWNGRADE
 
 logger = logging.getLogger(__name__)
@@ -356,6 +356,11 @@ def _warn_truncate_unavailable_once(abi: int) -> None:
 # symlinked output tree would otherwise warn on every spawn).
 _grant_redirects_warned: set = set()
 
+# (requested, kind) per-process procfs grant paths already announced —
+# same once-per-pair convention (calibrated CLI profiles carry several
+# such entries, which would otherwise log on every spawn).
+_per_process_grants_noted: set = set()
+
 
 def _resolve_grant_paths(paths: list, kind: str) -> list:
     """Resolve rule paths to canonical form at VALIDATION time.
@@ -379,11 +384,41 @@ def _resolve_grant_paths(paths: list, kind: str) -> list:
     resolves normally, but the redirect is announced once per
     (requested, resolved) pair so a pre-planted steer is at least
     visible in the run log.
+
+    Per-process procfs magic-link paths (``/proc/self/*``,
+    ``/proc/thread-self/*``) yield NO rule — see the inline comment
+    for why neither the parent-resolved nor any other inode-bound
+    grant can be correct for them.
     """
     resolved_paths: list = []
     for path in paths:
-        resolved = os.path.realpath(path)
         requested = os.path.normpath(os.path.abspath(path))
+        if is_per_process_procfs(requested):
+            # Per-reader procfs magic links (/proc/self/*,
+            # /proc/thread-self/*): the realpath below runs in the
+            # PARENT, so the rule would bind the inode of the
+            # PARENT's pid dir — granting the sandboxed child this
+            # process's files (its maps, cgroup, ...) while never
+            # matching the child's own reads, since every process
+            # resolves the link to its own pid dir and Landlock rules
+            # bind inodes, not path spellings. No per-inode rule is
+            # expressible for the class: reads are served by the
+            # wholesale /proc grant where the read allowlist carries
+            # it, and where /proc reads are deliberately withdrawn
+            # (omit_proc_reads) they must stay withdrawn — a
+            # parent-pid rule here would quietly re-open the
+            # same-UID /proc channel that withdrawal exists to close.
+            key = (requested, kind)
+            if key not in _per_process_grants_noted:
+                _per_process_grants_noted.add(key)
+                logger.info(
+                    "Landlock %s grant path %s is a per-process procfs "
+                    "magic link — skipped (per-reader resolution; "
+                    "served by the /proc read grant where present).",
+                    kind, requested,
+                )
+            continue
+        resolved = os.path.realpath(path)
         if resolved != requested:
             key = (requested, resolved)
             if key not in _grant_redirects_warned:

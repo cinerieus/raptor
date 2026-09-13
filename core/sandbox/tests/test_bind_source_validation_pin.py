@@ -409,6 +409,37 @@ class TestPerProcessProcfsE2E(unittest.TestCase):
         self.assertTrue((r.stdout or "").strip(),
                         "/proc/self/cgroup unreadable inside the sandbox")
 
+    @requires_landlock
+    @requires_userns
+    def test_proc_self_maps_readable_without_per_entry_grant(self) -> None:
+        """The Landlock grant resolution yields NO rule for the
+        per-reader class (a parent-resolved rule would name the wrong
+        pid dir), so the child's read must be served by the wholesale
+        /proc read grant — end to end, under the full read-restricted
+        stack."""
+        from core.sandbox._spawn import run_sandboxed
+        r = run_sandboxed(
+            ["cat", "/proc/self/maps"],
+            target=str(self.tgt), output=str(self.out),
+            block_network=True, nproc_limit=1024,
+            limits={"memory_mb": 0, "max_file_mb": 10240,
+                    "cpu_seconds": 300},
+            writable_paths=[str(self.out), "/tmp"],
+            readable_paths=["/proc/self/maps"],
+            allowed_tcp_ports=None,
+            seccomp_profile=None, seccomp_block_udp=False,
+            env=None, cwd=None, timeout=30,
+            capture_output=True, text=True,
+        )
+        status = getattr(r, "_setup_status", None)
+        self.assertIsNone(
+            status,
+            f"volatile procfs readable path failed setup: {status}",
+        )
+        self.assertEqual(r.returncode, 0, f"stderr: {r.stderr!r}")
+        self.assertTrue((r.stdout or "").strip(),
+                        "/proc/self/maps unreadable inside the sandbox")
+
 
 class TestPinTimeFailureNeverDegrades(unittest.TestCase):
     """A required-pin failure at VALIDATION time must raise

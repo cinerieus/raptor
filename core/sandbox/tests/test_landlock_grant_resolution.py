@@ -174,3 +174,43 @@ class TestPostValidationSwapRefused:
             assert not is_dir
         finally:
             _close(fd)
+
+
+class TestPerProcessProcfsGrantsSkipped:
+    """/proc/self/* and /proc/thread-self/* grant paths yield NO rule:
+    the parent-side realpath would bind the rule to the RESOLVER's pid
+    dir — granting the sandboxed child the parent's files (maps,
+    cgroup) while never matching the child's own per-reader reads.
+    Reads of the class ride the wholesale /proc grant where present;
+    where /proc reads are withdrawn they stay withdrawn."""
+
+    def test_per_process_procfs_paths_produce_no_rule(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        resolved = landlock._resolve_grant_paths(
+            ["/proc/self/maps", "/proc/self/cgroup",
+             "/proc/thread-self/stat", str(real)],
+            "readable",
+        )
+        assert resolved == [os.path.realpath(str(real))]
+        # In particular: no rule bound to THIS process's pid dir.
+        assert not any(f"/proc/{os.getpid()}/" in p for p in resolved)
+
+    def test_write_kind_also_skipped(self):
+        assert landlock._resolve_grant_paths(
+            ["/proc/self/oom_score_adj"], "writable",
+        ) == []
+
+    def test_skip_is_not_announced_as_planted_redirect(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="core.sandbox.landlock"):
+            landlock._resolve_grant_paths(["/proc/self/cgroup"], "readable")
+        assert not any(
+            "planted redirect" in r.getMessage() for r in caplog.records
+        )
+
+    def test_pid_named_proc_path_still_resolves(self):
+        # A pid-NAMED procfs path names one stable pid dir — not in
+        # the per-reader class, so it keeps the normal resolution
+        # (and with it the pinned-walk defense).
+        path = f"/proc/{os.getpid()}/cmdline"
+        assert landlock._resolve_grant_paths([path], "readable") == [path]

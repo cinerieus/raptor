@@ -74,12 +74,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import _pathpin, state
+from ._pathpin import is_per_process_procfs as _is_per_process_procfs
 from ._fork_safe_warn import warn_post_fork
 from ._unix_scope import UnixScopeSupervisor as _UnixScopeSupervisor
 from .landlock import _make_landlock_preexec
 from .mount_ns import ExtraRoBindError as _ExtraRoBindError
 from .mount_ns import _ESTALE as _PIN_TAMPER_ERRNO
-from .mount_ns import _is_per_process_procfs
 from .mount_ns import setup_mount_ns
 from .probes import _find_sandbox_binary
 from .seccomp import _make_seccomp_preexec
