@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -728,8 +729,15 @@ def _find_bounded_name_token(text: str, func_name: str) -> int:
     unknown function and the gate stands down — inconclusive, never
     refuted.
     """
-    m = re.search(rf"\b{re.escape(func_name)}\b", text)
-    return m.start() if m else -1
+    return next(_iter_bounded_name_tokens(text, func_name), -1)
+
+
+def _iter_bounded_name_tokens(text: str, func_name: str) -> Iterator[int]:
+    """Every standalone-token position of *func_name* in *text*, under
+    the same word-boundary discipline as :func:`_find_bounded_name_token`
+    (an embedding identifier never matches)."""
+    for m in re.finditer(rf"\b{re.escape(func_name)}\b", text):
+        yield m.start()
 
 
 def _refute_by_known_return_type(
@@ -1359,12 +1367,13 @@ def _bounded_name_near_overflow_claim(mechanism_lower: str) -> bool:
     mention of ntohs() three sentences away from an unrelated
     overflow claim must not read as a range proof for that claim."""
     for func_name in _KNOWN_RETURN_BOUNDS:
-        pos = _find_bounded_name_token(mechanism_lower, func_name)
-        if pos < 0:
-            continue
-        window = mechanism_lower[max(0, pos - 100):pos + 100]
-        if _OVERFLOW_KW.search(window):
-            return True
+        # Every occurrence gets the window, not just the first — a
+        # name mentioned early in passing must not mask its later
+        # mention right next to the overflow claim.
+        for pos in _iter_bounded_name_tokens(mechanism_lower, func_name):
+            window = mechanism_lower[max(0, pos - 100):pos + 100]
+            if _OVERFLOW_KW.search(window):
+                return True
     return False
 
 

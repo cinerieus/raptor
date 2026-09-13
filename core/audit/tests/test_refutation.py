@@ -2147,3 +2147,33 @@ class TestReturnDomainFamilyDismissal:
     def test_no_receipt_no_rescue(self):
         r = rescue_self_refuted(self._outcome())
         assert r is None
+
+
+class TestBoundedNameNearOverflowClaim:
+    """_bounded_name_near_overflow_claim — every token occurrence
+    gets the proximity window, not just the first."""
+
+    def test_later_occurrence_near_claim_matches(self):
+        from core.audit.refutation import _bounded_name_near_overflow_claim
+        filler = "the parser validates the header fields carefully " * 4
+        mech = (
+            "ntohs is used for byte order here. "  # far occurrence
+            + filler
+            + "the length from ntohs wraps: integer overflow follows."
+        )
+        assert _bounded_name_near_overflow_claim(mech.lower()) is True
+
+    def test_no_occurrence_near_claim_refuses(self):
+        from core.audit.refutation import _bounded_name_near_overflow_claim
+        filler = "the parser validates the header fields carefully " * 4
+        mech = (
+            "ntohs is used for byte order here. "
+            + filler
+            + "later a length computation shows integer overflow."
+        )
+        assert _bounded_name_near_overflow_claim(mech.lower()) is False
+
+    def test_embedded_identifier_never_matches(self):
+        from core.audit.refutation import _bounded_name_near_overflow_claim
+        mech = "net_ntohs_unaligned() result causes integer overflow"
+        assert _bounded_name_near_overflow_claim(mech.lower()) is False
