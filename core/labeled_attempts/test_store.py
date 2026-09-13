@@ -370,6 +370,48 @@ def test_find_by_finding_signature(project_dir):
     assert {r.finding_id for r in by_sig} == {"A", "B"}
 
 
+def test_find_by_finding_signature_reads_only_that_directory(
+        project_dir, monkeypatch):
+    # The layout keys records by <pool>/<signature>/, so the lookup
+    # must be a direct directory read — never a full-pool scan that
+    # re-parses every record of every finding.
+    from core.labeled_attempts import store as store_mod
+
+    SIG = "fafa" * 8
+    write(_make_attempt(finding_id="A", finding_signature=SIG),
+          project_dir=project_dir)
+    write(_make_attempt(finding_id="C", finding_signature="eeee" * 8),
+          project_dir=project_dir)
+
+    read: list[Path] = []
+    orig = store_mod._read_record
+
+    def _spy(record_file):
+        read.append(record_file)
+        return orig(record_file)
+    monkeypatch.setattr(store_mod, "_read_record", _spy)
+
+    by_sig = list(find_by_finding_signature(
+        SIG, project_dir=project_dir, include_bundled=False,
+    ))
+    assert {r.finding_id for r in by_sig} == {"A"}
+    assert read, "lookup read no files at all"
+    assert all(p.parent.name == SIG for p in read), (
+        "lookup touched records outside the signature directory"
+    )
+
+
+def test_find_by_finding_signature_refuses_non_signature_shapes(project_dir):
+    SIG = "fafa" * 8
+    write(_make_attempt(finding_id="A", finding_signature=SIG),
+          project_dir=project_dir)
+    # Not legal signatures (and unsafe as path segments): yield nothing.
+    for bogus in ("../" + SIG, "not-hex!", "", "zz" * 8):
+        assert list(find_by_finding_signature(
+            bogus, project_dir=project_dir, include_bundled=False,
+        )) == []
+
+
 # --------------------------------------------------------------------------
 # Resilience — corrupt records skipped, not fatal
 # --------------------------------------------------------------------------
