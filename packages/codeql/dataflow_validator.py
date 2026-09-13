@@ -36,6 +36,8 @@ from core.smt_solver.path_feasibility import (
 from core.llm.scorecard import fast_tier_model_name, run_cheap_fp_check
 from core.llm.task_types import TaskType
 from core.logging import get_logger
+from core.paths import confine
+from core.source import read_text_capped
 from core.security.prompt_defense_profiles import CONSERVATIVE
 from core.security.prompt_envelope import (
     TaintedString,
@@ -627,38 +629,28 @@ class DataflowValidator:
             Source code snippet with context
         """
         try:
-            resolved = Path(file_path).resolve()
             if repo_root is not None:
-                try:
-                    resolved.relative_to(repo_root.resolve())
-                except ValueError:
+                maybe = confine(repo_root, file_path)
+                if maybe is None:
                     return ""
-            # Cap the source-context read at 10 MB. Pre-fix
-            # `open(...).readlines()` had no upper bound — a
-            # source file > 10 MB (auto-generated lexer tables,
-            # vendored library bundles, single-file compiled JS
-            # blobs) was loaded entirely into memory just to
-            # extract a ~20-line window around `line`.
-            #
-            # 10 MB covers every legitimate human-authored
-            # source file by orders of magnitude (Linux kernel
-            # ~10 MB across ALL files; the largest single C
-            # file ever observed in a major OSS project is
-            # ~3 MB). For pathological files past the cap the
-            # function still produces a context window — just
-            # truncated to the first 10 MB worth of lines.
-            _MAX_SOURCE_BYTES = 10 * 1024 * 1024
-            with Path(resolved).open(encoding="utf-8", errors="replace") as f:
-                content = f.read(_MAX_SOURCE_BYTES + 1)
-            if len(content) > _MAX_SOURCE_BYTES:
-                # Drop the trailing partial line (avoids splitting
-                # in the middle of a token in the rendered context)
-                content = content[:_MAX_SOURCE_BYTES]
-                content = content.rsplit("\n", 1)[0] + "\n"
+                resolved = maybe
+            else:
+                resolved = Path(file_path).resolve()
+            # Capped read (shared core.source helper, 10 MB default):
+            # a source file past the cap (auto-generated lexer
+            # tables, vendored bundles, single-file compiled JS
+            # blobs) yields a context window over the truncated
+            # prefix instead of loading whole into memory.
+            got = read_text_capped(resolved)
+            if got is None:
                 self.logger.warning(
-                    "Source file %s exceeded %s-byte cap; context window reflects truncated read",
+                    "Failed to read source context at %s", resolved)
+                return ""
+            content, truncated = got
+            if truncated:
+                self.logger.warning(
+                    "Source file %s exceeded the capped read; context window reflects truncated read",
                     resolved,
-                    _MAX_SOURCE_BYTES
                 )
             lines = content.splitlines(keepends=True)
 

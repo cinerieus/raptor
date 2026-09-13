@@ -698,3 +698,30 @@ class TestWitnessSteering:
     def test_unidentifiable_target_skips_steering(self):
         prefer = self._capture_prefer("cpp/integer-overflow", [])
         assert prefer is None
+
+
+class TestReadSourceContext:
+    def _v(self) -> DataflowValidator:
+        llm = MagicMock()
+        llm.scorecard = None
+        return DataflowValidator(llm_client=llm)
+
+    def test_reads_marked_window(self, tmp_path):
+        f = tmp_path / "a.c"
+        f.write_text(
+            "\n".join(f"line{i}" for i in range(1, 30)) + "\n",
+            encoding="utf-8",
+        )
+        out = self._v().read_source_context(
+            str(f), 10, context_lines=2, repo_root=tmp_path)
+        assert ">>>" in out and "line10" in out
+        assert "line20" not in out
+
+    def test_out_of_root_refused(self, tmp_path):
+        outside = tmp_path / "outside.c"
+        outside.write_text("secret\n", encoding="utf-8")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        out = self._v().read_source_context(
+            str(outside), 1, repo_root=repo)
+        assert out == ""
