@@ -29,8 +29,9 @@ import logging
 import re
 from dataclasses import dataclass
 
-from ..models import Confidence, Dependency, Manifest
-from ._closest_manifest import project_host_dep
+from ..models import Confidence, Dependency
+from ..parsers._base import build_purl
+from ..parsers.inline_installs import classify_action_ref
 from ._closest_manifest import rel_to_target as _rel
 from typing import TYPE_CHECKING
 
@@ -78,16 +79,12 @@ class GhaDriftFinding:
     ref_kind: str          # "sha" / "tag" / "branch_or_other"
 
 
-def scan_target(
-    target: Path,
-    manifests: Iterable[Manifest],
-) -> list[GhaDriftFinding]:
+def scan_target(target: Path) -> list[GhaDriftFinding]:
     """Walk ``.github/workflows/`` and flag mutable refs."""
     target = target.resolve()
     workflows_dir = target / ".github" / "workflows"
     if not workflows_dir.exists():
         return []
-    manifests_list = list(manifests)
     out: list[GhaDriftFinding] = []
     for path in sorted(workflows_dir.iterdir()):
         if not path.is_file():
@@ -102,7 +99,7 @@ def scan_target(
                 path, e,
             )
             continue
-        out.extend(_scan_text(text, path, target, manifests_list))
+        out.extend(_scan_text(text, path, target))
     return out
 
 
@@ -114,7 +111,6 @@ def _scan_text(
     text: str,
     path: Path,
     target: Path,
-    manifests: list[Manifest],
 ) -> Iterable[GhaDriftFinding]:
     for line_no, line in enumerate(text.splitlines(), start=1):
         m = _USES_RE.match(line)
@@ -139,7 +135,7 @@ def _scan_text(
                  "tag pointing at different code"
         )
         yield GhaDriftFinding(
-            dependency=_project_host_dep(manifests, path, target),
+            dependency=_action_host_dep(action, ref, path),
             detail=(
                 f"`{_rel(path, target)}:{line_no}` uses `{action}@{ref}` — "
                 f"{reason}; pin to a 40-char commit SHA for "
@@ -170,17 +166,35 @@ def _classify_ref(ref: str) -> str:
     return "branch_or_other"
 
 
-def _project_host_dep(
-    manifests: list[Manifest], path: Path, target: Path,
-) -> Dependency:
-    """Anchor the finding to whichever manifest sits closest to the
-    workflow file. For most projects this'll be the root pyproject /
-    package.json / pom.xml — fine for the report's source column."""
-    return project_host_dep(
-        manifests, path, target,
-        name="<github-actions>",
+def _action_host_dep(action: str, ref: str, workflow: Path) -> Dependency:
+    """Anchor the finding to the ACTION dependency itself, mirroring
+    the row the inline-installs workflow parser emits for the same
+    ``uses:`` line (ecosystem / name / version key-equal).
+
+    The finding's subject is the action — the report column names
+    the thing whose ref drifts, and the composite chokepoint keys
+    per-dep, so a sentinel / sunset / outdated finding on the SAME
+    action composes with the drift signal (the GHA+SENTINEL hard
+    pair). Anchoring at the project's closest manifest, as this
+    detector used to, fragmented that conjunction: the pair could
+    never co-fire on the canonical compromised-action shape.
+    """
+    pin_style, version = classify_action_ref(ref)
+    return Dependency(
+        ecosystem="GitHub Actions",
+        name=action,
+        version=version,
+        declared_in=workflow,
         scope="build",
-        reason="placeholder for gha-drift finding host",
+        is_lockfile=False,
+        pin_style=pin_style,
+        direct=True,
+        purl=build_purl("githubactions", action, ref),
+        parser_confidence=Confidence(
+            "high",
+            reason=f"GHA uses: {action}@{ref}",
+        ),
+        source_kind="gha_uses",
     )
 
 

@@ -575,7 +575,7 @@ def _extract_gha_uses(
         action, ref = spec.rsplit("@", 1)
         if "/" not in action:
             continue
-        pin_style, version = _classify_action_ref(ref)
+        pin_style, version = classify_action_ref(ref)
         out.append(Dependency(
             ecosystem="GitHub Actions",
             name=action,
@@ -598,7 +598,7 @@ def _extract_gha_uses(
     return out
 
 
-def _classify_action_ref(ref: str) -> tuple[PinStyle, str | None]:
+def classify_action_ref(ref: str) -> tuple[PinStyle, str | None]:
     """Classify a ``uses: <action>@<ref>`` reference.
 
     ``ref`` is the version-shaped suffix. Mapping:
@@ -828,6 +828,7 @@ register(predicate=_is_gha_workflow)(parse_gha_workflow)
 
 
 __all__ = [
+    "classify_action_ref",
     "parse_dockerfile",
     "parse_devcontainer_json",
     "parse_shell_script",

@@ -845,11 +845,10 @@ def _group_kinded(findings: Sequence) -> list[list]:
     the same fields we key on, so one helper covers both.
 
     ``detail`` is part of the key — without it kind-level groupings
-    over-collapse: ``gha_action_ref_drift`` findings on different
-    workflow line:action pairs all share
-    ``(kind, ecosystem, '<github-actions>', None)`` and would
-    otherwise be reported as one section showing only the first
-    detail. Identical-detail findings (e.g. the same ``loose_pin``
+    over-collapse: ``gha_action_ref_drift`` findings for the same
+    action referenced on different workflow lines all share
+    ``(kind, 'GitHub Actions', action, ref)`` and would otherwise be
+    reported as one section showing only the first detail. Identical-detail findings (e.g. the same ``loose_pin``
     detail repeated across N manifests) still collapse to a single
     section with a Sources list — that's the duplication we
     actually want to remove. Ordering preserves first-seen so the

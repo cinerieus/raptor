@@ -73,8 +73,8 @@ def test_placeholder_dep_fallback_without_manifests(
 def test_placeholder_dep_name_and_scope_parameterised(
     tmp_path: Path,
 ) -> None:
-    """gha_drift's variant: workflow findings carry a distinct name
-    and a ``build`` scope."""
+    """The name / scope parameterisation for detectors whose
+    placeholder differs from the default ``<project>``."""
     dep = project_host_dep(
         [], tmp_path / ".github" / "workflows" / "ci.yml", tmp_path,
         name="<github-actions>", scope="build", reason="r",

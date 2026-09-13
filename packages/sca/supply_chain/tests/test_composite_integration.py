@@ -320,3 +320,62 @@ def test_setup_py_only_no_composite_promotion(tmp_path: Path) -> None:
     # Original severity should be ``high`` (pattern match), NOT
     # promoted to critical (no second family co-fires).
     assert all(f.severity == "high" for f in hooks)
+
+
+# ---------------------------------------------------------------------------
+# GHA + SENTINEL conjunction
+# ---------------------------------------------------------------------------
+
+def test_gha_drift_plus_sentinel_promotes_critical_on_real_parser_output(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A sentinel-listed action pinned by a mutable tag is the
+    canonical compromised-action shape: the sentinel hit anchors at
+    the parser's action dep row, the drift finding must anchor at
+    the SAME key or the GHA+SENTINEL hard pair can never co-fire."""
+    from packages.sca.supply_chain import sentinel as _sentinel
+
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text(
+        "name: ci\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: evil/exfil-action@v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_sentinel, "_CACHE", {
+        ("GitHub Actions", "evil/exfil-action"): [{
+            "incident": "test incident",
+            "ref": "https://example.invalid/advisory",
+            "versions": ["*"],
+        }],
+    })
+
+    manifests = [_manifest(wf, "Inline")]
+    deps = _parsed_deps(*manifests)
+    action_rows = [d for d in deps if d.ecosystem == "GitHub Actions"]
+    assert action_rows and action_rows[0].name == "evil/exfil-action"
+
+    findings = evaluate(tmp_path, manifests, deps)
+    by_kind = {f.kind: f for f in findings}
+    assert "sentinel_match" in by_kind
+    assert "gha_action_ref_drift" in by_kind
+
+    sent = by_kind["sentinel_match"]
+    drift = by_kind["gha_action_ref_drift"]
+    # Same composite key: (ecosystem, name, version).
+    assert (
+        (sent.dependency.ecosystem, sent.dependency.name,
+         sent.dependency.version)
+        == (drift.dependency.ecosystem, drift.dependency.name,
+            drift.dependency.version)
+    )
+    # Hard pair fired: both rows promoted to critical.
+    assert sent.severity == "critical"
+    assert drift.severity == "critical"
+    assert "composite_score" in drift.evidence
+    assert "composite_score" in sent.evidence

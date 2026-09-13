@@ -205,7 +205,7 @@ def evaluate(
 
     out.extend(
         _gha_drift_to_finding(gha)
-        for gha in _gha_drift.scan_target(target, manifests_list)
+        for gha in _gha_drift.scan_target(target)
     )
 
     out.extend(
