@@ -85,8 +85,10 @@ jobs:
       should_skip: ${{ steps.dup.outputs.should_skip }}
       # true for same-repo events (push / merge_group / schedule / dispatch
       # / branch PRs); false only for fork PRs, whose read-only token can't
-      # pull the private GHCR deps image. Tiers pass this to _tier.yml to
-      # choose the image (fast) vs runner (fallback) path.
+      # pull the private GHCR images. Tiers pass this to _tier.yml to
+      # choose the image (fast) vs runner (fallback) path; the
+      # sandbox-feature-matrix job uses it the same way to pick pull vs
+      # build-on-runner for the matrix image.
       pkg_access: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - id: dup
@@ -791,11 +793,13 @@ jobs:
   # ~37s per lane cell plus the image pull.
   #
   # The weekly full matrix stays untouched as the unfiltered backstop:
-  # both images, all five lanes, fresh image builds. Fork PRs skip this
-  # job (their read-only token cannot pull the private GHCR image) and
-  # keep that weekly coverage only, like the other image-path tiers.
-  # Like every gated tier, force_full events also run it — each
-  # merge-queue entry and the twice-weekly full-suite cron pay the
+  # both images, all five lanes, fresh image builds. Fork PRs cannot
+  # pull the private GHCR image (restricted read-only token), so they
+  # take the build-fallback path: run-matrix.sh without --skip-build
+  # builds the u24 image on the runner first — slower, never blocked,
+  # the same two-path story as _tier.yml's image/runner split for
+  # raptor-ci-deps. Like every gated tier, force_full events also run
+  # it — each merge-queue entry and the twice-weekly full-suite cron pay the
   # ~1-2 min pull + two lanes; accepted, a red matrix SHOULD block a
   # merge. Known residual: the sandbox gate is import-graph-computed,
   # so a PR touching only the matrix harness scripts under
@@ -811,13 +815,13 @@ jobs:
     needs: [pre_check, changes]
     if: |
       needs.pre_check.outputs.should_skip != 'true' &&
-      needs.changes.outputs.sandbox == 'true' &&
-      needs.pre_check.outputs.pkg_access == 'true'
+      needs.changes.outputs.sandbox == 'true'
     runs-on: ubuntu-latest
-    # 30 (not the warm-path ~5): when a PR changes requirements, the
-    # image's baked venv is stale (sxv.reqhash mismatch) and each lane
-    # pip-installs a fresh venv in-container before its tests.
-    timeout-minutes: 30
+    # 45: the warm path is ~5 (pull + two lanes); a requirements change
+    # invalidates the image's baked venv (sxv.reqhash mismatch) and each
+    # lane pip-installs fresh; the fork-PR build-fallback path pays a
+    # full u24 image build on top before any lane runs.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read              # pull the private GHCR matrix image
@@ -827,22 +831,40 @@ jobs:
         with:
           persist-credentials: false
 
+      # Fast path (same-repo events): GITHUB_TOKEN can read the repo-
+      # linked private package — the same actor/token login _tier.yml's
+      # container credentials use for raptor-ci-deps. A pull failure
+      # here is NOT downgraded to the build fallback: for a same-repo
+      # event it means the image was never published or the package's
+      # access broke, and that should be fixed once, loudly, not paid
+      # as a silent multi-minute build on every PR.
       - name: Pull the prebuilt matrix image
+        if: needs.pre_check.outputs.pkg_access == 'true'
         run: |
           set -euo pipefail
           echo "${{ github.token }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           if ! docker pull "ghcr.io/${owner}/raptor-sandbox-matrix:u24"; then
-            echo "::error::ghcr.io/${owner}/raptor-sandbox-matrix:u24 is not available — dispatch the 'Sandbox matrix image' workflow once to publish it, then re-run this job."
+            echo "::error::ghcr.io/${owner}/raptor-sandbox-matrix:u24 is not available — dispatch the 'Sandbox matrix image' workflow once to publish it (and check the package still grants this repo access and is Private, not deleted), then re-run this job."
             exit 1
           fi
           # run-matrix.sh --skip-build looks for the local build tag.
           docker tag "ghcr.io/${owner}/raptor-sandbox-matrix:u24" \
             raptor-sandbox-matrix:u24
 
-      - name: Run the matrix subset (u24 x full,default)
+      - name: Run the matrix subset (u24 x full,default, prebuilt image)
+        if: needs.pre_check.outputs.pkg_access == 'true'
         run: core/sandbox/scripts/feature-matrix/run-matrix.sh --image 24 --lanes full,default --skip-build
+
+      # Fork-PR fallback: the restricted token cannot pull the private
+      # package, so build the u24 image on the runner and run the same
+      # two lanes — slower but never blocked, replicating _tier.yml's
+      # runner fallback for raptor-ci-deps rather than skipping fork
+      # PRs out of the lattice signal.
+      - name: Run the matrix subset (u24 x full,default, fork build fallback)
+        if: needs.pre_check.outputs.pkg_access != 'true'
+        run: core/sandbox/scripts/feature-matrix/run-matrix.sh --image 24 --lanes full,default
 
       - name: Surface the matrix report in the step summary
         if: failure()
