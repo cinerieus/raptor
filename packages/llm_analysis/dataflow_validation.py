@@ -25,7 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from core.llm.coerce import structured_result
+from core.llm.coerce import structured_result, to_lower_token_safe
 from core.paths import strip_file_uri
 from core.security.prompt_envelope import neutralize_tag_forgery
 from packages.hypothesis_validation import Hypothesis
@@ -1456,15 +1456,13 @@ def _tier4_smt_refine_inner(
         return result, "no_check"
     # LLMs routinely violate structured-output schemas: `path_profile`
     # can arrive as an int/list/dict. Coerce non-strings to the default
-    # profile instead of crashing on `.strip()`.
-    raw_profile = (
+    # profile instead of crashing on `.strip()` — shared with the
+    # `_smt_pre_flight` twin in agent.py so the sites cannot drift.
+    profile_name = to_lower_token_safe(
         dataflow_validation.get("path_profile")
-        or (analysis or {}).get("path_profile")
-        or "uint64"
+        or (analysis or {}).get("path_profile"),
+        "uint64",
     )
-    profile_name = (
-        raw_profile.strip().lower() if isinstance(raw_profile, str) else ""
-    ) or "uint64"
 
     try:
         from packages.exploit_feasibility.smt_path import validate_path

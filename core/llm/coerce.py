@@ -112,6 +112,23 @@ def to_float_safe(
         return default
 
 
+def to_lower_token_safe(value: Any, default: str) -> str:
+    """Coerce an LLM-supplied string token to stripped lowercase.
+
+    LLMs routinely violate structured-output schemas: a field typed
+    "string" can arrive as an int/list/dict (or as whitespace).
+    Returns ``value.strip().lower()`` when ``value`` is a non-blank
+    ``str``, else ``default`` — so enum-ish token fields (e.g. an SMT
+    ``path_profile``) degrade to their documented default instead of
+    crashing on ``.strip()``.
+    """
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token:
+            return token
+    return default
+
+
 def structured_result(response: Any, *, default: Any = None) -> Any:
     """Unwrap the result payload from a ``generate_structured`` return.
 

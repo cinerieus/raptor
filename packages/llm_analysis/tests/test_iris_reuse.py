@@ -415,6 +415,26 @@ class TestSmtPreFlight:
         v = self._make_vuln_with_conditions(["x > 1"], profile="bogus")
         assert agent._smt_pre_flight(v) == "no_check"
 
+    def test_non_string_profile_never_raises(self, tmp_path):
+        """LLM schema drift: `path_profile` arrives as a list/int/dict
+        (the schema says string-or-null). The gate must degrade to the
+        default profile, not raise AttributeError out of
+        `generate_exploit` and abort the whole sequential run."""
+        agent = self._agent(tmp_path)
+        for bad_profile in (["uint32"], 64, {"profile": "uint64"}):
+            v = self._make_vuln_with_conditions(
+                ["x > 100", "x < 5"], profile=bad_profile,
+            )
+            # Coerced to the default profile; the unsat conditions
+            # still produce a real verdict.
+            assert agent._smt_pre_flight(v) == "refuted"
+
+    def test_null_profile_uses_default(self, tmp_path):
+        agent = self._agent(tmp_path)
+        v = self._make_vuln_with_conditions(["x > 100", "x < 5"],
+                                            profile=None)
+        assert agent._smt_pre_flight(v) == "refuted"
+
     def test_smt_unavailable_no_check(self, tmp_path):
         """When the SMT substrate isn't importable, no_check (silent
         fallthrough) — exploit gen continues blind."""

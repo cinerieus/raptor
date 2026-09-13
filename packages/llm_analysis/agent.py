@@ -34,6 +34,7 @@ from core.config import RaptorConfig
 from core.inventory.lookup import lookup_function as _lookup_function
 from core.json import load_json, save_json
 from core.llm.client import LLMClient, _is_auth_error
+from core.llm.coerce import to_lower_token_safe
 from core.llm.config import LLMConfig
 from core.llm.detection import detect_llm_availability
 from core.llm.providers import ClaudeCodeProvider
@@ -1604,11 +1605,16 @@ class AutonomousSecurityAgentV2:
         )
         if not conditions:
             return "no_check"
-        profile = (
-            nested.get("path_profile")
-            or analysis.get("path_profile")
-            or "uint64"
-        ).strip().lower()
+        # Same schema-drift coercion as the Tier 4 twin
+        # (`dataflow_validation._tier4_smt_refine_inner`): LLMs
+        # routinely emit `path_profile` as an int/list/dict — the
+        # shared to_lower_token_safe degrades to the default profile
+        # instead of crashing `.strip()` (which would abort the whole
+        # sequential run out of `generate_exploit`).
+        profile = to_lower_token_safe(
+            nested.get("path_profile") or analysis.get("path_profile"),
+            "uint64",
+        )
 
         try:
             from packages.exploit_feasibility.smt_path import validate_path
