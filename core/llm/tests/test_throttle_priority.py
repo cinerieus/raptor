@@ -65,8 +65,20 @@ class TestLowPriorityAcquire:
         t_low = threading.Thread(target=low)
         t_low.start()
         t_normal.start()
-        # Give both contenders time to enter their wait loops.
-        time.sleep(0.3)
+        # Positive checkpoint instead of a fixed sleep: the strict
+        # order assert below is only valid once the NORMAL contender
+        # has registered itself (low-priority defers only while
+        # ``_sync_waiters > 0``); on a loaded box a fixed 0.3s window
+        # let low legitimately win the freed slot. Single read per
+        # check — ``_sync_waiters`` transiently drops to 0 on every
+        # bounded-wait cycle (same pattern as test_throttle.py's
+        # blocked checkpoint).
+        deadline = time.monotonic() + 5.0
+        observed = throttle._sync_waiters
+        while observed == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+            observed = throttle._sync_waiters
+        assert observed >= 1
         release_first.set()
 
         for t in (t_holder, t_normal, t_low):
