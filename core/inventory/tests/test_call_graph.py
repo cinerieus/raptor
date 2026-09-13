@@ -406,3 +406,25 @@ class TestLoaderLanguageDispatch:
         )
         graphs = load_call_graphs(tmp_path)
         assert "other.hxx" in graphs
+
+
+class TestModuleExportContract:
+    """``__all__`` must stay complete — it previously sat mid-file and
+    silently omitted every extractor defined after it (scala / kotlin /
+    swift) plus load_call_graphs."""
+
+    def test_all_covers_every_public_extractor(self):
+        from core.inventory import call_graph as cg
+
+        public_extractors = {
+            name for name in vars(cg)
+            if name.startswith("extract_call_graph_")
+        }
+        assert public_extractors <= set(cg.__all__)
+        assert "load_call_graphs" in cg.__all__
+
+    def test_all_names_resolve(self):
+        from core.inventory import call_graph as cg
+
+        missing = [n for n in cg.__all__ if not hasattr(cg, n)]
+        assert not missing

@@ -5691,32 +5691,6 @@ class _LuaCallGraph:
         return None
 
 
-__all__ = [
-    "INDIRECTION_BRACKET_DISPATCH",
-    "INDIRECTION_DUNDER_IMPORT",
-    "INDIRECTION_DYNAMIC_IMPORT",
-    "INDIRECTION_EVAL",
-    "INDIRECTION_FN_POINTER",
-    "INDIRECTION_GETATTR",
-    "INDIRECTION_IMPORTLIB",
-    "INDIRECTION_REFLECT",
-    "INDIRECTION_WILDCARD_IMPORT",
-    "CallSite",
-    "FileCallGraph",
-    "extract_call_graph_c",
-    "extract_call_graph_cpp",
-    "extract_call_graph_csharp",
-    "extract_call_graph_go",
-    "extract_call_graph_java",
-    "extract_call_graph_javascript",
-    "extract_call_graph_lua",
-    "extract_call_graph_php",
-    "extract_call_graph_python",
-    "extract_call_graph_ruby",
-    "extract_call_graph_rust",
-]
-
-
 # ---------------------------------------------------------------------------
 # Scala
 # ---------------------------------------------------------------------------
@@ -6591,3 +6565,37 @@ def load_call_graphs(
             max_files, skipped,
         )
     return graphs
+
+
+# At the very end so nothing defined below it can be forgotten — the
+# previous mid-file placement silently omitted every extractor added
+# after it (scala/kotlin/swift) plus load_call_graphs.
+__all__ = [
+    "INDIRECTION_BRACKET_DISPATCH",
+    "INDIRECTION_DUNDER_IMPORT",
+    "INDIRECTION_DYNAMIC_IMPORT",
+    "INDIRECTION_EVAL",
+    "INDIRECTION_FN_POINTER",
+    "INDIRECTION_GETATTR",
+    "INDIRECTION_GETATTR_OPAQUE",
+    "INDIRECTION_IMPORTLIB",
+    "INDIRECTION_REFLECT",
+    "INDIRECTION_WILDCARD_IMPORT",
+    "CallSite",
+    "FileCallGraph",
+    "extract_call_graph_c",
+    "extract_call_graph_cpp",
+    "extract_call_graph_csharp",
+    "extract_call_graph_go",
+    "extract_call_graph_java",
+    "extract_call_graph_javascript",
+    "extract_call_graph_kotlin",
+    "extract_call_graph_lua",
+    "extract_call_graph_php",
+    "extract_call_graph_python",
+    "extract_call_graph_ruby",
+    "extract_call_graph_rust",
+    "extract_call_graph_scala",
+    "extract_call_graph_swift",
+    "load_call_graphs",
+]
