@@ -143,7 +143,8 @@ def parse_msbuild_project(path: Path) -> list[Dependency]:
     try:
         root = _safe_fromstring(text)
     except _ET.ParseError as e:
-        logger.warning("sca.parsers.nuget: invalid XML in %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.nuget: XML parse failed for %s: %s", path, e)
         return []
 
     out: list[Dependency] = []
@@ -527,7 +528,8 @@ def parse_packages_config(path: Path) -> list[Dependency]:
     try:
         root = _safe_fromstring(text)
     except _ET.ParseError as e:
-        logger.warning("sca.parsers.nuget: invalid XML in %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.nuget: XML parse failed for %s: %s", path, e)
         return []
 
     out: list[Dependency] = []
@@ -601,7 +603,8 @@ def parse_lockfile(path: Path) -> list[Dependency]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        logger.warning("sca.parsers.nuget: cannot parse %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.nuget: JSON parse failed for %s: %s", path, e)
         return []
 
     if not isinstance(data, dict):

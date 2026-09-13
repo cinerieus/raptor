@@ -132,3 +132,86 @@ def test_capture_captures_oversize_manifest_refusal(tmp_path: Path) -> None:
     assert isinstance(f, ParseFailure)
     assert f.path == lock
     assert "size=" in f.reason
+
+
+# ---------------------------------------------------------------------------
+# Every ecosystem's parse failure must reach the collector — cargo,
+# composer, and the NuGet XML/JSON parsers previously logged shapes
+# that missed the canonical format, so whole ecosystems' failures
+# never surfaced in report.md.
+# ---------------------------------------------------------------------------
+
+def test_capture_captures_cargo_manifest_failure(tmp_path: Path) -> None:
+    m = tmp_path / "Cargo.toml"
+    m.write_text("[package\nname = broken toml", encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(m, ecosystem="Cargo"))
+    assert len(failures) == 1
+    assert failures[0].path == m
+
+
+def test_capture_captures_cargo_lockfile_failure(tmp_path: Path) -> None:
+    lock = tmp_path / "Cargo.lock"
+    lock.write_text("[[package\nbroken", encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(lock, ecosystem="Cargo"))
+    assert len(failures) == 1
+    assert failures[0].path == lock
+
+
+def test_capture_captures_composer_manifest_failure(tmp_path: Path) -> None:
+    cj = tmp_path / "composer.json"
+    cj.write_text('{ "require": broken }', encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(cj, ecosystem="Composer"))
+    assert len(failures) == 1
+    assert failures[0].path == cj
+
+
+def test_capture_captures_composer_lockfile_failure(tmp_path: Path) -> None:
+    cl = tmp_path / "composer.lock"
+    cl.write_text('{ "packages": [ broken ] }', encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(cl, ecosystem="Composer"))
+    assert len(failures) == 1
+    assert failures[0].path == cl
+
+
+def test_capture_captures_nuget_csproj_xml_failure(tmp_path: Path) -> None:
+    import pytest
+    from packages.sca.parsers import nuget
+    if not nuget._AVAILABLE:
+        pytest.skip("defusedxml not installed")
+    csproj = tmp_path / "app.csproj"
+    csproj.write_text("<Project><ItemGroup></Project>", encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(csproj, ecosystem="NuGet"))
+    assert len(failures) == 1
+    assert failures[0].path == csproj
+
+
+def test_capture_captures_nuget_lockfile_json_failure(tmp_path: Path) -> None:
+    lock = tmp_path / "packages.lock.json"
+    lock.write_text('{ "dependencies": broken }', encoding="utf-8")
+    with capture_parse_failures() as failures:
+        parse_manifest(_manifest(lock, ecosystem="NuGet"))
+    assert len(failures) == 1
+    assert failures[0].path == lock
+
+
+def test_capture_captures_directory_packages_props_failure(
+    tmp_path: Path,
+) -> None:
+    import pytest
+    from packages.sca.parsers import directory_packages_props as dpp
+    if not dpp._AVAILABLE:
+        pytest.skip("defusedxml not installed")
+    dpp.reset_cache()
+    props = tmp_path / "Directory.Packages.props"
+    props.write_text("<Project><ItemGroup></Project>", encoding="utf-8")
+    with capture_parse_failures() as failures:
+        dpp.parse_directory_packages_props(props)
+    assert len(failures) == 1
+    # The dpp warning escapes the path for log hygiene; the captured
+    # record still points at the file.
+    assert str(props.resolve()) in str(failures[0].path)

@@ -69,7 +69,8 @@ def parse_manifest(path: Path) -> list[Dependency]:
     try:
         data = _load_toml(path)
     except Exception as e:                   # noqa: BLE001
-        logger.warning("sca.parsers.cargo: %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.cargo: TOML parse failed for %s: %s", path, e)
         return []
 
     out: list[Dependency] = []
@@ -122,7 +123,8 @@ def parse_lockfile(path: Path) -> list[Dependency]:
     try:
         data = _load_toml(path)
     except Exception as e:                   # noqa: BLE001
-        logger.warning("sca.parsers.cargo: %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.cargo: TOML parse failed for %s: %s", path, e)
         return []
 
     packages = data.get("package") or []

@@ -236,7 +236,8 @@ def parse_directory_packages_props(path: Path) -> CPMFile | None:
         root = _safe_fromstring(text)
     except _ET.ParseError as e:
         logger.warning(
-            "sca.parsers.directory_packages_props: invalid XML in %s: %s",
+            "sca.parsers.directory_packages_props: XML parse failed "
+            "for %s: %s",
             escape_nonprintable(str(resolved)),
             escape_nonprintable(str(e)),
         )
@@ -543,7 +544,8 @@ def parse_directory_build_props(path: Path) -> CPMFile | None:
         root = _safe_fromstring(text)
     except _ET.ParseError as e:
         logger.warning(
-            "sca.parsers.directory_packages_props: invalid XML in %s: %s",
+            "sca.parsers.directory_packages_props: XML parse failed "
+            "for %s: %s",
             escape_nonprintable(str(resolved)),
             escape_nonprintable(str(e)),
         )

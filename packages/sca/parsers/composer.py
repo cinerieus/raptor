@@ -50,7 +50,8 @@ def parse_manifest(path: Path) -> list[Dependency]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        logger.warning("sca.parsers.composer: %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.composer: JSON parse failed for %s: %s", path, e)
         return []
 
     if not isinstance(data, dict):
@@ -130,7 +131,8 @@ def parse_lockfile(path: Path) -> list[Dependency]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
-        logger.warning("sca.parsers.composer: %s: %s", path, e)
+        logger.warning(
+            "sca.parsers.composer: JSON parse failed for %s: %s", path, e)
         return []
 
     out: list[Dependency] = []
