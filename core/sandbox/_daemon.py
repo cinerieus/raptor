@@ -467,8 +467,21 @@ def _render_compose(chunks, recvs):
             if not tok:
                 msg = f"recv_le64: recvs[{idx}] is empty after tokenization"
                 raise ValueError(msg)
-            value = int(tok, 16)
-            out += _struct.pack("<Q", value & 0xFFFFFFFFFFFFFFFF)
+            # Budget the parse the way _parse_bytes_to_int does: hex
+            # is EXEMPT from CPython's int_max_str_digits guard and
+            # the token can be as long as the capture cap, so a
+            # hostile target minting megabytes of hex used to cost a
+            # multi-megabit int materialisation per chunk before the
+            # 64-bit mask discarded it. Only 64 bits survive the LE64
+            # pack and 16 hex digits carry exactly those bits —
+            # validating the whole token then parsing its last 16
+            # digits is value-identical to the unbounded parse+mask
+            # (and non-hex input still raises, as int() did).
+            if re.fullmatch(r"[0-9a-fA-F]+", tok) is None:
+                msg = (f"recv_le64: recvs[{idx}] first token is not "
+                       f"a hex integer")
+                raise ValueError(msg)
+            out += _struct.pack("<Q", int(tok[-16:], 16))
         else:
             msg = f"unknown compose chunk kind: {kind!r}"
             raise ValueError(msg)
