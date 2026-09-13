@@ -289,9 +289,17 @@ def _apply_role_grade(rule_id: str, role: RoleEvidence) -> str:
 
 
 def _read_source(target_path: Path, file_path: str) -> str | None:
+    # file_path arrives from review-outcome/checklist artifacts — an
+    # LLM-writable trust class. Confine the join: an absolute path
+    # would discard target_path entirely and a ``..`` segment would
+    # escape it, pulling arbitrary host file lines into evidence
+    # records and prompts. Rejection reads as "source unavailable"
+    # (the caller's hypothesis-unbindable inconclusive), never a
+    # verdict.
+    from ._util import safe_join
     try:
-        p = Path(target_path) / file_path
-        if p.is_file():
+        p = safe_join(Path(target_path), file_path)
+        if p is not None and p.is_file():
             return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         pass

@@ -222,8 +222,16 @@ def compute_edge_gaps(
 def _read_span(
     target_path: Path, file: str, span: tuple[int, int],
 ) -> str:
+    # The obligation record's file fields are LLM-writable artifact
+    # data. Confine the join: an absolute path would discard
+    # target_path and ``..`` would escape it — either way arbitrary
+    # host file lines would be quoted into the contract-audit prompt.
+    from ._util import safe_join
+    p = safe_join(Path(target_path), file)
+    if p is None:
+        return "(source not available)"
     try:
-        lines = (Path(target_path) / file).read_text(
+        lines = p.read_text(
             encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return "(source not available)"

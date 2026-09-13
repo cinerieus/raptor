@@ -2287,6 +2287,59 @@ class TestReturnDomainLeg:
             res.rule_id.startswith(RULE_RETURN_DOMAIN)
 
 
+class TestSourceReadContainment:
+    """file_path arrives from LLM-writable artifacts: reads must stay
+    confined to the target tree. An escaping path yields the
+    hypothesis-unbindable inconclusive — never file content from
+    outside the target, never a verdict."""
+
+    HYP = "handler catches broad exception and falls through open"
+
+    def test_absolute_path_is_rejected(self, tmp_path):
+        from core.audit.fail_open_verify import run_fail_open_check
+
+        target = tmp_path / "target"
+        target.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text(
+            "def current_user():\n"
+            "    try:\n"
+            "        return jwt.decode(t)\n"
+            "    except Exception:\n"
+            "        return None\n",
+        )
+        res = run_fail_open_check(
+            target, str(outside), "current_user", self.HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert res.reason.startswith("hypothesis-unbindable")
+
+    def test_dotdot_path_is_rejected(self, tmp_path):
+        from core.audit.fail_open_verify import run_fail_open_check
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "escape.py").write_text("x = 1\n")
+        res = run_fail_open_check(
+            target, "../escape.py", "f", self.HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert res.reason.startswith("hypothesis-unbindable")
+
+    def test_in_target_relative_path_still_reads(self, tmp_path):
+        from core.audit.fail_open_verify import run_fail_open_check
+
+        target = tmp_path / "target"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "auth.py").write_text("x = 1\n")
+        res = run_fail_open_check(
+            target, "src/auth.py", "missing_fn", self.HYP,
+        )
+        # The read succeeded: the failure mode is now about binding
+        # the function, not about reading the file.
+        assert "could not read" not in res.reason
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     sys.exit(pytest.main([__file__, "-q"]))

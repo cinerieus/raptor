@@ -410,6 +410,40 @@ class TestEdgePrompt:
         assert "boundary:socket" in prompt
 
 
+class TestReadSpanContainment:
+    """Obligation-record file fields are LLM-writable artifact data:
+    endpoint-body reads must stay confined to the target tree."""
+
+    def test_absolute_path_rejected(self, tmp_path):
+        from core.audit.edge_review import _read_span
+
+        target = tmp_path / "target"
+        target.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_text("credential material\n")
+        out = _read_span(target, str(secret), (1, 1))
+        assert out == "(source not available)"
+        assert "credential" not in out
+
+    def test_dotdot_path_rejected(self, tmp_path):
+        from core.audit.edge_review import _read_span
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (tmp_path / "secret.txt").write_text("credential material\n")
+        assert _read_span(
+            target, "../secret.txt", (1, 1),
+        ) == "(source not available)"
+
+    def test_in_target_path_still_reads(self, tmp_path):
+        from core.audit.edge_review import _read_span
+
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "a.c").write_text("line one\nline two\n")
+        assert "line one" in _read_span(target, "a.c", (1, 2))
+
+
 class TestKnowledgeDegradationGate:
     """run_edge_pass states missing OR EMPTY domain models as degraded."""
 
