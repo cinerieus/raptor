@@ -365,3 +365,29 @@ class TestFormatForPrompt:
         assert "a.py:clean" in text
         assert "`strip`" in text
         assert "`encode`" in text
+
+
+class TestMethodChainDeduplication:
+    def test_chain_prefixes_not_emitted_separately(self):
+        """A >=3-step method chain used to yield the full chain PLUS
+        every prefix sub-chain — double-counted catalog violations and
+        inflated sibling counts."""
+        src = textwrap.dedent("""\
+            def clean(text):
+                return text.unquote().sanitize_a().sanitize_b()
+        """)
+        seqs = extract_transform_sequences({"util.py": src})
+        assert len(seqs) == 1
+        assert [s.call_name for s in seqs[0].steps] == [
+            ".unquote", ".sanitize_a", ".sanitize_b",
+        ]
+
+    def test_two_independent_chains_both_emitted(self):
+        src = textwrap.dedent("""\
+            def clean(a, b):
+                x = a.unquote().sanitize_a()
+                y = b.escape_html().decode_entities()
+                return x, y
+        """)
+        seqs = extract_transform_sequences({"util.py": src})
+        assert len(seqs) == 2

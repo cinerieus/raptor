@@ -401,6 +401,11 @@ class _SequenceExtractor(ast.NodeVisitor):
         self.func_lineno = func_lineno
         self.sequences: list[TransformSequence] = []
         self._reassign_chains: dict[str, list[TransformStep]] = {}
+        # Call nodes that are interior links of an already-emitted
+        # method chain: their steps are a strict sub-chain of the
+        # enclosing call's and must not be emitted separately (the
+        # tree-sitter extractor guards this with _is_chain_object).
+        self._chain_interior: set[ast.Call] = set()
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) != 1:
@@ -471,6 +476,7 @@ class _SequenceExtractor(ast.NodeVisitor):
         var_name = ""
         current = node
 
+        interior: list[ast.Call] = []
         while isinstance(current, ast.Call):
             if isinstance(current.func, ast.Attribute):
                 steps.append(TransformStep(
@@ -479,6 +485,8 @@ class _SequenceExtractor(ast.NodeVisitor):
                     args_summary=_first_arg_summary(current),
                 ))
                 current = current.func.value
+                if isinstance(current, ast.Call):
+                    interior.append(current)
             else:
                 break
 
@@ -487,6 +495,7 @@ class _SequenceExtractor(ast.NodeVisitor):
 
         if len(steps) < 2:
             return None
+        self._chain_interior.update(interior)
 
         steps.reverse()
         return TransformSequence(
@@ -497,10 +506,12 @@ class _SequenceExtractor(ast.NodeVisitor):
         )
 
     def visit_Call(self, node: ast.Call) -> None:
-        # Check for method chains
-        chain = self._extract_method_chain(node)
-        if chain:
-            self.sequences.append(chain)
+        # Check for method chains — but never re-emit the prefixes of a
+        # chain already extracted from an enclosing call node.
+        if node not in self._chain_interior:
+            chain = self._extract_method_chain(node)
+            if chain:
+                self.sequences.append(chain)
         self.generic_visit(node)
 
     def finalize(self) -> list[TransformSequence]:
