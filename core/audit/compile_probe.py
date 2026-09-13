@@ -698,9 +698,12 @@ def determine_probe_question(
         if non_negative is None or negative is None:
             return _unavailable("sandboxed compile invocation failed")
         if non_negative == negative:
+            # Both held or neither held — the probes must be mutually
+            # exclusive and exhaustive for an integer constant.
             return _unavailable(
-                "sign probes disagree — expression does not behave "
-                "as an integer constant under comparison",
+                "sign probes did not resolve to exactly one of "
+                ">= 0 / < 0 — expression does not behave as an "
+                "integer constant under comparison",
             )
 
         # Bisection: find the least K with (expr) <= K.  The literal
