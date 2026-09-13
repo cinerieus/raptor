@@ -2139,14 +2139,24 @@ def _handle_waitpid_event(
                 # only the global cap (which truncates audit
                 # entirely) gets the stderr ping.
                 if budget.pop_global_cap_notice():
-                    os.write(2, (
-                        f"RAPTOR tracer: audit-record global cap "
-                        f"({budget.global_cap}) reached; further "
-                        f"events dropped (sub-caps still apply; "
-                        f"sampling continues for high-volume "
-                        f"categories). End-of-run audit_summary "
-                        f"record has totals.\n"
-                    ).encode("ascii", errors="replace"))
+                    # Guarded like every other live stderr banner in
+                    # this module: fd 2 can be closed/broken (parent
+                    # died mid-run, daemonised invocation) and an
+                    # OSError here would crash the tracer out of its
+                    # event loop — PTRACE_O_EXITKILL then SIGKILLs
+                    # every tracee mid-workload. The notice is
+                    # best-effort; audit_summary carries the totals.
+                    try:
+                        os.write(2, (
+                            f"RAPTOR tracer: audit-record global cap "
+                            f"({budget.global_cap}) reached; further "
+                            f"events dropped (sub-caps still apply; "
+                            f"sampling continues for high-volume "
+                            f"categories). End-of-run audit_summary "
+                            f"record has totals.\n"
+                        ).encode("ascii", errors="replace"))
+                    except OSError:
+                        pass
         # Continue regardless — audit mode allows the syscall.
         ptrace_cont(wpid, 0)
         return
