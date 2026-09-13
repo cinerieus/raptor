@@ -7119,9 +7119,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
         # releasing the audit ref-count. Per-spawn events were
         # fanned into BOTH the per-spawn token (already persisted
         # by ``_run()``) AND the block token; dedup on
-        # ``(t, host, port)`` so the JSONL doesn't carry
-        # duplicates. ``_sandbox_events`` is the cumulative
-        # per-spawn view appended after each inner ``run()``.
+        # ``(proxy_seq, t, host, port)`` so the JSONL doesn't carry
+        # duplicates. The proxy's per-event ``proxy_seq`` (distinct
+        # from the persisted stream ``seq``) keeps two
+        # GENUINELY DISTINCT events apart even when they tie on
+        # (t, host, port) — a bare timestamp key silently dropped
+        # such a second event from the persisted JSONL.
+        # ``_sandbox_events`` is the cumulative per-spawn view
+        # appended after each inner ``run()``.
         if _block_token is not None and proxy_instance is not None:
             try:
                 _block_events = proxy_instance.unregister_sandbox(
@@ -7131,12 +7136,14 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                 _block_events = []
             if _block_events:
                 _seen = {
-                    (e.get("t"), e.get("host"), e.get("port"))
+                    (e.get("proxy_seq"), e.get("t"), e.get("host"),
+                     e.get("port"))
                     for e in _sandbox_events
                 }
                 _block_only = [
                     e for e in _block_events
-                    if (e.get("t"), e.get("host"), e.get("port"))
+                    if (e.get("proxy_seq"), e.get("t"), e.get("host"),
+                        e.get("port"))
                     not in _seen
                 ]
                 if _block_only:

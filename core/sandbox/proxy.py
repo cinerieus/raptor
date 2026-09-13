@@ -1314,8 +1314,18 @@ class EgressProxy:
         # asyncio is single-threaded and reads/writes serialise on the
         # loop.
         self._dns_cache: dict = {}
+        # Per-proxy event sequence. Stamped on every event at record
+        # time so downstream de-dup (context.py's cm-block drain
+        # persists only block events not already persisted per-spawn)
+        # can tell "the same event fanned into two buffers" (same
+        # seq) from two genuinely distinct events that happen to
+        # share (t, host, port) — time.monotonic() ties are rare but
+        # real under bursty tunnels.
+        self._event_seq = itertools.count(1)
         # Event ring buffer for observability. Each entry is a dict:
-        #   {"t": monotonic_seconds, "host": str, "port": int,
+        #   {"proxy_seq": int (unique per proxy instance; distinct from
+        #    the persisted stream "seq" the JSONL writer stamps),
+        #    "t": monotonic_seconds, "host": str, "port": int,
         #    "result": one of _PROXY_EVENT_RESULTS (see module-level
         #              constant — pinned by structural test so any
         #              new result string fires the test until added),
@@ -2014,6 +2024,10 @@ class EgressProxy:
         outside the lock.
         """
         lane_id = event.get("lane_id")
+        # Identity stamp (see __init__): every recorded event carries
+        # a unique seq; the same dict fanned into several buffers
+        # keeps the one seq through the unregister copies.
+        event.setdefault("proxy_seq", next(self._event_seq))
         with self._buffer_lock:
             for tok, buf, sub in self._sandbox_buffers_snapshot:
                 if sub is None or (lane_id is not None and sub == lane_id):
@@ -2054,6 +2068,7 @@ class EgressProxy:
                 buf.append(event)
                 return
             marker = {
+                "proxy_seq": next(self._event_seq),
                 "t": time.monotonic(),
                 "host": None, "port": None,
                 "result": "buffer_overflow",
