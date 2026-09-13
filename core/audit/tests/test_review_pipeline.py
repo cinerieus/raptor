@@ -633,6 +633,60 @@ class TestConfidencePropagation:
         demotions = propagate_confidence(outcomes, edge_index)
         assert len(demotions) == 0
 
+    def test_same_name_other_file_callers_not_matched(self):
+        """Callers of a same-named function in a DIFFERENT file must not
+        stand in for the flagged function's callers.
+
+        C statics make duplicate function names routine; a bare-name
+        match on a file-qualified edge collects the wrong function's
+        callers, and an all-clean wrong-caller set silently demotes a
+        suspicious outcome to clean.
+        """
+        from core.audit.propagation import propagate_confidence
+
+        outcomes = [
+            _MockOutcome("a.c", "caller1", "clean", "tool_backed"),
+            _MockOutcome("a.c", "caller2", "clean", "confirmed"),
+            _MockOutcome("b.c", "target", "suspicious", hypotheses=[
+                {"mechanism": "if the caller passes invalid length",
+                 "confidence": "medium", "counter": "trusts its caller"},
+            ]),
+        ]
+        # Both edges carry a callee_file that names OTHER.c — a
+        # different function that merely shares the name "target".
+        edge_index = {
+            "a.c:caller1": [{"caller_file": "a.c", "caller": "caller1",
+                             "callee_file": "other.c", "callee": "target"}],
+            "a.c:caller2": [{"caller_file": "a.c", "caller": "caller2",
+                             "callee_file": "other.c", "callee": "target"}],
+        }
+        demotions = propagate_confidence(outcomes, edge_index)
+        assert demotions == []
+
+    def test_fileless_edge_still_matches_bare_name(self):
+        """An edge with no callee_file keeps matching by bare name —
+        the file-less shape has no full key to require."""
+        from core.audit.propagation import propagate_confidence
+
+        outcomes = [
+            _MockOutcome("a.c", "caller1", "clean", "tool_backed"),
+            _MockOutcome("a.c", "caller2", "clean", "confirmed"),
+            _MockOutcome("b.c", "target", "suspicious", hypotheses=[
+                {"mechanism": "if the caller passes invalid length",
+                 "confidence": "medium", "counter": "trusts its caller"},
+            ]),
+        ]
+        edge_index = {
+            "a.c:caller1": [{"caller_file": "a.c", "caller": "caller1",
+                             "callee": "target"}],
+            "a.c:caller2": [{"caller_file": "a.c", "caller": "caller2",
+                             "callee": "target"}],
+        }
+        demotions = propagate_confidence(outcomes, edge_index)
+        assert len(demotions) == 1
+        assert demotions[0].file == "b.c"
+        assert demotions[0].function == "target"
+
 
 # ── Feature 4: Coccinelle concurrency rules ───────────────────────
 

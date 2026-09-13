@@ -1240,6 +1240,13 @@ def _get_callers_from_index(
     Production edges have keys caller_file, caller, callee_file, callee.
     Test edges may use the 'target' key as a file:function composite.
 
+    A file-qualified callee must match the full file:function key;
+    bare-name matching applies only to edges that carry no callee_file.
+    Duplicate function names are routine (C statics), and a bare-name
+    match on a file-qualified edge collects a DIFFERENT function's
+    callers — an all-clean wrong-caller set would then demote a
+    suspicious outcome on unrelated evidence.
+
     Returns deduplicated callers — edges are indexed under both caller
     and callee keys so the same edge appears twice in a full scan.
     """
@@ -1256,7 +1263,7 @@ def _get_callers_from_index(
             callee_name = edge.get("callee") or ""
             if callee_file and callee_name:
                 callee_key = f"{callee_file}:{callee_name}"
-                if callee_key == key or callee_name == key_func:
+                if callee_key == key:
                     caller_file = edge.get("caller_file", "")
                     caller_name = edge.get("caller", "")
                     if caller_file and caller_name:
@@ -1265,8 +1272,11 @@ def _get_callers_from_index(
                             seen.add(pair)
                             callers.append(pair)
                         continue
-            target = edge.get("target") or callee_name
-            if target == key or (key_func and target == key_func):
+            # The bare-name fallback is reserved for file-less edges: a
+            # file-qualified callee that failed the full-key check above
+            # must not re-enter through its bare name.
+            target = edge.get("target") or ("" if callee_file else callee_name)
+            if target and (target == key or (key_func and target == key_func)):
                 parts = edge_key.split(":", 1)
                 if len(parts) == 2:
                     pair = (parts[0], parts[1])
