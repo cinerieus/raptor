@@ -807,14 +807,7 @@ def _plan_one(
             # max_epss, count, idx). KEV-listed advisories are actively
             # exploited and outrank everything; CVSS severity outranks
             # EPSS; EPSS outranks raw count; idx breaks ties newest-first.
-            ranked_sorted = sorted(
-                enumerate(ranked),
-                key=lambda kv: (int(kv[1].any_in_kev),
-                                kv[1].max_severity,
-                                kv[1].max_epss,
-                                len(kv[1].advisory_ids),
-                                kv[0]),
-            )
+            ranked_sorted = sorted(enumerate(ranked), key=_rank_key)
             best = ranked_sorted[0][1]
             target_version = best.version
             residual_advs = list(best.advisory_ids)
@@ -1444,6 +1437,22 @@ def _run_self_test(
                     "%s (leak candidate): %s", worktree, e,
                 )
         _scratch.close()
+
+
+
+def _rank_key(kv: tuple[int, Any]) -> tuple[int, int, float, int, int]:
+    """Least-worst candidate ordering: (any_in_kev, max_severity,
+    max_epss, advisory count, original idx). KEV-listed advisories are
+    actively exploited and outrank everything; CVSS severity outranks
+    EPSS; EPSS outranks raw count; idx breaks ties newest-first.
+
+    Named (not an inline lambda) so the ranking-semantics tests sort
+    with the PRODUCTION key — a local test copy silently kept passing
+    when this ordering drifted.
+    """
+    idx, c = kv
+    return (int(c.any_in_kev), c.max_severity, c.max_epss,
+            len(c.advisory_ids), idx)
 
 
 def _count_actionable(

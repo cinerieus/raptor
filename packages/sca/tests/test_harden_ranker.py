@@ -156,15 +156,11 @@ def test_max_epss_via_alias() -> None:
 # ---------------------------------------------------------------------------
 
 def _rank(cands: List[_RankedCandidate]) -> List[str]:
-    """Apply harden's least-worst sort; return version order."""
-    sorted_idx = sorted(
-        enumerate(cands),
-        key=lambda kv: (int(kv[1].any_in_kev),
-                        kv[1].max_severity,
-                        kv[1].max_epss,
-                        len(kv[1].advisory_ids),
-                        kv[0]),
-    )
+    """Apply harden's least-worst sort (the PRODUCTION key — a local
+    copy of the lambda validated only itself); return version order."""
+    from packages.sca.harden import _rank_key
+
+    sorted_idx = sorted(enumerate(cands), key=_rank_key)
     return [c.version for _, c in sorted_idx]
 
 

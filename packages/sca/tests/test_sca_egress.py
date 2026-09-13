@@ -9,13 +9,11 @@ Verifies that:
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from packages.sca import SCA_ALLOWED_HOSTS
 from packages.sca.agent import _find_sca_agent, run_sca_subprocess

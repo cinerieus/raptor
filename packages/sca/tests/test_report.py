@@ -514,7 +514,7 @@ def _supply_chain(kind: str = "version_publish",
         declared_in=Path(declared_in),
         scope="main", is_lockfile=False,
         pin_style=PinStyle.RANGE, direct=True,
-        purl="pkg:pypi/[email protected]",
+        purl="pkg:pypi/requests@2.31.0",
         parser_confidence=Confidence("high", reason="t"),
     )
     return SupplyChainFinding(
@@ -569,7 +569,7 @@ def test_hygiene_dedup_uses_same_grouping():
         "ecosystem": "npm", "name": "lodash", "version": "4.17.20",
         "scope": "main", "is_lockfile": False,
         "pin_style": PinStyle.RANGE, "direct": True,
-        "purl": "pkg:npm/[email protected]",
+        "purl": "pkg:npm/lodash@4.17.20",
         "parser_confidence": Confidence("high", reason="t"),
     }
     h_a = HygieneFinding(
