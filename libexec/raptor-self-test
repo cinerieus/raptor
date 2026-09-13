@@ -110,6 +110,9 @@ class Ctx:
     def __init__(self, scratch: Path, args: argparse.Namespace) -> None:
         self.scratch = scratch
         self.args = args
+        # Set by the harness after the report; main's finally reads it
+        # to decide scratch retention.
+        self.failed_count = 0
         self.fixture = scratch / "fixture"
         self.fixture_sca = scratch / "fixture-sca"
         self.fixture_hostile = scratch / "fixture-hostile"
@@ -2203,10 +2206,31 @@ def main() -> int:
         print("raptor-self-test: no cases selected", file=sys.stderr)
         return 2
 
+    # Reaper-registered + keepalive'd like core.run.scratch mints:
+    # a SIGKILL'd harness strands multi-GB scratch (fixtures, SARIFs,
+    # binaries) that a later RAPTOR process's sweep can then reclaim.
+    from core.run import tmp_reaper
+    from core.run.scratch import keepalive_register
+    tmp_reaper.register_dir_prefix("raptor_selftest_")
     scratch = Path(tempfile.mkdtemp(prefix="raptor_selftest_"))
+    keepalive_register(scratch)
     ctx = Ctx(scratch, args)
     print(f"raptor-self-test: scratch={scratch}")
     print(f"raptor-self-test: {len(selected)} case(s) selected")
+    # try/finally so Ctrl-C (or any harness bug) still runs the
+    # delete-or-retain decision instead of stranding the scratch with
+    # no message.
+    try:
+        return _run_selected(ctx, args, selected)
+    finally:
+        failed = getattr(ctx, "failed_count", 0)
+        if args.keep or failed:
+            print(f"raptor-self-test: scratch retained at {scratch}")
+        else:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _run_selected(ctx: "Ctx", args, selected: list) -> int:
     try:
         build_fixture(ctx)
         build_hostile_fixture(ctx)
@@ -2214,8 +2238,6 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 — fixture failure aborts all
         print(f"raptor-self-test: fixture build failed: {exc}",
               file=sys.stderr)
-        if not args.keep:
-            shutil.rmtree(scratch, ignore_errors=True)
         return 1
 
     workers = args.case_workers or _default_case_workers()
@@ -2262,6 +2284,7 @@ def main() -> int:
     failed = sum(1 for r in results if r["status"] == "FAIL")
     passed = sum(1 for r in results if r["status"] == "PASS")
     skipped = sum(1 for r in results if r["status"] == "SKIP")
+    ctx.failed_count = failed
     print(f"\nraptor-self-test: {passed} passed, {failed} failed, "
           f"{skipped} skipped (logs: {ctx.logs})")
     if args.json:
@@ -2269,10 +2292,6 @@ def main() -> int:
             "results": results,
             "passed": passed, "failed": failed, "skipped": skipped,
         }, indent=2))
-    if args.keep or failed:
-        print(f"raptor-self-test: scratch retained at {scratch}")
-    else:
-        shutil.rmtree(scratch, ignore_errors=True)
     return 1 if failed else 0
 
 
