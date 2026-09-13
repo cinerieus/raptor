@@ -869,11 +869,18 @@ jobs:
       # as a silent multi-minute build on every PR.
       - name: Pull the prebuilt matrix image
         if: needs.pre_check.outputs.pkg_access == 'true'
+        # GHA expressions via env:, never interpolated into the script
+        # body — the canonical hardening pattern this repo documents in
+        # refit-sca-calibration.yml.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          echo "${{ github.token }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "$GH_TOKEN" \
+            | docker login ghcr.io -u "$ACTOR" --password-stdin
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
           if ! docker pull "ghcr.io/${owner}/raptor-sandbox-matrix:u24"; then
             echo "::error::ghcr.io/${owner}/raptor-sandbox-matrix:u24 is not available — dispatch the 'Sandbox matrix image' workflow once to publish it (and check the package still grants this repo access and is Private, not deleted), then re-run this job."
             exit 1

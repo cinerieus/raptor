@@ -97,16 +97,25 @@ jobs:
         run: core/sandbox/scripts/feature-matrix/run-matrix.sh --build-only --image 24
 
       - name: Log in to GHCR
+        # GHA expressions via env:, never interpolated into the script
+        # body — the canonical hardening pattern this repo documents in
+        # refit-sca-calibration.yml (and it keeps the token out of the
+        # shell source text).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
         run: |
-          echo "${{ github.token }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$GH_TOKEN" \
+            | docker login ghcr.io -u "$ACTOR" --password-stdin
 
       - name: Tag and push
+        env:
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           # Lowercase the owner — GHCR repository paths must be lowercase
-          # and ${{ github.repository_owner }} can carry mixed case.
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          # and the repository_owner context can carry mixed case.
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/raptor-sandbox-matrix"
           # Content tag over the inputs that define the u24 image (fixed
           # order — the hash must be reproducible from a checkout).

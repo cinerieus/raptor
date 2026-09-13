@@ -58,16 +58,25 @@ jobs:
           persist-credentials: false
 
       - name: Log in to GHCR
+        # GHA expressions via env:, never interpolated into the script
+        # body — the canonical hardening pattern this repo documents in
+        # refit-sca-calibration.yml (and it keeps the token out of the
+        # shell source text).
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
         run: |
-          echo "${{ github.token }}" \
-            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          echo "$GH_TOKEN" \
+            | docker login ghcr.io -u "$ACTOR" --password-stdin
 
       - name: Build and push
+        env:
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           # Lowercase the owner — GHCR repository paths must be lowercase
-          # and ${{ github.repository_owner }} can carry mixed case.
-          owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          # and the repository_owner context can carry mixed case.
+          owner="$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner}/raptor-ci-deps"
           # Content tag over the manifests that define the image.
           reqhash="$(cat requirements.txt requirements-dev.txt | sha256sum | cut -c1-12)"
