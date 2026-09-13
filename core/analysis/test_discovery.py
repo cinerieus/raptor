@@ -284,6 +284,13 @@ def _find_test_files(target: Path) -> tuple[List[Path], int]:
         rel = root_path.relative_to(target)
         parts = rel.parts
 
+        # Prune skipped subtrees IN PLACE so os.walk doesn't descend
+        # them — the `continue` alone still paid the full walk cost of
+        # .git / node_modules / vendor trees on big vendored repos.
+        dirs[:] = [d for d in dirs
+                   if not d.startswith(".")
+                   and d not in ("node_modules", "vendor")]
+
         if any(p.startswith(".") for p in parts):
             continue
         if "node_modules" in parts or "vendor" in parts:
@@ -301,7 +308,15 @@ def _find_test_files(target: Path) -> tuple[List[Path], int]:
                 continue
             if is_test_dir or _TEST_FILE_PATTERNS.search(fname):
                 fpath = root_path / fname
-                if fpath.stat().st_size < 500_000:
+                try:
+                    size = fpath.stat().st_size
+                except OSError:
+                    # Dangling symlink / vanished file in the scanned
+                    # repo: skip the entry, keep the pass — one bad
+                    # entry used to abort the whole discovery walk
+                    # (ALL test evidence for the target lost).
+                    continue
+                if size < 500_000:
                     test_files.append(fpath)
 
     return test_files[:500], skipped_unsupported
@@ -355,8 +370,7 @@ def _infer_target_functions(
     calls = re.findall(r"(\w{2,})\s*\(", test_body)
     for call in calls:
         if (
-            call in test_body
-            and call != test_name  # the definition line matches too
+            call != test_name  # the definition line matches too
             and not call.startswith("test_")
             and not call.startswith("assert")
             and not call.startswith("self")

@@ -971,3 +971,45 @@ class TestCheckSinkGuardedTriState:
             "parse", "copies input with memcpy(", cm, joern_server=server,
         )
         assert verdict is None
+
+
+class TestBinaryOracleAbsentUnannotatedNamesake:
+    """The suppression invariant ("EVERY returned candidate is dead")
+    must be structural: an unannotated FUNCTION namesake blocks the
+    verdict (mirrors is_lexically_dead's all() rule) instead of being
+    skipped while a sibling's absent verdict licenses suppression."""
+
+    @staticmethod
+    def _inventory(items):
+        return {"files": [{"path": "src/a.c", "items": items}]}
+
+    _ABSENT = {
+        "name": "dead_fn", "kind": "function",
+        "line_start": 10, "line_end": 20,
+        "metadata": {"binary_oracle": {
+            "classification": "absent",
+            "binaries": [{"tier": "full", "path": "b", "build_id": "x"}],
+        }},
+    }
+
+    def test_annotated_absent_still_fires(self):
+        from core.analysis.reachability import binary_oracle_absent
+
+        inv = self._inventory([dict(self._ABSENT)])
+        assert binary_oracle_absent(inv, "src/a.c", "dead_fn") is True
+
+    def test_unannotated_function_namesake_blocks(self):
+        from core.analysis.reachability import binary_oracle_absent
+
+        unannotated = {"name": "dead_fn", "kind": "function",
+                       "line_start": 40, "line_end": 50, "metadata": {}}
+        inv = self._inventory([dict(self._ABSENT), unannotated])
+        assert binary_oracle_absent(inv, "src/a.c", "dead_fn") is False
+
+    def test_unannotated_non_function_namesake_does_not_block(self):
+        from core.analysis.reachability import binary_oracle_absent
+
+        macro = {"name": "dead_fn", "kind": "macro",
+                 "line_start": 60, "line_end": 70, "metadata": {}}
+        inv = self._inventory([dict(self._ABSENT), macro])
+        assert binary_oracle_absent(inv, "src/a.c", "dead_fn") is True

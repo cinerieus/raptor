@@ -2671,10 +2671,18 @@ def binary_oracle_absent(
     any_confirmed = False
     for item in candidates:
         meta = item.get("metadata")
-        if not isinstance(meta, dict):
-            continue
-        bo = meta.get("binary_oracle")
+        bo = meta.get("binary_oracle") if isinstance(meta, dict) else None
         if not isinstance(bo, dict):
+            # Unannotated FUNCTION candidate: block (return False) like
+            # is_lexically_dead's all() rule — the suppression invariant
+            # ("EVERY returned candidate is dead") must be structural,
+            # not dependent on enrichment completeness. Today
+            # enrich_inventory_with_binary_oracle annotates every native
+            # function item, so this only fires on a future partial
+            # join; non-function namesakes (globals/macros) never carry
+            # oracle verdicts and are skipped as before.
+            if item.get("kind", "function") == "function":
+                return False
             continue
         if bo.get("classification") != "absent":
             return False
@@ -3630,7 +3638,10 @@ def is_virtual_dispatch_candidate(
     if not class_name:
         return False
     idx = _get_or_build_index(inventory, exclude_test_files=exclude_test_files)
-    # getattr-guard a stale pickled index (pre-V7) that lacks the field.
+    # Defensive getattr: the persistent cache retired pickle at V10
+    # (data-only JSON always constructs a full index), so a field-less
+    # index can no longer be loaded — kept only as cheap belt-and-braces
+    # for hand-constructed test indexes.
     overrides = getattr(idx, "override_methods", None) or frozenset()
     return ((class_name, method_name) in overrides
             and method_name in idx.method_match)

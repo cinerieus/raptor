@@ -20,9 +20,10 @@ Used asymmetrically by the reachability classifier (Inc 2):
   * Binary call edges the source graph missed ⇒ promote callee to reachable
     (Inc 2; not built here).
 
-v1 scope (per design): Linux ELF, DWARF required, native targets (C/C++/
-Rust/Go). Stripped binary → ``skipped`` with reason; macOS Mach-O / PE
-deferred.
+v1 scope (per design): Linux ELF, native targets (C/C++/Rust/Go). A
+stripped binary (no DWARF) falls back to the nm-only ``symbol_only``
+tier — verdicts still enrich, but never earn ``absent``-suppression;
+macOS Mach-O / PE deferred.
 
 Implementation: shells out to system tools (``readelf``, ``nm``,
 ``objdump --dwarf=info``) — no Python DWARF library dependency. The text
@@ -500,9 +501,6 @@ def _strip_impl_block_brackets(name: str) -> str:
     return f"{inner}::{rest}"
 
 
-# Legacy back-compat — some callers may import the constant directly.
-_IMPL_BLOCK_RE = re.compile(r"^<([\w:]+)>::(.+)$")
-
 
 def _qualified_from_demangled(name: str) -> str:
     """Strip argument list + trailing method qualifiers + any leading
@@ -874,10 +872,10 @@ def classify_binary_evidence(
     Returns a name → ``BinaryOracleWitness`` mapping for every input name.
     Names not resolvable either way get ``absent`` (the DCE case).
 
-    The binary MUST have DWARF. A stripped binary (no DWARF subprograms
-    found) returns an empty mapping; the operator-visible skip is the
-    caller's responsibility (the witness is consumed at the reachability
-    layer in Inc 2, which logs the skip).
+    A stripped binary (no DWARF subprograms found) falls back to the
+    nm-only ``symbol_only`` tier: a full mapping is still returned, but
+    every witness carries ``tier="symbol_only"`` and the suppression
+    chokepoint refuses to hard-suppress on it.
     """
     binary_path = Path(binary_path)
     if not binary_path.is_file():

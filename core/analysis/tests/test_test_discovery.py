@@ -313,3 +313,40 @@ class TestTestDiscoveryPrepCache:
         result = td.discover_tests_cached(target, out)
         assert "alpha" in result
         assert result["alpha"][0].assertions
+
+
+class TestHostileTreeRobustness:
+    def test_dangling_symlink_does_not_abort_discovery(self, tmp_path):
+        """os.walk lists a dangling symlink as a file; the unguarded
+        stat() used to raise OSError and abort the whole discovery
+        pass — ALL test evidence for the target lost over one entry."""
+        tests = tmp_path / "tests"
+        tests.mkdir()
+        (tests / "test_real.py").write_text(
+            "def test_alpha():\n    assert alpha(1) == 2\n",
+        )
+        (tests / "test_dangling.py").symlink_to(tmp_path / "nowhere.py")
+        files, _skipped = _find_test_files(tmp_path)
+        assert [f.name for f in files] == ["test_real.py"]
+
+    def test_vendored_trees_are_pruned_not_walked(self, tmp_path, monkeypatch):
+        """node_modules/.git subtrees must be pruned in place — the
+        old `continue` still descended them."""
+        import os as _os
+
+        deep = tmp_path / "node_modules" / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        (deep / "test_x.py").write_text("def test_x():\n    pass\n")
+        visited = []
+        real_walk = _os.walk
+
+        def spy_walk(top, *a, **k):
+            for root, dirs, files in real_walk(top, *a, **k):
+                visited.append(root)
+                yield root, dirs, files
+
+        monkeypatch.setattr(_os, "walk", spy_walk)
+        files, _ = _find_test_files(tmp_path)
+        assert files == []
+        assert not any("node_modules" in v and v != str(tmp_path)
+                       for v in visited if "node_modules" in v.split(_os.sep)[1:])

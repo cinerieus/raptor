@@ -196,6 +196,15 @@ def _filter_locally_built(
             try:
                 rel = c.resolve().relative_to(repo.resolve()).as_posix()
             except ValueError:
+                # Resolves outside the repo (symlinked build dir, moved
+                # tree): dropped from BOTH lists — conservative, but say
+                # so like the repo-committed drop does, or the operator
+                # sees a binary vanish with no trace.
+                logger.warning(
+                    "binary-oracle: %s resolves outside the repo — "
+                    "excluded from auto-detect (pass --binary to use it)",
+                    c,
+                )
                 continue
             committed = rel in tracked or any(
                 rel == sm or rel.startswith(sm + "/")
