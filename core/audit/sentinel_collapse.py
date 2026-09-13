@@ -148,9 +148,16 @@ def _detect_except_same_as_success(
 # ---------------------------------------------------------------------------
 
 # cache[key] = None  /  cache.set(key, None)
+# The base name must LOOK like a cache: the comment above ("does the
+# function both write None to a cache-like name...") was the intent,
+# but a bare \w+ matched ANY subscript assignment — results[i] = None,
+# row["col"] = None — flagging ordinary dict bookkeeping whenever the
+# function also coerced any read.
+_CACHE_NAME = r"\w*(?:cache|cached|memo|lru)\w*"
 _CACHE_WRITE_NONE = re.compile(
-    r"""(?:(?P<cache>\w+)\[.+\]\s*=\s*None"""
-    r"""|(?P<cache2>\w+)\.set\(.+,\s*None\))""",
+    r"""(?:(?P<cache>{name})\[.+\]\s*=\s*None"""
+    r"""|(?P<cache2>{name})\.set\(.+,\s*None\))""".format(name=_CACHE_NAME),
+    re.IGNORECASE,
 )
 
 # cached or default  /  cached if cached else default
