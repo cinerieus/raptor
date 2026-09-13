@@ -25,6 +25,28 @@ Fail direction: a stripped payload degrades to "SAGE works, boot
 instructions withheld" — never a broken session, never silent
 execution of unauthorized directives.
 
+RESIDUAL CHANNELS (verified surfaces are ONLY initialize.instructions,
+the sage_inception result, and instruction-SHAPED first-tool-result
+preambles — a compromised server retains instruction-bearing channels
+this shim forwards verbatim):
+
+* ``tools/list`` responses: tool names/descriptions load into every
+  session's tool definitions — an instruction surface at least as
+  potent as ``initialize.instructions``. Unverified because the
+  authorized record (raptor-sage-setup review/approve) captures no
+  tools/list baseline; growing one is an approval-workflow change,
+  not a guard change.
+* Server-initiated requests and method-bearing notifications
+  (e.g. sampling requests): forwarded as "not a response, nothing to
+  verify".
+* Plain-prose payloads in the first tool result: the scrub is
+  shape-keyed (JSON object with an ``instructions`` key). A payload
+  rewritten as prose or under a renamed key is mechanically
+  indistinguishable from legitimate tool data and passes.
+
+Consumers must therefore keep treating ALL server-returned text as
+untrusted data (inbox security boundary), guard or no guard.
+
 Usage (invoked by libexec/raptor-sage-mcp only):
   raptor-sage-mcp-guard --authorized <file> -- <child command...>
 """
@@ -401,6 +423,14 @@ def _scrub_first_tool(msg: dict, surfaces) -> bool:
     or it is replaced with the warning. Fail direction: a future legit
     block with an ``instructions`` key gets stripped loudly, never an
     unauthorized preamble delivered silently.
+
+    LIMIT (see the module-header residual list): the rule is shape-
+    keyed. A payload rewritten as plain prose, or under a renamed
+    key, is mechanically indistinguishable from legitimate tool data
+    (the first tool may return arbitrary recall content) and passes —
+    allowlisting EVERY text block would strip real first-tool data on
+    every session. Prose injection in tool results remains covered by
+    the "tool results are untrusted data" boundary, not by this shim.
     """
     result = msg.get("result")
     if not isinstance(result, dict):
