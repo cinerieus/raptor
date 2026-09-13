@@ -124,6 +124,15 @@ class AttackChain:
     combined_impact: str
     severity: str
     narrative: str
+    # Chain-status vocabulary caveat: "confirmed" here means the
+    # table-driven composition passed its own constraint checks
+    # (_check_chain_constraints found no failures) — it is NOT the
+    # oracle-verified "confirmed" that /fuzz, /validate, and
+    # /crash-analysis mint and raptor-verified-outcomes surfaces
+    # (which does not read attack-chains.json). The value is an
+    # operator-surface contract (attack-chains.json summary keys,
+    # the findings-export count, the report's Confirmed section), so
+    # it stays; read it as "constraint-consistent", never as proof.
     chain_status: str = "confirmed"
     constraint_failures: list[str] = field(default_factory=list)
     mitigations: list[str] = field(default_factory=list)
@@ -288,6 +297,8 @@ def synthesize_chains(
                     outcomes[first_idx], outcomes[second_idx],
                     first_prim, second_prim,
                 )
+                # "confirmed" = constraint-consistent composition, not
+                # oracle-verified (see AttackChain.chain_status note).
                 status = "hypothetical" if constraint_failures else "confirmed"
                 severity = _IMPACT_SEVERITY.get(combined, "medium")
 
@@ -520,6 +531,8 @@ def _assemble_multi_step_chain(
         )
         constraint_failures.extend(pairwise_failures)
 
+    # "confirmed" = constraint-consistent composition, not
+    # oracle-verified (see AttackChain.chain_status note).
     status = "hypothetical" if constraint_failures else "confirmed"
 
     # Build combined impact from the full chain.
