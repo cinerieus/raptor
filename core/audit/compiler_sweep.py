@@ -770,7 +770,7 @@ def run_compiler_analyzer_sweep(
 
     suffix = full_path.suffix
     is_c = suffix in _C_SUFFIXES
-    is_cxx = suffix in _CXX_SUFFIXES or suffix == ".C"
+    is_cxx = suffix in _CXX_SUFFIXES
     if not (is_c or is_cxx):
         return _inconclusive(
             file_path, function_name,

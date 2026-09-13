@@ -42,7 +42,6 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from .sweep import SweepResult, _check_path_containment, _match_in_range
 
@@ -634,6 +633,3 @@ __all__ = [
     "run_flow_cocci_sweep",
     "victim_expr_valid",
 ]
-
-# Re-exported for type context in docstrings/tests.
-_ = Any

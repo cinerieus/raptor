@@ -304,7 +304,6 @@ def match_findings_to_bugs(
     function (or overlapping line range).
     """
     results: list[DetectionResult] = []
-    matched_bugs: set = set()
 
     for bug in bugs:
         detected = False
@@ -328,7 +327,6 @@ def match_findings_to_bugs(
                 detected = True
                 evidence_tier = finding.get("evidence_tier", "")
                 finding_id = finding.get("finding_id", finding.get("id", ""))
-                matched_bugs.add(bug.bug_id)
                 break
 
         results.append(DetectionResult(

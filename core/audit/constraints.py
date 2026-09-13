@@ -20,14 +20,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Any, TYPE_CHECKING
+from pathlib import Path
+from typing import Any
+
+from core.json import load_json, save_json
 
 from ._util import find_function_lines, safe_join
-from core.json import load_json, save_json
-from pathlib import Path
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
