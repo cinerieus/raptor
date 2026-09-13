@@ -341,6 +341,23 @@ _PROXY_HANDSHAKE_MAX_HEADERS = 100
 _TLS_PEEK_MAX_BYTES = 2 ** 14 + 5
 _TLS_PEEK_TIMEOUT_S = 3.0
 
+# Capacity-refusal request drain. A 429 is decided at accept time,
+# before the CONNECT request is read; the refusing handler consumes
+# what the client has already sent (bounded, never parsed) so the
+# refusal line lands as a clean request/response exchange instead of
+# racing the close against the client's send — an unread request makes
+# a mid-``sendall`` client see EPIPE on unix lanes, and a TCP close
+# with unread inbound data may RST the queued 429 off the wire. Bounds
+# trade both directions: larger/longer tolerates slower clients but
+# hands a CONNECT flooder a longer slotless hold per refused
+# connection; smaller/shorter frees the handler sooner but re-opens
+# the send/close race for a client that had not written yet. 1 KiB /
+# 250 ms covers a one-burst CONNECT handshake (well under 1 KiB — see
+# the handshake budgets above) at negligible hold cost; the refused
+# socket never occupies a tunnel slot either way.
+_REFUSAL_DRAIN_MAX_BYTES = 1024
+_REFUSAL_DRAIN_TIMEOUT_S = 0.25
+
 # TCP keepalive for established tunnel legs. Corporate proxies, NAT
 # gateways, and stateful firewalls drop connection state for tunnels
 # that go quiet — a thinking model can be silent for minutes while
@@ -2718,9 +2735,10 @@ class EgressProxy:
             # must be visible in proxy-events.jsonl / triage, not
             # only the process log — same "capped is never silent"
             # property the buffer-overflow marker guarantees. No
-            # host/port: the refusal happens before the handshake is
-            # read (holding the slotless connection open to parse a
-            # CONNECT line would defeat the cap).
+            # host/port: the handshake is never PARSED on this path
+            # (the bounded drain below reads bytes for delivery
+            # semantics only — parsing a CONNECT line for a slotless
+            # connection would defeat the cap).
             event = {
                 "t": time.monotonic(),
                 "host": None, "port": None,
@@ -2732,6 +2750,16 @@ class EgressProxy:
                 "bytes_c2u": 0, "bytes_u2c": 0, "duration": 0.0,
             }
             self._record(event)
+            # Bounded request drain before the refusal line — rationale
+            # and both-direction bound trade-offs at the constants
+            # (_REFUSAL_DRAIN_*). Timeout → the client hadn't written
+            # yet; proceed to the write, today's race window returns
+            # but the 429 stays queued for a client that reads.
+            with contextlib.suppress(OSError, RuntimeError,
+                                     asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    reader.read(_REFUSAL_DRAIN_MAX_BYTES),
+                    timeout=_REFUSAL_DRAIN_TIMEOUT_S)
             try:
                 await self._write_error(writer, 429, "Too Many Tunnels")
             finally:

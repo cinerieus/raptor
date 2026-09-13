@@ -12,6 +12,7 @@ enforcing.
 
 import os
 import socket
+import time
 
 import pytest
 
@@ -52,16 +53,29 @@ def _connect_unix(path: str, target: str, timeout: float = 5.0) -> int:
 
 
 def _drive_connect(s: socket.socket, target: str) -> int:
-    s.sendall((f"CONNECT {target} HTTP/1.1\r\n"
-               f"Host: {target}\r\n\r\n").encode("latin-1"))
+    # Accept-time refusals (capacity 429) may write-and-close before
+    # this request is read, so the send can race the server's close:
+    # on unix sockets a sendall after the peer closed raises EPIPE
+    # even though the refusal line is already queued in OUR receive
+    # buffer — fall through and read it. A reset while reading means
+    # the response really was lost: report status 0 and let the
+    # caller's assertions (status / recorded event) decide.
+    try:
+        s.sendall((f"CONNECT {target} HTTP/1.1\r\n"
+                   f"Host: {target}\r\n\r\n").encode("latin-1"))
+    except (BrokenPipeError, ConnectionResetError):
+        pass
     buf = b""
-    while b"\r\n" not in buf:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
-        if len(buf) > 65536:
-            break
+    try:
+        while b"\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > 65536:
+                break
+    except ConnectionResetError:
+        return 0
     line = buf.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
     parts = line.split(None, 2)
     return int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
@@ -583,6 +597,79 @@ class TestLaneAttributedControlEvents:
             f"expected 1 lane-scoped refused_capacity, got: {events}"
         assert refused[0]["lane"] == "cap-ctx"
         assert refused[0]["lane_id"] is not None
+
+    def test_capacity_refusal_survives_descheduled_send(
+            self, reset_proxy, short_sock_dir):
+        """The client is descheduled between connect() and sendall(),
+        so the refusal verdict lands first. The bounded request drain
+        must hold the socket open for the late request and deliver the
+        429 as an ordinary request/response exchange, with the event
+        lane-attributed as usual. Without the drain, the write-then-
+        close raced the client's send and surfaced as EPIPE mid-
+        sendall on a loaded runner."""
+        proxy = proxy_mod.EgressProxy(allowed_hosts=set(),
+                                      max_tunnels=0)
+        try:
+            sock = str(short_sock_dir / "race.sock")
+            proxy.bind_unix(sock, label="race-ctx")
+            token = proxy.register_sandbox(caller_label="test",
+                                           lane_key=sock)
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(5.0)
+                s.connect(sock)
+                try:
+                    # Bias toward the racing order (verdict before
+                    # request) — well inside the drain budget, so the
+                    # exchange completes cleanly in either order; the
+                    # assertion is order-independent.
+                    time.sleep(0.05)
+                    assert _drive_connect(s, _DENIED) == 429
+                finally:
+                    s.close()
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        refused = [e for e in events
+                   if e["result"] == "refused_capacity"]
+        assert len(refused) == 1, \
+            f"expected 1 lane-scoped refused_capacity, got: {events}"
+        assert refused[0]["lane"] == "race-ctx"
+
+    def test_capacity_refusal_readable_after_send_race(
+            self, reset_proxy, short_sock_dir, monkeypatch):
+        """Straggler shape: the drain window expires before the client
+        writes (budget forced to zero here), so the proxy writes the
+        429 and closes with the request unread. On a unix socket the
+        client's late sendall then raises EPIPE — but the refusal line
+        is already queued in its receive buffer, and the driver must
+        fall through and read it rather than die on the send."""
+        monkeypatch.setattr(proxy_mod, "_REFUSAL_DRAIN_TIMEOUT_S", 0.0)
+        proxy = proxy_mod.EgressProxy(allowed_hosts=set(),
+                                      max_tunnels=0)
+        try:
+            sock = str(short_sock_dir / "strag.sock")
+            proxy.bind_unix(sock, label="strag-ctx")
+            token = proxy.register_sandbox(caller_label="test",
+                                           lane_key=sock)
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(5.0)
+                s.connect(sock)
+                try:
+                    time.sleep(0.1)  # let the write+close land first
+                    assert _drive_connect(s, _DENIED) == 429
+                finally:
+                    s.close()
+            finally:
+                events = proxy.unregister_sandbox(token)
+        finally:
+            proxy.stop()
+
+        assert [e for e in events
+                if e["result"] == "refused_capacity"], events
 
     def test_handler_error_carries_lane_attribution(
             self, reset_proxy, short_sock_dir, monkeypatch):
