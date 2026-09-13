@@ -298,6 +298,14 @@ def _enrich_finding_with_ast_view(
 class VulnerabilityContext:
     """Represents a vulnerability with full context for autonomous analysis."""
 
+    # Per-finding analysis failure. ``None`` = no error. When set (the
+    # LLM-analysis exception path), ``to_dict`` emits the canonical
+    # ``error`` field + ``status="error"`` so report readers can
+    # distinguish a crashed analysis from an analysed verdict.
+    # Class-level default so partially-constructed instances (tests
+    # build via ``__new__``) read the no-error state.
+    error: str | None = None
+
     def __init__(self, finding: dict[str, Any], repo_path: Path) -> None:
         self.finding = finding
         self.repo_path = repo_path
@@ -595,6 +603,15 @@ class VulnerabilityContext:
             "has_exploit": self.exploit_code is not None,
             "has_patch": self.patch_code is not None,
         }
+
+        # Explicit analysis-failure marker. ``error`` is the canonical
+        # field (``derive_status`` keys on it); the enum status is
+        # stamped too so on-disk readers get the positive marker
+        # without re-deriving. Omitted entirely on the happy path.
+        if self.error is not None:
+            from core.run.finding_status import ERROR, set_status
+            result["error"] = self.error
+            set_status(result, ERROR)
 
         # Surface compile-verification verdict on the finding so
         # reporting / downstream consumers can distinguish a viable
@@ -1503,15 +1520,23 @@ class AutonomousSecurityAgentV2:
             if _is_auth_error(e):
                 print(
                     "⚠️  LLM authentication failed — "
-                    "check your API key. Falling back to "
-                    "heuristic analysis.",
+                    "check your API key. Finding recorded "
+                    "with an error status.",
                     file=sys.stderr,
                 )
             else:
-                logger.warning("  Using fallback heuristic analysis")
-            # Fallback to marking as potentially exploitable
-            vuln.exploitable = vuln.level == "error"
-            vuln.exploitability_score = 0.5
+                logger.warning("  Recording analysis error for this finding")
+            # Explicit error record — never a minted verdict. The
+            # previous fallback marked scanner-severity-`error`
+            # findings exploitable at 0.5 with `analysis=None` and no
+            # marker, so a transport outage or auth failure was
+            # indistinguishable from an analysed exploitable verdict
+            # in the report. The `error` field is the canonical
+            # marker (`core.run.finding_status.derive_status` keys on
+            # it); `to_dict` stamps the explicit `status` too.
+            vuln.exploitable = False
+            vuln.exploitability_score = 0.0
+            vuln.error = f"LLM analysis failed: {e}"
             return False
 
     def _tier1_pre_flight(self, vuln: VulnerabilityContext) -> str:
