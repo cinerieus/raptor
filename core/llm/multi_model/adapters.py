@@ -210,16 +210,22 @@ class BaseVerdictAdapter(ABC):
                 # Strong disagreement — pos AND neg verdicts present.
                 confidence[rid] = "disputed"
                 analyses = item.get("multi_model_analyses", [])
-                pos_models = {a["model"] for a in analyses
+                # .get() throughout: a subclass overriding
+                # extract_analysis_record without "model"/"reasoning"
+                # keys must degrade to a skip, not KeyError the whole
+                # correlation.
+                pos_models = {a.get("model") for a in analyses
                               if a.get("verdict") == "positive"}
-                neg_models = {a["model"] for a in analyses
+                neg_models = {a.get("model") for a in analyses
                               if a.get("verdict") == "negative"}
+                pos_models.discard(None)
+                neg_models.discard(None)
                 minority = pos_models if len(pos_models) < len(neg_models) else neg_models
                 unique_insights.extend({
                             "item_id": rid,
-                            "model": analysis["model"],
+                            "model": analysis.get("model"),
                             "verdict": analysis.get("verdict"),
-                            "reasoning": analysis["reasoning"],
+                            "reasoning": analysis.get("reasoning"),
                         } for analysis in analyses if analysis.get("model") in minority and analysis.get("reasoning"))
             elif uniq == {"positive"}:
                 confidence[rid] = "high"

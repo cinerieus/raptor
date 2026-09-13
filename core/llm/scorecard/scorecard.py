@@ -434,6 +434,12 @@ def _migrate_events_v1_to_v2(cell: dict) -> None:
     except ValueError:
         month = bucket_key(_now_iso())
     for et, counts in list(events.items()):
+        if not isinstance(counts, dict):
+            # Hand-edited / corrupted entry: normalise to an empty
+            # bucket map rather than raising TypeError out of the
+            # locked write and aborting the whole migration.
+            events[et] = {}
+            continue
         if is_bucketed(counts):
             continue
         c = _safe_int(counts.get("correct"), 0)

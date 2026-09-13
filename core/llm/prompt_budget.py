@@ -145,15 +145,14 @@ def shed_blocks(
     _, shed_sec = fit_to_budget(
         sections, budget_tokens, reserve_tokens=reserve_tokens,
     )
-    shed_indices = set()
-    for s in shed_sec:
-        for i, sec in enumerate(sections):
-            if i not in shed_indices and sec is s:
-                shed_indices.add(i)
-                break
-
-    kept = [b for i, b in enumerate(blocks) if i not in shed_indices]
-    shed = [b for i, b in enumerate(blocks) if i in shed_indices]
+    # Identity map instead of an O(n²) linear re-scan per shed
+    # section — each PromptSection above is a fresh object, so id()
+    # is unique per index.
+    shed_ids = {id(s) for s in shed_sec}
+    kept = [b for b, sec in zip(blocks, sections, strict=True)
+            if id(sec) not in shed_ids]
+    shed = [b for b, sec in zip(blocks, sections, strict=True)
+            if id(sec) in shed_ids]
     return kept, shed
 
 

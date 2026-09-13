@@ -633,3 +633,26 @@ class TestAbstractEnforcement:
     def test_cannot_instantiate_base_set_adapter(self):
         with pytest.raises(TypeError):
             BaseSetAdapter()  # type: ignore[abstract]
+
+
+class TestCorrelateToleratesSparseAnalysisRecords:
+    def test_subclass_records_without_model_or_reasoning_keys(self):
+        """extract_analysis_record is documented as overridable; a
+        subclass record lacking "model"/"reasoning" must degrade to a
+        skipped insight, not KeyError the whole correlation."""
+
+        class SparseAdapter(FindingAdapter):
+            def extract_analysis_record(self, result, model_name):
+                # Deliberately omits "model" and "reasoning".
+                return {"verdict": self.normalize_verdict(result)}
+
+        adapter = SparseAdapter()
+        per_model = {
+            "model-a": [{"finding_id": "f1", "is_exploitable": True}],
+            "model-b": [{"finding_id": "f1", "is_exploitable": False}],
+        }
+        merged = adapter.merge(per_model)
+        c = adapter.correlate(merged, per_model)
+        assert c["confidence_signals"]["f1"] == "disputed"
+        # No attributable minority reasoning → no insights, no crash.
+        assert c["unique_insights"] == []

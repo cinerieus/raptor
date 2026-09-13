@@ -249,6 +249,11 @@ class ToolUseLoop:
             raise ValueError(msg)
         self._provider = provider
         self._tools = list(tools)
+        # Daemon threads whose handler outlived its timeout — kept for
+        # operator introspection (see _dispatch_tool). Initialised
+        # here, not lazily at first strand, so the attribute is always
+        # present for diagnostics readers.
+        self._stranded_tool_threads: list[threading.Thread] = []
         self._tools_by_name: dict[str, ToolDef] = {t.name: t for t in tools}
         if len(self._tools_by_name) != len(self._tools):
             msg = (
@@ -1230,8 +1235,6 @@ class ToolUseLoop:
         # all references after `_dispatch_tool` returned —
         # impossible to introspect even when the operator KNEW
         # they had timeouts.
-        if not hasattr(self, "_stranded_tool_threads"):
-            self._stranded_tool_threads: list[threading.Thread] = []
         result_holder: dict[str, Any] = {}
         exc_holder: dict[str, BaseException] = {}
 

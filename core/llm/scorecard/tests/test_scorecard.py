@@ -1311,3 +1311,23 @@ def test_short_circuit_uses_own_reads_trust_verdict(tmp_path, monkeypatch):
 
     monkeypatch.setattr(reader, "_with_lock", racing_with_lock)
     assert reader.should_short_circuit("dc", "m1") == Policy.LEARNING
+
+
+def test_migrate_events_tolerates_non_dict_entry():
+    """A hand-edited event entry that isn't a dict must normalise to
+    an empty bucket map — pre-fix it raised TypeError out of the
+    locked write and aborted the migration."""
+    from core.llm.scorecard.scorecard import _migrate_events_v1_to_v2
+
+    cell = {
+        "last_seen_at": "2026-01-01T00:00:00+00:00",
+        "events": {
+            "cheap_short_circuit": "garbage",
+            "tool_evidence": {"correct": 2, "incorrect": 1},
+        },
+    }
+    _migrate_events_v1_to_v2(cell)
+    assert cell["events"]["cheap_short_circuit"] == {}
+    assert cell["events"]["tool_evidence"] == {
+        "2026-01": {"correct": 2, "incorrect": 1},
+    }
