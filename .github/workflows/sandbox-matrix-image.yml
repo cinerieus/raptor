@@ -28,15 +28,21 @@ name: Sandbox matrix image
 # exercises the real build path and the u26 axis; publishing an image
 # with no PR-time consumer would be pure registry cost.
 #
-# PRIVACY CONTRACT: the package must be PRIVATE, like raptor-ci-deps —
-# this repo is public and the image is internal CI plumbing, not a
-# distributable. GHCR defaults a first-published package to private,
-# and visibility persists across pushes, but there is no REST endpoint
-# for CHANGING container-package visibility (and the workflow token
-# could not authorize it anyway) — so the job VERIFIES visibility after
-# every push and fails loud if the package is not private. One-time
-# manual step if that gate ever fires: package settings -> Danger Zone
-# -> Change visibility -> Private.
+# OWNERSHIP SPLIT: the GHCR package is USER-OWNED by the repository
+# owner, so package-LIFECYCLE operations (visibility changes, package
+# deletion) are the owner's, done in the package settings — the
+# workflow token holds no authority over them and the CI deliberately
+# carries no machinery for them. What the CI owns: publishing, and
+# VERSION-level retention (the untagged prune and the tagged-anchor
+# cap below — version deletion is within the workflow token's grant
+# and proven working). The package should be PRIVATE, like
+# raptor-ci-deps — this repo is public and the image is internal CI
+# plumbing, not a distributable; visibility persists across pushes.
+# The job CHECKS visibility after every push and emits a ::warning
+# when it is not private or cannot be read — a warning, not a
+# failure, because a hard gate on an owner-only property would block
+# publishes on the owner's schedule. Owner action when it fires:
+# package settings -> Danger Zone -> Change visibility -> Private.
 #
 # Staleness ("rebirth") trade-off, accepted: a PR that changes
 # requirements or the matrix Dockerfile still runs the subset against
@@ -58,26 +64,6 @@ on:
       - 'core/sandbox/scripts/feature-matrix/run-matrix.sh'
       - '.github/workflows/sandbox-matrix-image.yml'
   workflow_dispatch:
-    inputs:
-      cleanup:
-        description: >-
-          Package cleanup instead of a build+publish. 'list-versions'
-          enumerates every version of the GHCR package and deletes
-          nothing (the safe default of the cleanup job);
-          'delete-package' deletes the versions it can (audited one by
-          one) and then the package itself — GHCR refuses to delete
-          the last tagged version of a container package, so emptying
-          a tagged package REQUIRES whole-package deletion. Use it to
-          retire a wrongly-public package; the next normal dispatch
-          recreates it and the visibility gate then governs. 'none' is
-          a normal build+publish dispatch.
-        required: false
-        default: 'none'
-        type: choice
-        options:
-          - none
-          - list-versions
-          - delete-package
   schedule:
     # Weekly rebuild (Wed 04:00 UTC) so the ubuntu:24.04 base picks up
     # security patches even when the inputs don't change. One hour
@@ -97,10 +83,6 @@ env:
 
 jobs:
   build-push:
-    # Skipped only when a dispatch explicitly asks for cleanup; the
-    # inputs context is empty on push/schedule, so those (and plain
-    # dispatches) build as before.
-    if: github.event.inputs.cleanup == '' || github.event.inputs.cleanup == 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -138,22 +120,23 @@ jobs:
           docker push "${image}:u24-${cthash}"
           echo "Pushed ${image}:u24 and ${image}:u24-${cthash}"
 
-      # Verify-and-fail-loud (see PRIVACY CONTRACT in the header): the
-      # packages REST API offers GET visibility but no endpoint to set
-      # it, so enforcement is a hard gate on what a human could have
-      # flipped. Both owner-type endpoints are tried because the repo
-      # owner may be a user or an organisation; an unqueryable package
-      # is its own loud failure rather than a silent pass. Verification
-      # is post-push only: on first publish there is nothing to query
-      # beforehand, and the image contents are derivable from public
-      # inputs, so a push into a wrongly-public package leaks nothing
-      # the gate's failure doesn't then force a human to fix.
+      # Visibility check (see OWNERSHIP SPLIT in the header): a
+      # ::warning, never a job failure — visibility is an owner-only
+      # property of the user-owned package (no REST endpoint changes
+      # container-package visibility, and the workflow token could not
+      # authorize one anyway), and a hard gate here would hold every
+      # publish hostage to the owner's schedule. Both owner-type
+      # endpoints are tried because the repo owner may be a user or an
+      # organisation; an unreadable package warns too, never silently
+      # passes. The check is post-push only: on first publish there is
+      # nothing to query beforehand, and the image contents are
+      # derivable from public inputs.
       #
       # stderr: discarded on the org attempt (an expected 404 on every
       # user-owned repo would cry wolf in each green run), kept on the
       # user fallback so a real double-failure leaves its diagnosis
       # (403 vs 404 vs rate-limit) in the job log.
-      - name: Verify the package is private
+      - name: Check the package is private (owner-managed)
         env:
           GH_TOKEN: ${{ github.token }}
           OWNER: ${{ github.repository_owner }}
@@ -161,11 +144,13 @@ jobs:
           set -euo pipefail
           vis="$(gh api "orgs/${OWNER}/packages/container/raptor-sandbox-matrix" --jq .visibility 2>/dev/null)" \
             || vis="$(gh api "users/${OWNER}/packages/container/raptor-sandbox-matrix" --jq .visibility)" \
-            || { echo "::error::could not query GHCR visibility for raptor-sandbox-matrix with the workflow token — verify manually that the ghcr.io/${OWNER}/raptor-sandbox-matrix package is Private (package settings -> Danger Zone -> Change visibility)."; exit 1; }
-          echo "package visibility: ${vis}"
-          if [ "${vis}" != "private" ]; then
-            echo "::error::ghcr.io/${OWNER}/raptor-sandbox-matrix is '${vis}' but must be private (internal CI image, public repo). One-time manual fix: package settings -> Danger Zone -> Change visibility -> Private. Visibility persists across pushes, so this gate stays green afterwards."
-            exit 1
+            || vis=""
+          if [ -z "${vis}" ]; then
+            echo "::warning::could not read GHCR visibility for raptor-sandbox-matrix with the workflow token — the owner should verify the ghcr.io/${OWNER}/raptor-sandbox-matrix package is Private (package settings -> Danger Zone -> Change visibility)."
+          elif [ "${vis}" != "private" ]; then
+            echo "::warning::ghcr.io/${OWNER}/raptor-sandbox-matrix is '${vis}' but should be private (internal CI image, public repo). Owner action: package settings -> Danger Zone -> Change visibility -> Private. Visibility persists across pushes, so one flip settles it."
+          else
+            echo "package visibility: private"
           fi
 
       # Prune the untagged digests left behind when :u24 moves to this
@@ -233,82 +218,3 @@ jobs:
               || { echo "::error::failed to delete tagged version ${id} of ${PKG} — token grant or a GHCR refusal; prune manually in the package settings."; exit 1; }
             echo "== deleted ${id} (${tags})"
           done < /tmp/prune.tsv
-
-  # Operator-dispatched package cleanup (never fires on push/schedule,
-  # and 'delete-package' must be selected explicitly — the default
-  # dispatch input is a normal publish and the cleanup default is a
-  # list-only dry run). The CI created this package, so the CI attempts
-  # to retire it: a workflow-created GHCR package grants the repo's
-  # workflow token admin access. Per-VERSION deletion is the
-  # documented-safe path (the untagged prune above rides the same
-  # grant), but GHCR refuses to delete the LAST TAGGED version of a
-  # container package — emptying a tagged package therefore REQUIRES a
-  # terminal whole-package DELETE, whose GITHUB_TOKEN authority is
-  # less certain (historically PAT-only): the job attempts it and
-  # fails loud with the named PAT/UI remedy if refused. Use case:
-  # retiring a package that surfaced public so the next publish
-  # recreates it under the visibility gate.
-  cleanup:
-    if: |
-      github.event_name == 'workflow_dispatch' &&
-      (github.event.inputs.cleanup == 'list-versions' ||
-       github.event.inputs.cleanup == 'delete-package')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write             # per-version DELETE rides this grant
-    steps:
-      - name: List package versions (and delete the package when explicitly confirmed)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OWNER: ${{ github.repository_owner }}
-          MODE: ${{ github.event.inputs.cleanup }}
-        run: |
-          set -euo pipefail
-          pkg=raptor-sandbox-matrix
-          # Owner may be a user or an organisation; probe org first,
-          # same as the visibility gate.
-          base="orgs/${OWNER}/packages/container/${pkg}"
-          gh api "${base}" >/dev/null 2>&1 \
-            || base="users/${OWNER}/packages/container/${pkg}"
-          gh api --paginate "${base}/versions?per_page=100" \
-            --jq '.[] | [(.id|tostring), .created_at, (.metadata.container.tags | join(","))] | @tsv' \
-            > /tmp/versions.tsv \
-            || { echo "::error::could not enumerate versions of ${pkg} with the workflow token — the package may not exist yet, or the token lacks the read grant; inspect it manually under the owner's Packages page."; exit 1; }
-          n="$(wc -l < /tmp/versions.tsv)"
-          echo "== ${pkg}: ${n} version(s)"
-          while IFS=$'\t' read -r id created tags; do
-            echo "   id=${id}  created=${created}  tags=${tags:-<untagged>}"
-          done < /tmp/versions.tsv
-          if [ "${MODE}" != "delete-package" ]; then
-            echo "== list-only mode: nothing deleted. Re-dispatch with cleanup=delete-package to retire the package."
-            exit 0
-          fi
-          # Per-version deletion first — the audited, documented-safe
-          # path (the untagged prune step rides the same grant). GHCR
-          # refuses to delete the LAST TAGGED version of a container
-          # package ("delete the package instead"), so that refusal is
-          # the EXPECTED handoff to the terminal whole-package DELETE,
-          # not an error; any other refusal stays fail-loud.
-          while IFS=$'\t' read -r id created tags; do
-            echo "== deleting version ${id} (tags: ${tags:-<untagged>})"
-            if ! err="$(gh api -X DELETE "${base}/versions/${id}" 2>&1)"; then
-              if printf '%s' "${err}" | grep -qi "last tagged version\|delete the package instead"; then
-                echo "== version ${id} is the last tagged version — GHCR requires whole-package deletion from here (expected)"
-                break
-              fi
-              echo "::error::failed to delete version ${id} (${err}) — the workflow token may lack the delete grant on this package; finish the cleanup manually in the package settings."
-              exit 1
-            fi
-          done < /tmp/versions.tsv
-          # Terminal whole-package DELETE. Version deletion is the
-          # documented-safe GITHUB_TOKEN path; whole-package authority
-          # is less certain (historically PAT-only) — attempt it and
-          # fail loud with the named remedy if refused.
-          echo "== deleting the package ${pkg} itself"
-          if ! err="$(gh api -X DELETE "${base}" 2>&1)"; then
-            echo "::error::whole-package DELETE refused (${err}). The workflow token may not hold this authority — delete the package once via its settings page (Danger Zone), or use an owner PAT with the delete:packages scope. Versions already deleted above stay deleted."
-            exit 1
-          fi
-          echo "== package ${pkg} deleted. The next normal dispatch (cleanup=none) recreates it; the publish job's visibility gate then governs and fails loud if it recreates public."
