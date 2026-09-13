@@ -870,7 +870,14 @@ class TestCacheTtlKnob:
 
         from packages.codeql import database_manager as dm
 
-        mgr = dm.DatabaseManager(db_root=tmp_path / "dbs")
+        # Constructing without a detectable CodeQL CLI raises — stub
+        # detection (same seam TestAutoCleanupWiring stubs) so the TTL
+        # logic under test is exercised on hosts and CI images that
+        # do not ship the CLI. The value is never invoked: the cached
+        # DB, its metadata, and validation are all synthesized below.
+        with patch.object(dm.DatabaseManager, "_detect_codeql_cli",
+                          return_value="/usr/bin/codeql"):
+            mgr = dm.DatabaseManager(db_root=tmp_path / "dbs")
         repo = tmp_path / "repo"
         repo.mkdir(exist_ok=True)
         (repo / "a.c").write_text("int x;\n")
