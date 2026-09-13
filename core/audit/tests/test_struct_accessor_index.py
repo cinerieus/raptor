@@ -85,6 +85,34 @@ class TestBuildIndexFromSource:
         index = build_index_from_source(gaps)
         assert index["rdllink"][0].lock_held == ""
 
+    def test_go_receiver_lock_detected(self):
+        # Real Go locks through a receiver (mu.Lock()) — the old
+        # sync.Mutex.Lock pattern matched only the type's qualified
+        # name, which never appears at a call site.
+        gaps = [
+            _gap("update", "state.go",
+                 "func (s *Store) update() {\n"
+                 "    s.mu.Lock()\n"
+                 "    s.rdllink = nil\n"
+                 "    s.mu.Unlock()\n"
+                 "}"),
+        ]
+        index = build_index_from_source(gaps)
+        assert index["rdllink"][0].lock_held != ""
+
+    def test_go_unlock_only_is_not_a_lock(self):
+        # Other direction: an Unlock call alone must not read as
+        # "holds the lock".
+        gaps = [
+            _gap("finish", "state.go",
+                 "func (s *Store) finish() {\n"
+                 "    s.rdllink = nil\n"
+                 "    s.mu.Unlock()\n"
+                 "}"),
+        ]
+        index = build_index_from_source(gaps)
+        assert index["rdllink"][0].lock_held == ""
+
     def test_multiple_functions_same_field(self):
         gaps = [
             _gap("fn_a", "ep.c",

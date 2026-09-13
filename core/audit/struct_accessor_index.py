@@ -77,7 +77,11 @@ _LOCK_CALL_RE = re.compile(
     r"|read_lock|write_lock|down_read|down_write"
     r"|rcu_read_lock|rw_lock"
     r"|pthread_mutex_lock"
-    r"|sync\.(?:Mutex|RWMutex)\.(?:Lock|RLock)"
+    # Go/C++ method-call shape: real code locks through a receiver
+    # (``mu.Lock()``, ``m.lock()``) — the old ``sync.Mutex.Lock``
+    # pattern matched only the TYPE's qualified name, which never
+    # appears at a call site.
+    r"|\.(?:Lock|RLock)"
     r"|\.acquire)\s*\(",
     re.IGNORECASE,
 )
