@@ -1219,7 +1219,7 @@ def scan_image_sources(
                     digest_cache=None,
                     disk_cache=cache,
                 )
-            except ValueError as e:
+            except Exception as e:  # noqa: BLE001 — per-image containment: any raise aborts pool.map and loses every other image's SBOM
                 logger.warning(
                     "sca.dockerfile_from: SBOM fetch failed for %s: %s",
                     image, e,

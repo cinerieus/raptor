@@ -43,8 +43,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-_REPO = Path(__file__).resolve().parents[2]  # raptor-sca repo root
-sys.path.insert(0, str(_REPO))
+# Path setup for direct CLI invocation. `os.environ["RAPTOR_DIR"]`
+# (no fallback) is the canonical project root marker — see CLAUDE.md
+# "Python path safety"; a KeyError surfaces the configuration problem
+# at startup instead of a positional walk silently rooting imports at
+# the wrong tree. (The old comment's "raptor-sca repo root" predated
+# the merge into RAPTOR.)
+sys.path.insert(0, os.environ["RAPTOR_DIR"])
 
 logger = logging.getLogger(__name__)
 

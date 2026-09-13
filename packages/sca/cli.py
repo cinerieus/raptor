@@ -208,14 +208,9 @@ def _run_analyse(argv: list[str]) -> int:
     args = _parse_analyse_args(argv)
     _configure_logging(args.verbose)
 
-    # --no-llm umbrella: disable every LLM stage in one switch.
-    if getattr(args, "no_llm", False):
-        args.skip_review = True
-        args.skip_triage = True
-        args.review_maintainers = False
-        args.review_slopsquats = False
-        args.llm_inline_installs = False
-        args.impact_analysis = False
+    # --no-llm umbrella handled by apply_no_llm_umbrella() below —
+    # the single owner of the per-stage switch mapping (a second inline
+    # copy here drifted silently whenever a stage was added).
 
     target = Path(args.target).resolve()
     if not target.exists():
