@@ -337,8 +337,12 @@ class TestBatchedUnbatchedParity:
                         [_finding(str(target), 3)] if control_fires else []
                     ),
                 )
+            # The scanned target rides in files_examined, as the real
+            # runner reports — the refutation cases need the scanned
+            # witness on both paths for the parity to hold.
             return _Result(
                 findings=[_finding(target_file, ln) for ln in match_lines],
+                files_examined=[str(target)],
             )
 
         _install_fake_semgrep(monkeypatch, batched_run_rule)

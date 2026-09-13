@@ -173,6 +173,95 @@ class TestSemgrepErrorSemantics:
         assert result.outcome == "refuted"
 
 
+class TestScannedWitnessGate:
+    """A zero-finding semgrep scan may only refute when the target
+    verifiably appears in the scanned-paths witness (files_examined /
+    paths.scanned). Semgrep can silently SKIP a target (paths.skipped
+    — surfaced in neither ``errors`` nor ``files_failed``): an
+    unwitnessed "no findings" analysed nothing and must not clear the
+    hypothesis — it degrades to 'inconclusive', never 'refuted'."""
+
+    def _sweep(self, tmp_path, monkeypatch, semgrep_result):
+        import packages.semgrep.runner as runner_mod
+        from core.audit.sweep import run_semgrep_sweep
+
+        (tmp_path / "test.c").write_text(
+            "int foo(char *p) { return p[0]; }\n",
+        )
+        monkeypatch.setattr(runner_mod, "is_available", lambda: True)
+        monkeypatch.setattr(
+            runner_mod, "run_rule", lambda *a, **kw: semgrep_result,
+        )
+        return run_semgrep_sweep(
+            target_path=tmp_path,
+            file_path="test.c",
+            function_name="foo",
+            rule_config="rule.yaml",
+        )
+
+    def test_target_absent_from_witness_is_inconclusive(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # rc 0, sidecar present — but the target is NOT in it: the
+        # scan silently skipped the file, so zero findings prove
+        # nothing about the code.
+        from packages.semgrep.models import SemgrepResult
+
+        result = self._sweep(tmp_path, monkeypatch, SemgrepResult(
+            name="r", config="rule.yaml", target="test.c",
+            findings=[], errors=[], returncode=0,
+            files_examined=[str(tmp_path / "other.c")],
+        ))
+        assert result.outcome == "inconclusive"
+        assert "scanned-target witness" in (result.details or {})["reason"]
+
+    def test_absent_witness_sidecar_is_inconclusive(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # The sidecar is best-effort (absent in injected-runner
+        # setups): its absence must degrade gracefully — inconclusive
+        # with a reason naming the missing witness, never refuted and
+        # never a crash.
+        from packages.semgrep.models import SemgrepResult
+
+        result = self._sweep(tmp_path, monkeypatch, SemgrepResult(
+            name="r", config="rule.yaml", target="test.c",
+            findings=[], errors=[], returncode=0,
+        ))
+        assert result.outcome == "inconclusive"
+        reason = (result.details or {})["reason"]
+        assert "scanned-target witness" in reason
+        assert "files_examined" in reason
+
+    def test_target_in_witness_still_refutes(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # The genuine negative is preserved: the target appears in
+        # the scanned witness, so zero findings remain a refutation.
+        from packages.semgrep.models import SemgrepResult
+
+        result = self._sweep(tmp_path, monkeypatch, SemgrepResult(
+            name="r", config="rule.yaml", target="test.c",
+            findings=[], errors=[], returncode=0,
+            files_examined=[str(tmp_path / "test.c")],
+        ))
+        assert result.outcome == "refuted"
+
+    def test_findings_confirm_without_witness(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # The confirm lane is untouched: matches are their own
+        # evidence that the file was analysed.
+        from packages.semgrep.models import SemgrepResult
+
+        result = self._sweep(tmp_path, monkeypatch, SemgrepResult(
+            name="r", config="rule.yaml", target="test.c",
+            findings=[{"start": {"line": 1}}], errors=[], returncode=0,
+        ))
+        assert result.outcome == "confirmed"
+        assert len(result.matches) == 1
+
+
 class TestJoernErrorSemantics:
     """Joern leg of the same class: an errored taint query (timeout, server
     crash, validation reject) returns no flows — that must classify as

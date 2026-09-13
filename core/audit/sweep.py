@@ -544,11 +544,40 @@ def _target_in_failed_files(
 
     Semgrep may report the path as passed on the command line
     (absolute), or relative — compare both shapes.  ``files_examined``
-    being empty is deliberately NOT treated as failure: the JSON
-    sidecar is best-effort and absent in many injected-runner setups.
+    being empty is deliberately NOT treated as a tool error here: the
+    JSON sidecar is best-effort and absent in many injected-runner
+    setups.  The refutation gate handles that case separately — a
+    zero-finding scan without a positive scanned witness degrades to
+    "inconclusive" (see :func:`_target_in_examined_files`), never to
+    "refuted".
     """
     full_str = str(full_path)
     for entry in files_failed or []:
+        s = str(entry)
+        if not s:
+            continue
+        if s in (full_str, file_path) or s.endswith("/" + file_path):
+            return True
+    return False
+
+
+def _target_in_examined_files(
+    files_examined: Any,
+    full_path: Path,
+    file_path: str,
+) -> bool:
+    """Whether the sweep's single target file is in semgrep's
+    ``files_examined`` list (``paths.scanned`` from --json-output).
+
+    This is the POSITIVE witness that the target was actually
+    analysed: semgrep can silently SKIP a target (``paths.skipped`` —
+    surfaced in neither ``errors`` nor ``files_failed``), so
+    absence-of-failure alone proves nothing.  Same absolute/relative
+    shape comparison as :func:`_target_in_failed_files`; an
+    absent/empty sidecar simply yields False.
+    """
+    full_str = str(full_path)
+    for entry in files_examined or []:
         s = str(entry)
         if not s:
             continue
@@ -768,10 +797,39 @@ def run_semgrep_sweep(
             outcome = "confirmed"
         else:
             # Tool failures (errors / bad returncode / target file in
-            # files_failed) already returned "error" above — a
-            # no-match from a scan that actually analysed the file is
-            # a genuine refutation.
-            outcome = "refuted"
+            # files_failed) already returned "error" above — but a
+            # no-match only refutes when the scan verifiably analysed
+            # the target.  Semgrep can silently SKIP a target
+            # (paths.skipped — surfaced in neither ``errors`` nor
+            # ``files_failed``), so refutation requires the same
+            # positive scanned witness the batched control leg
+            # demands before banking its verdict: the target must
+            # appear in ``files_examined`` (paths.scanned).  Without
+            # that witness — target skipped, or the best-effort
+            # sidecar absent entirely (injected runners) — zero
+            # findings say nothing about the code: degrade to
+            # inconclusive, never refuted.
+            _examined = getattr(result, "files_examined", None)
+            if _target_in_examined_files(_examined, full_path, file_path):
+                outcome = "refuted"
+            else:
+                if _examined:
+                    capped_reason = (
+                        f"no scanned-target witness: {file_path} missing "
+                        "from semgrep's files_examined (paths.scanned) — "
+                        "a silently skipped scan cannot refute"
+                    )
+                else:
+                    capped_reason = (
+                        "no scanned-target witness: semgrep's "
+                        "files_examined sidecar is absent/empty — an "
+                        "unwitnessed zero-finding scan cannot refute"
+                    )
+                logger.info(
+                    "semgrep sweep capped at inconclusive for %s:%s — %s",
+                    file_path, function_name, capped_reason,
+                )
+                outcome = "inconclusive"
 
         if outcome == "refuted":
             # Second pass over the fidelity-3 expanded view: pattern
