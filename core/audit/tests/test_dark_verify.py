@@ -1526,6 +1526,23 @@ class TestBuildWitnessPrompt:
         assert "Ruby" in system
         assert "check" in user
 
+    def test_ruby_perl_prompts_request_bare_identifiers(self):
+        """validate_spec's identifier grammar rejects qualified names
+        ("Class.method", "MyModule::check") with verdict="error" — the
+        prompts must not invite spellings that can never execute."""
+        for language, file in (("ruby", "lib/auth.rb"), ("perl", "lib/Auth.pm")):
+            _user, system = build_witness_prompt(
+                file=file, function="check",
+                hypothesis="h", body="b", language=language,
+            )
+            assert "or Class.method" not in system
+            assert '"MyModule::check" or just' not in system
+            fn_line = next(
+                ln for ln in system.splitlines()
+                if ln.startswith('- "function"')
+            )
+            assert "bare" in fn_line
+
     def test_php_prompt(self):
         user, system = build_witness_prompt(
             file="src/auth.php", function="validate",

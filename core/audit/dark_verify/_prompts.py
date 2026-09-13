@@ -146,7 +146,7 @@ with that would trigger the bug.
 ## Output format
 
 Return a JSON object with these fields:
-- "function": the function name (top-level method or Class.method)
+- "function": the bare method name (a plain identifier callable at the top level after the require — never a qualified "Class.method" spelling)
 - "require_path": the require path relative to the project root (e.g. "lib/auth")
 - "args": list of argument values (JSON-serialisable)
 - "expected_return": expected return value (null if expecting an exception)
@@ -243,7 +243,7 @@ with that would trigger the bug.
 ## Output format
 
 Return a JSON object with these fields:
-- "function": the function name (e.g. "MyModule::check" or just "check")
+- "function": the bare sub name (e.g. "check" — never a package-qualified "MyModule::check" spelling; name the package in "use_module")
 - "use_module": the Perl module name (e.g. "MyModule" or "Lib::Auth")
 - "args": list of argument values (JSON-serialisable; use null for undef)
 - "expected_return": expected return value (null if expecting a die)
