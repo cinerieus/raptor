@@ -557,13 +557,6 @@ def _get_hypothesis(item):
     return getattr(item, "hypothesis", "") or ""
 
 
-def _get_counter(item):
-    if isinstance(item, dict):
-        return item.get("counter_hypothesis", "") or ""
-    rr = getattr(item, "review_result", None) or {}
-    return rr.get("counter_hypothesis", "") or ""
-
-
 def _get_bug_class_rr(item):
     if isinstance(item, dict):
         return item.get("bug_class", "") or ""
@@ -996,35 +989,17 @@ def dampen_pileup_pre_export(result, config) -> None:
         )
 
 
-# -- Counter-hypothesis veto -----------------------------------------------
-
-COUNTER_PROTECTION_KW = (
-    "prevented by", "prevented because", "guaranteed by", "ensured by",
-    "enforced by", "validated by", "checked by", "protected by",
-    "constrained by", "bounded by", "limited by", "cannot occur because",
-    "impossible because", "initialization guarantees", "always set",
-    "always valid", "always non-null", "never null",
-    "invariant", "precondition", "postcondition",
-    "write_once", "rcu_read_lock", "spin_lock", "mutex_lock",
-    "bounds check", "length check", "size check", "range check",
-)
-_COUNTER_PROTECTION_KW = COUNTER_PROTECTION_KW
-
-
-COUNTER_VETO_EXEMPT_KW = (
-    "replay", "freshness", "nonce", "re-key", "rekey",
-    "sequence number", "credential", "privilege escalation",
-    "capability check", "capability bypass",
-)
-
+# -- Counter-hypothesis direction -------------------------------------------
+# Consumed by core/audit/llm_review's clean-counter escalation gate (the
+# prose fallback when the structured counter_direction field is absent).
 
 # Refutation-direction markers: the counter-hypothesis argues AGAINST
 # the vulnerability (supports clean), not for it. Direction matters —
 # a refuting counter is stuffed with vulnerability vocabulary
 # ("refcount", "use-after-free", "TOCTOU") because it names the
-# mechanisms it defeats, which fooled the vocabulary-only heuristics
-# on both sides of this gate (live corpus case: a review that refuted
-# an SMT check-early-release signal and every fresh mechanism was
+# mechanisms it defeats, which fooled the vocabulary-only escalation
+# heuristic (live corpus case: a review that refuted an SMT
+# check-early-release signal and every fresh mechanism was
 # re-escalated to suspicious off its own refuting counter).
 COUNTER_REFUTATION_KW = (
     "was refuted", "were refuted", "is refuted", "are refuted",
@@ -1045,127 +1020,3 @@ def counter_refutes_vulnerability(counter: str) -> bool:
     under-calls a real one."""
     lower = (counter or "").lower()
     return any(kw in lower for kw in COUNTER_REFUTATION_KW)
-
-
-def _get_counter_direction(item) -> str:
-    """Structured ``counter_direction`` emitted by the review model
-    (``supports_vuln`` / ``refutes_vuln``), or "" when absent."""
-    if isinstance(item, dict):
-        raw = item.get("counter_direction", "") or ""
-    else:
-        rr = getattr(item, "review_result", None) or {}
-        raw = rr.get("counter_direction", "") or ""
-    return str(raw).strip().lower()
-
-
-def counter_hypothesis_vetoes(item) -> bool:
-    """True when a strong counter-hypothesis should veto a speculative finding.
-
-    Works on both ReviewOutcome objects and plain dicts.
-    Conditions: (1) no mechanical evidence, (2) counter-hypothesis is
-    substantial and names a concrete protection mechanism,
-    (3) hypothesis does not name a security-primitive pattern that
-    counter-hypotheses are unreliable for.
-
-    The structured ``counter_direction`` field, when present, replaces
-    the prose re-derivation: refutes_vuln vetoes, supports_vuln never
-    does. The keyword paths remain as the fallback for responses
-    predating the field.
-    """
-    ev = _get_evidence(item)
-    if ev and not ev.startswith(NON_MECHANICAL):
-        return False
-
-    counter = _get_counter(item)
-    hyp = _get_hypothesis(item)
-
-    if not counter:
-        return False
-
-    hyp_lower = hyp.lower()
-    if any(kw in hyp_lower for kw in COUNTER_VETO_EXEMPT_KW):
-        return False
-
-    direction = _get_counter_direction(item)
-    if direction == "supports_vuln":
-        # The counter argues FOR the vulnerability — it corroborates
-        # rather than refutes; there is nothing to veto with.
-        return False
-    if direction == "refutes_vuln":
-        return True
-
-    if len(counter) < 40:
-        return False
-    if len(counter) < len(hyp) * 0.6:
-        return False
-
-    lower = counter.lower()
-    # A counter that asserts the hypothesis was refuted / is not a
-    # security issue vetoes just like one naming a concrete protection
-    # mechanism — both argue the speculative verdict is wrong in the
-    # clean direction.
-    return any(kw in lower for kw in COUNTER_PROTECTION_KW) or \
-        counter_refutes_vulnerability(lower)
-
-_counter_hypothesis_vetoes = counter_hypothesis_vetoes
-
-
-def apply_counter_hypothesis_veto(outcomes) -> int:
-    """Demote speculative findings/suspicious to clean via counter-hypothesis.
-
-    Works on both ReviewOutcome objects and plain dicts.
-    """
-    vetoed = 0
-    for o in outcomes:
-        if _get_status(o) not in ("finding", "suspicious"):
-            continue
-        if counter_hypothesis_vetoes(o):
-            _set_status(o, "clean")
-            vetoed += 1
-    return vetoed
-
-_apply_counter_hypothesis_veto = apply_counter_hypothesis_veto
-
-
-# -- Speculative-race gate --------------------------------------------------
-
-RACE_HYPOTHESIS_KW = (
-    "race condition", "toctou", "time-of-check", "time of check",
-    "concurrent", "concurrently", "data race",
-    "deadlock", "livelock",
-)
-
-RACE_EVIDENCE_ALLOWLIST = (
-    "smt:", "coccinelle:", "semgrep:", "codeql:", "joern:",
-    "sarif:", "prefilter:lock", "prefilter:race",
-)
-
-
-def is_speculative_race(item) -> bool:
-    """True when a race/TOCTOU hypothesis lacks mechanical backing."""
-    hyp = _get_hypothesis(item).lower()
-    if not any(kw in hyp for kw in RACE_HYPOTHESIS_KW):
-        return False
-
-    ev = _get_evidence(item)
-    return not (ev and any(ev.startswith(p) for p in RACE_EVIDENCE_ALLOWLIST))
-
-
-def apply_speculative_race_gate(outcomes) -> int:
-    """Demote evidence-free race/TOCTOU findings to suspicious.
-
-    Only touches ``finding`` → ``suspicious``.
-    Works on both ReviewOutcome objects and plain dicts.
-    """
-    gated = 0
-    for o in outcomes:
-        if _get_status(o) != "finding":
-            continue
-        if is_speculative_race(o):
-            _set_status(o, "suspicious")
-            gated += 1
-    return gated
-
-
-_apply_speculative_race_gate = apply_speculative_race_gate
-_is_speculative_race = is_speculative_race
