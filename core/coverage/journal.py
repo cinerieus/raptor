@@ -971,26 +971,37 @@ def _write_index(path: Path, entries: dict[str, dict[str, Any]]) -> None:
 
 # ── Domain model hash ───────────────────────────────────────────────
 
-def _find_domain_model_file(out_dir: Path) -> Path | None:
-    """Locate domain-model.json in standard locations.
+def _domain_model_parent(out_dir: Path) -> Path | None:
+    """The project-level dir whose domain-model.json this run may import.
 
-    The project-canonical candidates come from the RUN PIN's project
-    dir — the pre-fix bare ``out_dir.parent`` probe let a standalone
-    run sitting next to any unrelated domain-model.json import another
-    target's semantic concepts into the staleness gate and strategy
-    relevance. Pin-less legacy dirs keep the parent probe.
+    Resolved through the RUN PIN: a pinned run yields its project's
+    output dir, a standalone run (authoritative pin-to-none) yields
+    None — a bare ``out_dir.parent`` probe would let a standalone run
+    sitting next to any unrelated domain-model.json import another
+    target's semantic concepts. Pin-less legacy dirs keep the parent
+    probe (reads only, pre-series shape).
     """
-    candidates = [out_dir / "domain-model.json"]
-    parent = None
     try:
         from core.run.pin import pin_project_dir, resolve_run_pin
         pin = resolve_run_pin(out_dir)
         if pin.authoritative:
-            parent = pin_project_dir(out_dir)
-        else:
-            parent = out_dir.parent
+            return pin_project_dir(out_dir)
+        return out_dir.parent
     except Exception:  # noqa: BLE001 — legacy probe
-        parent = out_dir.parent
+        return out_dir.parent
+
+
+def _find_domain_model_file(out_dir: Path) -> Path | None:
+    """Locate domain-model.json in standard locations.
+
+    The project-canonical candidates come from the RUN PIN's project
+    dir (:func:`_domain_model_parent`) — the pre-fix bare
+    ``out_dir.parent`` probe let a standalone run sitting next to any
+    unrelated domain-model.json import another target's semantic
+    concepts into the staleness gate and strategy relevance.
+    """
+    candidates = [out_dir / "domain-model.json"]
+    parent = _domain_model_parent(out_dir)
     if parent is not None:
         candidates.append(parent / "concepts" / "domain-model.json")
         candidates.append(parent / "domain-model.json")
@@ -1050,13 +1061,20 @@ def domain_model_context(out_dir: Path) -> dict[str, Any] | None:
     file last with ``canonical=False``. A per-run hash has no
     cross-run comparison semantics — the gate must not treat hash
     equality against it as freshness (safe over-review).
+
+    Project-canonical candidates resolve through the run pin
+    (:func:`_domain_model_parent`, same probe as
+    :func:`_find_domain_model_file`): a standalone run next to a
+    foreign target's domain-model.json must not adopt it as its
+    canonical model.
     """
     import hashlib
-    candidates = [
-        (out_dir.parent / "concepts" / "domain-model.json", True),
-        (out_dir.parent / "domain-model.json", True),
-        (out_dir / "domain-model.json", False),
-    ]
+    candidates: list[tuple[Path, bool]] = []
+    parent = _domain_model_parent(out_dir)
+    if parent is not None:
+        candidates.append((parent / "concepts" / "domain-model.json", True))
+        candidates.append((parent / "domain-model.json", True))
+    candidates.append((out_dir / "domain-model.json", False))
     for path, canonical in candidates:
         if not path.is_file():
             continue
