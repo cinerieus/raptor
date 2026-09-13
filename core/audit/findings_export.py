@@ -10,10 +10,9 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
-from core.inventory.fixture_detection import is_fixture_path
 from core.json import save_json
 
 from .evidence_grade import (
@@ -24,6 +23,7 @@ from .evidence_grade import (
     grade_review_result,
     is_tool_evidence,
 )
+from .tree_class import classify_tree_class, is_test_tree_path
 
 logger = logging.getLogger(__name__)
 
@@ -121,12 +121,6 @@ def _validate_history_receipt(
     return ""
 
 
-# Test-tree directory conventions the fixture path patterns don't
-# cover: OpenSSH-style ``regress/`` trees. Directory segments only —
-# a file named ``regress.c`` is production code.
-_TEST_TREE_SEGMENTS = frozenset({"regress", "regression", "regressions"})
-
-
 def classify_file_class(
     file_path: str,
     vendor_verdicts: dict[str, Any] | None = None,
@@ -148,19 +142,9 @@ def classify_file_class(
                 kind = verdict.get("kind", "")
             if kind:
                 return str(kind)
-    if _is_test_tree_path(file_path):
+    if is_test_tree_path(file_path):
         return "test"
     return ""
-
-
-def _is_test_tree_path(file_path: str) -> bool:
-    """Test-tree membership: the shared fixture-path conventions
-    (``core.inventory.fixture_detection``) plus regress-tree directory
-    segments."""
-    if is_fixture_path(file_path)[0]:
-        return True
-    parts = PurePosixPath(file_path.replace("\\", "/")).parts
-    return any(p.lower() in _TEST_TREE_SEGMENTS for p in parts[:-1])
 
 
 def build_graded_finding(
@@ -168,6 +152,7 @@ def build_graded_finding(
     evidence_record: Any | None = None,
     *,
     file_class: str = "",
+    tree_class: str = "",
 ) -> dict[str, Any]:
     """Build a finding dict with graded evidence chain.
 
@@ -311,6 +296,12 @@ def build_graded_finding(
         # harness overflow must not export indistinguishable from a
         # production one. Absent for first-party code.
         finding["file_class"] = file_class
+    # Tree class (core.audit.tree_class vocabulary) — always present,
+    # so report ordering and /validate selection read one field
+    # instead of re-deriving it. A tag for ordering/weighting only.
+    finding["tree_class"] = (
+        tree_class or classify_tree_class(file_val)
+    )
 
     # Hypothesis multiplicity: the review's full hypotheses array.
     # A multi-bug function used to export as one finding with one
@@ -484,6 +475,7 @@ def export_findings(
         finding = build_graded_finding(
             outcome, ev_record,
             file_class=classify_file_class(file_path, vendor_verdicts),
+            tree_class=classify_tree_class(file_path, vendor_verdicts),
         )
         findings.append(finding)
 

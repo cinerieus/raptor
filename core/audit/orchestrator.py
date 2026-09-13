@@ -4691,6 +4691,16 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
     except Exception:
         logger.debug("binary-absent gap key scan failed", exc_info=True)
 
+    # Tree-class demotion map (path-only — the vendored verdicts are
+    # built after scoring; path/filename signals carry the demotion).
+    # Weighting only, never a skip; None restores pre-tag scoring.
+    tree_classes: dict[str, str] | None = None
+    try:
+        from .tree_class import tree_class_map
+        tree_classes = tree_class_map(g["file"] for g in gaps)
+    except Exception:
+        logger.debug("tree-class map failed", exc_info=True)
+
     gaps = score_functions(
         gaps,
         context_map=context_map,
@@ -4707,6 +4717,7 @@ def _compute_audit_prep(config, *, joern_server=None, on_progress=None,
         validate_confirmed_keys=validate_confirmed_keys,
         validate_ruled_out_keys=validate_ruled_out_keys,
         binary_absent_keys=binary_absent_keys or None,
+        tree_classes=tree_classes,
     )
 
     # Fix-history mining: the target's past security fixes become

@@ -43,6 +43,7 @@ from .parser_shape import (
     LENGTH_ARITH_DENSITY_FLOOR,
     LENGTH_ARITH_SITES_FLOOR,
 )
+from .tree_class import NON_PRODUCTION_TREE_CLASSES
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,19 @@ SCORE_ERROR_PATHS = 2
 SCORE_VALIDATE_CONFIRMED = 6
 SCORE_VALIDATE_RULED_OUT = -3
 SCORE_BINARY_ABSENT = -10
+# Non-production tree demotion (vendored-compat / test-harness files,
+# core.audit.tree_class). Weighting ONLY — never a skip by itself: the
+# functions stay scheduled, they just yield slots to production code.
+# Budget truncation composes with ALL weights, though: under a
+# --budget cut a demoted equal-signal function can rank past the cut
+# line (within-tier ranking only — tier dominance is preserved). Both
+# directions of the magnitude matter: stronger (approaching
+# SCORE_ENTRY_POINT) and a vendored parser that IS the production
+# attack surface loses to trivial first-party code; weaker (0) and
+# compat-shim / regress-harness findings keep drowning the production
+# findings operators read first. -3 mirrors the other mild demotion
+# (SCORE_VALIDATE_RULED_OUT) — below every affirmative surface signal.
+SCORE_NON_PRODUCTION_TREE = -3
 
 _COMPLEX_SLOC = 80
 _MODERATE_SLOC = 30
@@ -122,6 +136,7 @@ def score_functions(
     validate_confirmed_keys: set[str] | None = None,
     validate_ruled_out_keys: set[str] | None = None,
     binary_absent_keys: set[str] | None = None,
+    tree_classes: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Score and re-sort gaps by attack-surface proximity.
 
@@ -178,6 +193,13 @@ def score_functions(
             suppression-earning). Hard-deprioritised with
             SCORE_BINARY_ABSENT so live functions win budget slots;
             the triage classifier separately skips them.
+        tree_classes: ``{file: tree_class}`` map from
+            ``core.audit.tree_class.tree_class_map``. Files classed
+            vendored-compat / test-harness get the mild
+            SCORE_NON_PRODUCTION_TREE demotion — weighting only, never
+            a skip. ``None`` disables the demotion entirely (the
+            weight-off knob: scoring is then exactly the pre-tag
+            behaviour).
 
     Returns:
         Gaps sorted by (priority ASC, priority_score DESC, sloc DESC).
@@ -288,6 +310,12 @@ def score_functions(
 
         if binary_absent_keys and key in binary_absent_keys:
             score += SCORE_BINARY_ABSENT
+
+        if (
+            tree_classes
+            and tree_classes.get(gap["file"]) in NON_PRODUCTION_TREE_CLASSES
+        ):
+            score += SCORE_NON_PRODUCTION_TREE
 
         func_name = gap.get("name", "")
         if key in binary_sink_callers or func_name in binary_sink_callers:

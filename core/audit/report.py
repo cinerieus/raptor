@@ -69,6 +69,50 @@ def _tier_title(value: Any) -> str:
     return title.replace("Smt", "SMT")
 
 
+# Tree-class grouping for finding lists: production findings render
+# first, non-production trees follow under labeled subsections with
+# counts. Insertion order here IS the render order.
+_TREE_CLASS_GROUP_LABELS = {
+    "vendored-compat": "Vendored / compat tree",
+    "test-harness": "Test-harness tree",
+}
+
+
+def _finding_tree_class(finding: dict[str, Any]) -> str:
+    """Tree class for report grouping: the finding's own ``tree_class``
+    tag when it carries one, else the path-only classifier — pre-tag
+    findings.json records must group the same way as freshly emitted
+    ones."""
+    tree_class = str(finding.get("tree_class") or "")
+    if tree_class == "production" or tree_class in _TREE_CLASS_GROUP_LABELS:
+        return tree_class
+    try:
+        from .tree_class import classify_tree_class
+        return classify_tree_class(str(finding.get("file") or ""))
+    except Exception:  # noqa: BLE001 — reporting must not fail the run
+        logger.debug("tree-class fallback failed", exc_info=True)
+        return "production"
+
+
+def _group_findings_by_tree(
+    findings: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[tuple[str, list[dict[str, Any]]]]]:
+    """``(production, [(tree_class, findings), ...])`` — grouping only,
+    never a filter: every input finding appears exactly once."""
+    production: list[dict[str, Any]] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        tree_class = _finding_tree_class(finding)
+        if tree_class in _TREE_CLASS_GROUP_LABELS:
+            grouped.setdefault(tree_class, []).append(finding)
+        else:
+            production.append(finding)
+    ordered = [
+        (tc, grouped[tc]) for tc in _TREE_CLASS_GROUP_LABELS if tc in grouped
+    ]
+    return production, ordered
+
+
 def generate_report(
     out_dir: Path,
     *,
@@ -490,30 +534,22 @@ def write_markdown_report(
             lines.append(f"| {tool} | {avail} |")
         lines.append("")
 
-    # Findings
+    # Findings — production tree first; vendored/compat and
+    # test-harness findings follow under labeled subsections with
+    # counts (grouped, never dropped: a harness overflow is still a
+    # legitimate detection, just not what the operator reads first).
     if findings:
         lines.append("## Findings")
         lines.append("")
-        for f in findings:
-            # LLM-derived free text (title) and labels (id, tier, file,
-            # line, depth) — single-line sanitised so a crafted value
-            # cannot break out of the heading or inject markup.
-            fid = _line(f.get("id", "FIND-???"), max_chars=80)
-            title = _line(f.get("title", "Untitled"))
-            tier = _line(
-                _tier_title(f.get("evidence_tier", "heuristic")),
-                max_chars=40,
-            )
-            lines.append(f"### {fid}: {title} ({tier})")
-            file_loc = _line(f.get("file", "?"))
-            line_no = _line(f.get("line", "?"), max_chars=20)
-            depth = _line(f.get("depth", "?"), max_chars=40)
-            lines.append(
-                f"**File:** {file_loc}:{line_no}  "
-                f"**Depth:** {depth}  "
-                f"**Evidence:** {tier}"
-            )
+        production, grouped = _group_findings_by_tree(findings)
+        for f in production:
+            lines.extend(_finding_md_lines(f, heading="###"))
+        for tree_class, group in grouped:
+            label = _TREE_CLASS_GROUP_LABELS[tree_class]
+            lines.append(f"### {label} findings ({len(group)})")
             lines.append("")
+            for f in group:
+                lines.extend(_finding_md_lines(f, heading="####"))
 
     # Dark findings — tool-blind hypotheses that need concrete
     # verification. Not findings, not refuted: route to /validate.
@@ -614,6 +650,38 @@ def write_markdown_report(
     # made the report write crash at run end.
     path.write_text(content, encoding="utf-8")
     return path
+
+
+def _finding_md_lines(
+    f: dict[str, Any], *, heading: str = "###",
+) -> list[str]:
+    """One finding's markdown block — THE single per-finding render
+    seam: the production list and every tree-class subsection all
+    render through here. Any per-finding marker (e.g. a provisional
+    flag) must render inside this helper, or it silently misses one
+    of those paths.
+
+    LLM-derived free text (title) and labels (id, tier, file, line,
+    depth) — single-line sanitised so a crafted value cannot break
+    out of the heading or inject markup."""
+    fid = _line(f.get("id", "FIND-???"), max_chars=80)
+    title = _line(f.get("title", "Untitled"))
+    tier = _line(
+        _tier_title(f.get("evidence_tier", "heuristic")),
+        max_chars=40,
+    )
+    file_loc = _line(f.get("file", "?"))
+    line_no = _line(f.get("line", "?"), max_chars=20)
+    depth = _line(f.get("depth", "?"), max_chars=40)
+    return [
+        f"{heading} {fid}: {title} ({tier})",
+        (
+            f"**File:** {file_loc}:{line_no}  "
+            f"**Depth:** {depth}  "
+            f"**Evidence:** {tier}"
+        ),
+        "",
+    ]
 
 
 def _evidence_distribution(
@@ -1259,6 +1327,18 @@ def _completeness_lines(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _summary_finding_line(f: dict[str, Any]) -> str:
+    """One finding's summary list line. LLM-derived values — sanitise
+    so a crafted title / path cannot inject extra lines or live markup
+    into the summary."""
+    severity = _line(str(f.get("severity", "medium")).title(), max_chars=40)
+    return (
+        f"- [{severity}] {_line(f.get('title', 'Untitled'))} "
+        f"({_line(f.get('file', '?'))}:"
+        f"{_line(f.get('line', '?'), max_chars=20)})"
+    )
+
+
 def _format_summary(report: dict[str, Any]) -> str:
     """Format a human-readable summary."""
     stats = report.get("stats", {})
@@ -1321,13 +1401,16 @@ def _format_summary(report: dict[str, Any]) -> str:
     if findings:
         lines.append("")
         lines.append("### Findings")
-        for f in findings:
-            # LLM-derived values — sanitise so a crafted title / path
-            # cannot inject extra lines or live markup into the summary.
-            severity = _line(str(f.get("severity", "medium")).title(), max_chars=40)
+        # Production tree first; non-production trees grouped after,
+        # labeled with counts (see _group_findings_by_tree).
+        production, grouped = _group_findings_by_tree(findings)
+        lines.extend(_summary_finding_line(f) for f in production)
+        for tree_class, group in grouped:
             lines.append(
-                f"- [{severity}] {_line(f.get('title', 'Untitled'))} "
-                f"({_line(f.get('file', '?'))}:{_line(f.get('line', '?'), max_chars=20)})"
+                f"{_TREE_CLASS_GROUP_LABELS[tree_class]} ({len(group)}):"
+            )
+            lines.extend(
+                "  " + _summary_finding_line(f) for f in group
             )
 
     survival = report.get("survival")

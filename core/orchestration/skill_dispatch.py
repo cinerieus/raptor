@@ -439,7 +439,19 @@ def _signal_key(f: dict) -> tuple:
     return (
         0 if f.get("is_exploitable") is True else 1,  # exploitable first
         -_safe_score(f),                                # score descending
+        _tree_class_rank(f),                            # production first
     )
+
+
+def _tree_class_rank(f: dict) -> int:
+    """Tie-break rank below the signal fields: findings tagged with a
+    non-production ``tree_class`` (core.audit.tree_class vocabulary —
+    audit emissions stamp it) yield to production findings ONLY when
+    the exploitability signals tie. Untagged findings (other emitters)
+    rank as production, so their ordering is unchanged."""
+    from core.audit.tree_class import NON_PRODUCTION_TREE_CLASSES
+
+    return 1 if f.get("tree_class") in NON_PRODUCTION_TREE_CLASSES else 0
 
 
 def truncate_findings_by_signal(

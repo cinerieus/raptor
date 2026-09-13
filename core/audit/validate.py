@@ -27,6 +27,7 @@ from core.orchestration.skill_dispatch import (
 from core.schema_constants import CWE_TO_VULN_TYPE, normalise_vuln_type
 
 from .record import append_audit_log
+from .tree_class import NON_PRODUCTION_TREE_CLASSES, classify_tree_class
 
 if TYPE_CHECKING:
     from .orchestrator import OrchestratorResult, ReviewOutcome
@@ -57,10 +58,18 @@ class ValidatePostpassResult:
 _DARK_CONFIDENCE_RANK = {"high": 0, "medium": 1, "low": 2}
 
 
-def _dark_priority(outcome: Any) -> int:
+def _dark_priority(outcome: Any) -> tuple[int, int]:
+    """Dark-slot ordering: review confidence first, then tree class —
+    production rows win a tied confidence over vendored-compat /
+    test-harness rows (preference only; non-production rows still
+    fill remaining slots)."""
     review_result = getattr(outcome, "review_result", None) or {}
     conf = str(review_result.get("confidence", "")).lower()
-    return _DARK_CONFIDENCE_RANK.get(conf, 3)
+    tree_class = classify_tree_class(str(getattr(outcome, "file", "") or ""))
+    return (
+        _DARK_CONFIDENCE_RANK.get(conf, 3),
+        1 if tree_class in NON_PRODUCTION_TREE_CLASSES else 0,
+    )
 
 
 def validate_findings(
@@ -506,6 +515,10 @@ def _emit_findings_json(
             raw["cwe_id"] = cwe
         finding = Finding.from_dict(raw).to_dict()
         # Audit-owned extras (not modelled by the canonical Finding).
+        # tree_class rides along so the budget-capped selection
+        # (truncate_findings_by_signal) can prefer production findings
+        # on signal ties — a tag, never a filter.
+        finding["tree_class"] = classify_tree_class(str(outcome.file or ""))
         finding["title"] = (outcome.hypothesis
                             or f"Finding in {outcome.function}")
         if outcome.hypothesis:

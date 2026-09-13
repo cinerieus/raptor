@@ -134,9 +134,11 @@ def cmd_gaps(args: argparse.Namespace) -> int:
 
     if args.prioritize:
         from core.audit.priority import load_flow_traces, score_functions
+        from core.audit.tree_class import tree_class_map
         flow_traces = load_flow_traces(out_dir)
         gaps = score_functions(
             gaps, context_map=context_map, flow_traces=flow_traces,
+            tree_classes=tree_class_map(g["file"] for g in gaps),
         )
         if args.rank:
             # Rank BEFORE budget truncation so the cut drops the

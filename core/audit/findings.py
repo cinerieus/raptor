@@ -13,6 +13,8 @@ from pathlib import Path
 
 from core.json import load_json, save_json
 
+from .tree_class import classify_tree_class
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -82,6 +84,7 @@ def emit_finding(
     severity: str = "medium",
     tool_evidence: list[dict[str, Any]] | None = None,
     hypothesis: str | None = None,
+    tree_class: str | None = None,
 ) -> dict[str, Any]:
     """Emit a finding and append to findings.json.
 
@@ -96,6 +99,10 @@ def emit_finding(
         severity: low/medium/high/critical.
         tool_evidence: List of dicts with tool name, rule, output.
         hypothesis: The hypothesis that was confirmed.
+        tree_class: Pre-computed tree class (core.audit.tree_class
+            vocabulary) — callers holding prep-time vendored verdicts
+            pass a refined value; absent, the path-only classifier
+            stamps it. A tag for ordering/weighting, never a filter.
 
     Returns:
         The finding dict.
@@ -114,6 +121,7 @@ def emit_finding(
             "description": description,
             "severity": severity,
             "origin": "audit",
+            "tree_class": tree_class or classify_tree_class(file_path),
         }
         if cwe:
             finding["cwe"] = cwe
