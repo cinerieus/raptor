@@ -154,6 +154,43 @@ class TestOutputEqualsTargetRefused:
                                   target=target, output=target)
                 assert fake.kwargs is None
 
+    def test_start_refuses_output_inside_target(self):
+        # output=<target>/subdir would land the rw output bind INSIDE
+        # the target tree — the writable-window-into-the-scanned-repo
+        # class the equality guard exists for, one level down.
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            sub = target / "out"
+            sub.mkdir()
+            with patch("core.sandbox.run", _RunRecorder()) as fake:
+                with pytest.raises(ValueError, match="distinct output"):
+                    SandboxHost.start(target=target, output=sub)
+                assert fake.kwargs is None, "refusal must precede any spawn"
+
+    def test_start_refuses_symlink_into_target(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            (target / "deep").mkdir(parents=True)
+            link = Path(tmp) / "out-link"
+            link.symlink_to(target / "deep")
+            with patch("core.sandbox.run", _RunRecorder()):
+                with pytest.raises(ValueError, match="distinct output"):
+                    SandboxHost.start(target=target, output=link)
+
+    def test_sibling_with_target_name_prefix_allowed(self):
+        # Both directions: /x/repo-out is a SIBLING of /x/repo, not a
+        # descendant — a naive startswith on the raw string would
+        # wrongly refuse it.
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "repo"
+            target.mkdir()
+            sibling = Path(tmp) / "repo-out"
+            sibling.mkdir()
+            from core.sandbox.host import _resolve_output
+            out_dir, owned = _resolve_output(target, sibling)
+            assert out_dir == str(sibling)
+            assert owned is None
+
 
 @pytest.mark.integration
 class TestTargetReadOnlyE2E:

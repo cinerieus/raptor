@@ -102,12 +102,19 @@ def _resolve_output(target_path: Path, output: Path | None) -> tuple[str, str | 
     if output is None:
         owned = tempfile.mkdtemp(prefix="raptor-host-out-")
         return owned, owned
-    if os.path.realpath(os.fspath(output)) == os.path.realpath(
-            str(target_path)):
+    _out_real = os.path.realpath(os.fspath(output))
+    _tgt_real = os.path.realpath(str(target_path))
+    # Refuse descendants, not just equality: output=<target>/subdir
+    # would land the rw output bind INSIDE the target tree, handing a
+    # spawned hostile target a writable window back into the scanned
+    # repo — the same class the equality guard was added for.
+    if _out_real == _tgt_real or _out_real.startswith(
+            _tgt_real.rstrip("/") + "/"):
         raise ValueError(
-            f"output {str(output)!r} resolves to the target directory "
-            f"{target_path} — the target tree must stay read-only "
-            f"inside the sandbox; choose a distinct output directory"
+            f"output {str(output)!r} resolves into the target "
+            f"directory {target_path} — the target tree must stay "
+            f"read-only inside the sandbox; choose a distinct output "
+            f"directory outside it"
         )
     return os.fspath(output), None
 
