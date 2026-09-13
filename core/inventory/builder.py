@@ -612,10 +612,12 @@ def build_inventory(
     Enumerates source files, detects languages, extracts functions via
     AST/regex, computes SHA-256 per file, and records exclusions.
 
-    Always rehashes files on disk.  Unchanged files (SHA-256 match with
-    a previous checklist) reuse their old parsed entries, including
-    coverage marks.  Changed files are re-parsed and their coverage
-    marks cleared.
+    Change detection against a previous checklist is two-tier: a
+    stat compare (mtime + size) first — an exact match reuses the old
+    parsed entry without reading the file — then a SHA-256 content
+    compare for files whose stat changed. Unchanged files keep their
+    old parsed entries, including coverage marks. Changed files are
+    re-parsed and their coverage marks cleared.
 
     Args:
         target_path: Directory or file to analyze.

@@ -1,7 +1,7 @@
 """Synthetic-fixture corpus driver.
 
 Uses the in-tree fixture at
-``core/inventory/tests/fixtures/binary_oracle/`` with hand-labeled
+``core/analysis/tests/fixtures/binary_oracle/`` with hand-labeled
 expected verdicts. No external deps; validates the precision harness
 end-to-end on known-correct cases and acts as a fast classifier sanity
 check.

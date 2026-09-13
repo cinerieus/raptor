@@ -106,7 +106,12 @@ def function_level_diff(
     only when its hash differs. Items missing a hash on either side
     (pre-hash inventories) degrade conservatively to *changed* — this
     feeds a priority signal, so over-boosting beats silently missing
-    new code.
+    new code. The same FN-safe direction absorbs extractor-path span
+    drift: for a split return type (``static char *\\nfoo(...)``) the
+    C regex path stamps ``line_start`` at the name line while
+    tree-sitter stamps the type line, so a file flipping between
+    grammar-present and grammar-absent environments reports such
+    functions as changed — over-boost, never suppression.
 
     Only files reported added/modified by :func:`compare_inventories`
     are examined. Returns ``{"functions_added": [...],
