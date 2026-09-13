@@ -282,6 +282,12 @@ def _interpret_result(result: subprocess.CompletedProcess, cmd_display: str) -> 
     result.sandbox_info = info  # type: ignore[attr-defined]
 
 
+# Public alias: the module docstring names this function as one of the
+# module's two entry points, and cross-package consumers (dark_verify's
+# capped-stderr re-classification) call it — give them a public name.
+interpret_result = _interpret_result
+
+
 def _path_within(path: str, allowed: list) -> bool:
     """Return True if `path` is inside any of the `allowed` directories.
 

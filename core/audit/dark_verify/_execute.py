@@ -1122,14 +1122,14 @@ def _merge_capped_stderr_classification(proc, label: str) -> None:
     if not stderr_text:
         return
     try:
-        from core.sandbox.observe import _interpret_result
+        from core.sandbox.observe import interpret_result
     except ImportError:
         return
     clone = subprocess.CompletedProcess(
         getattr(proc, "args", []), proc.returncode, None, stderr_text,
     )
     try:
-        _interpret_result(clone, label)
+        interpret_result(clone, label)
     except Exception:
         logger.debug(
             "capped stderr re-classification failed", exc_info=True,
