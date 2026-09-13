@@ -705,6 +705,12 @@ class BuildDetector:
     # cwd-never-inside-the-repo assertion. A probe added here cannot
     # silently reopen the class the maven `.mvn/jvm.config` incident
     # belonged to without failing that test.
+    # Every type BUILD_SYSTEMS can emit MUST have an entry here (a
+    # regression test enumerates both maps): validate_build_command
+    # returns False for unknown types, and the CodeQL caller downgrades
+    # an unvalidated detection to no-build mode — a missing entry
+    # silently discards a perfectly good detected command on EVERY run
+    # for that build system (autotools and meson shipped that way).
     _VALIDATION_COMMANDS: ClassVar[dict[str, list[str]]] = {
         "maven": ["mvn", "--version"],
         "gradle": ["gradle", "--version"],
@@ -714,11 +720,25 @@ class BuildDetector:
         "pnpm": ["pnpm", "--version"],
         "pip": ["pip", "--version"],
         "poetry": ["poetry", "--version"],
+        # `python setup.py build` — probe the interpreter the command
+        # names, not setuptools itself (import errors surface in the
+        # real build with a clear message).
+        "setuptools": ["python", "--version"],
         "gomod": ["go", "version"],
         "cmake": ["cmake", "--version"],
+        # `./configure && make`: configure is repo-shipped and never
+        # executed at validation time (same doctrine as the gradle
+        # wrapper special-case above — repo code doesn't run in the
+        # probe), so the system tool the command actually needs is
+        # make. autoconf is deliberately NOT probed: it generates
+        # configure but the detected command never invokes it.
+        "autotools": ["make", "--version"],
+        "meson": ["meson", "--version"],
         "make": ["make", "--version"],
         "dotnet": ["dotnet", "--version"],
+        "msbuild": ["msbuild", "-version"],
         "bundler": ["bundle", "--version"],
+        "rake": ["rake", "--version"],
     }
 
     def validate_build_command(self, build_system: BuildSystem, timeout: int = 30) -> bool:
