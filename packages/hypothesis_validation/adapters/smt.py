@@ -44,6 +44,7 @@ from core.smt_solver.path_feasibility import (
     PathCondition,
     PathSMTResult,
     check_path_feasibility,
+    check_path_feasibility_dual,
 )
 
 from .base import ToolAdapter, ToolCapability, ToolEvidence
@@ -143,7 +144,21 @@ class SMTAdapter(ToolAdapter):
 
         try:
             profile = self._profile()
-            result: PathSMTResult = check_path_feasibility(
+            # Signedness honesty: the default uint64 profile is a
+            # GUESS — under it the ubiquitous signed error check
+            # (``ret < 0``) encodes as ``ULT(ret, 0)``, unsat, so one
+            # signedness-mismatched guard would refute (and thereby
+            # confirm infeasibility for) a perfectly live path. When
+            # the operator did not pin a profile, an unsat verdict is
+            # honored only if BOTH signedness profiles agree
+            # (check_path_feasibility_dual); a caller-supplied
+            # bv_profile asserts known signedness and keeps the
+            # cheaper single-profile check.
+            check = (
+                check_path_feasibility if self._bv_profile is not None
+                else check_path_feasibility_dual
+            )
+            result: PathSMTResult = check(
                 conditions, profile=profile,
             )
         except Exception as e:  # noqa: BLE001 — solver failure becomes tool-evidence error, never a crash
