@@ -810,6 +810,26 @@ class ProjectManager:
             )
             raise ValueError(msg)
 
+    def _output_dir_owner(self, output_dir: str | Path,
+                          exclude: str | None = None) -> str | None:
+        """Name of the registered project already claiming *output_dir*
+        (resolved-path comparison), or ``None``. ``exclude`` skips one
+        project name (rename compares against everyone else)."""
+        try:
+            needle = str(Path(output_dir).resolve())
+        except OSError:
+            needle = str(output_dir)
+        for p in self.list_projects():
+            if not p.output_dir or (exclude and p.name == exclude):
+                continue
+            try:
+                other = str(Path(p.output_dir).resolve())
+            except OSError:
+                other = p.output_dir
+            if other == needle:
+                return p.name
+        return None
+
     def create(self, name: str, target: str, description: str = "",
                output_dir: str | None = None, resolve_target: bool = True,
                created: str | None = None,
@@ -842,6 +862,23 @@ class ProjectManager:
 
         if not output_dir:
             output_dir = str((DEFAULT_OUTPUT_BASE / name).resolve())
+
+        # Two projects must never share one output dir: status/findings
+        # would interleave, and `/project clean` or `delete --purge` on
+        # one would destroy the other's runs (the purge containment
+        # check passes — the dir is under the base). Reachable via
+        # explicit --output-dir, and historically via rename A→B then
+        # create A (both defaulted to <base>/A). Fail closed.
+        owner = self._output_dir_owner(output_dir)
+        if owner:
+            msg = (
+                f"Output directory {output_dir} already belongs to "
+                f"project '{owner}' — two projects must never share an "
+                f"output directory (clean/purge on one would delete the "
+                f"other's runs). Pass --output-dir to pick a different "
+                f"directory."
+            )
+            raise ValueError(msg)
 
         resolved_binaries: list[str] = []
         for b in (binaries or []):
@@ -1029,7 +1066,19 @@ class ProjectManager:
         """Rename a project. ``force`` overrides the live-run refusal
         (needed for runs whose foreign-stamped metadata reads as
         unverifiable-alive forever — e.g. dirs restored from another
-        machine with ``status=running``)."""
+        machine with ``status=running``).
+
+        A name-derived default output dir (``<base>/<old_name>``) is
+        MOVED to ``<base>/<new_name>`` and the project record updated.
+        Pre-fix the record kept pointing at the old-name path, so a
+        later ``create(old_name)`` silently minted a second project on
+        the SAME output dir — clean/purge on either destroyed the
+        other's runs. The move only happens when no run is live (an
+        in-flight run's directory must never move under it — the same
+        contract as run pins); a --force rename past live runs keeps
+        the old path and warns. Operator-chosen custom output dirs are
+        never moved.
+        """
         self._validate_name(new_name)
         project = self.load(old_name)
         if not project:
@@ -1068,6 +1117,68 @@ class ProjectManager:
                    "foreign-stamped runs read as live forever)")
             raise ValueError(msg)
 
+        # Re-derive a name-derived default output dir. Custom
+        # (operator-chosen) dirs are left alone: nothing about them is
+        # derived from the name, and create()'s shared-dir refusal
+        # protects them from a later re-create of the old name.
+        old_output = project.output_path
+        new_output: Path | None = None
+        try:
+            derived_old = (DEFAULT_OUTPUT_BASE / old_name).resolve()
+            is_derived = old_output.resolve() == derived_old
+        except OSError:
+            is_derived = False
+        if is_derived:
+            new_output = (DEFAULT_OUTPUT_BASE / new_name).resolve()
+            if live:
+                # --force past live runs: a live run's directory must
+                # never move under it (run-pin contract). Keep the old
+                # path; create()'s shared-dir refusal still prevents a
+                # re-create of the old name from sharing it.
+                logger.warning(
+                    "rename: %d live run(s) — output directory stays at "
+                    "%s (a live run's directory never moves); re-run "
+                    "'raptor project rename' semantics do not apply to "
+                    "the retained path",
+                    len(live), old_output,
+                )
+                new_output = None
+            elif new_output.exists():
+                msg = (
+                    f"Cannot rename '{old_name}' → '{new_name}': the "
+                    f"output directory {new_output} already exists. "
+                    f"Remove or rename it first."
+                )
+                raise ValueError(msg)
+            else:
+                dir_owner = self._output_dir_owner(
+                    new_output, exclude=old_name)
+                if dir_owner:
+                    msg = (
+                        f"Cannot rename '{old_name}' → '{new_name}': "
+                        f"output directory {new_output} is registered "
+                        f"to project '{dir_owner}'."
+                    )
+                    raise ValueError(msg)
+
+        # Move the output dir BEFORE the registry rewrite: a move
+        # failure aborts the rename cleanly (registry untouched); a
+        # registry failure after the move rolls the move back below.
+        moved = False
+        if new_output is not None:
+            if old_output.exists():
+                try:
+                    os.rename(old_output, new_output)
+                    moved = True
+                except OSError as e:
+                    msg = (
+                        f"Cannot rename '{old_name}': moving the output "
+                        f"directory {old_output} → {new_output} failed: "
+                        f"{e}"
+                    )
+                    raise ValueError(msg) from e
+            project.output_dir = str(new_output)
+
         # Update project
         project.name = new_name
 
@@ -1082,7 +1193,24 @@ class ProjectManager:
         # old file is removed; FileNotFoundError is fine (already
         # gone), any other OSError is logged loudly and re-raised so
         # the operator knows the old file needs manual cleanup.
-        save_json(new_file, project.to_dict())
+        try:
+            save_json(new_file, project.to_dict())
+        except Exception:
+            # Registry write failed after the dir move: put the dir
+            # back so the (still old-named) registry entry keeps
+            # pointing at real data. Best-effort — a failed rollback
+            # is logged, never masks the original error.
+            if moved:
+                try:
+                    os.rename(new_output, old_output)
+                except OSError:
+                    logger.error(
+                        "rename: registry write failed AND the output "
+                        "dir rollback failed — runs now live at %s "
+                        "while project '%s' records %s; move them back "
+                        "manually", new_output, old_name, old_output,
+                    )
+            raise
         old_file = self.projects_dir / f"{old_name}.json"
         try:
             old_file.unlink()

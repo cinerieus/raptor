@@ -347,6 +347,77 @@ class TestProjectManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mgr.rename("a", "none")
 
+    def test_rename_moves_default_output_dir(self):
+        p = self.mgr.create("old", self.target_code)
+        old_output = Path(p.output_dir)
+        (old_output / "scan_1").mkdir(parents=True)
+        (old_output / "scan_1" / "findings.json").write_text("[]")
+        renamed = self.mgr.rename("old", "new")
+        new_output = Path(renamed.output_dir)
+        self.assertNotEqual(new_output, old_output)
+        self.assertEqual(new_output.name, "new")
+        self.assertFalse(old_output.exists())
+        self.assertTrue((new_output / "scan_1" / "findings.json").exists())
+        # Persisted, not just on the returned object
+        self.assertEqual(self.mgr.load("new").output_dir,
+                         str(new_output))
+
+    def test_rename_then_recreate_old_name_does_not_share(self):
+        # rename A→B once left output_dir at <base>/A; create(A) then
+        # minted a SECOND project on the same dir — B's runs showed in
+        # A's status and a purge of A destroyed B's runs.
+        p = self.mgr.create("appa", self.target_code)
+        old_output = Path(p.output_dir)
+        (old_output / "scan_1").mkdir(parents=True)
+        renamed = self.mgr.rename("appa", "appb")
+        recreated = self.mgr.create("appa", self.target_other)
+        self.assertNotEqual(recreated.output_dir, renamed.output_dir)
+        # The re-created project must not see the renamed project's runs
+        self.assertFalse(
+            (Path(recreated.output_dir) / "scan_1").exists())
+
+    def test_rename_keeps_custom_output_dir(self):
+        custom = Path(self.tmpdir.name) / "custom-out"
+        p = self.mgr.create("old", self.target_code,
+                            output_dir=str(custom))
+        self.mgr.rename("old", "new")
+        self.assertEqual(self.mgr.load("new").output_dir, p.output_dir)
+        self.assertTrue(custom.exists())
+
+    def test_rename_refuses_existing_destination_dir(self):
+        from core.project.project import DEFAULT_OUTPUT_BASE
+        p = self.mgr.create("old", self.target_code)
+        blocker = DEFAULT_OUTPUT_BASE / "new"
+        blocker.mkdir(parents=True)
+        with self.assertRaises(ValueError):
+            self.mgr.rename("old", "new")
+        # Nothing mutated: old project intact, its dir untouched
+        self.assertIsNotNone(self.mgr.load("old"))
+        self.assertIsNone(self.mgr.load("new"))
+        self.assertTrue(Path(p.output_dir).exists())
+
+    def test_rename_force_with_live_runs_keeps_dir(self):
+        # A live run's directory must never move under it: the forced
+        # rename keeps the old path (and create()'s shared-dir refusal
+        # protects a later re-create of the old name).
+        from unittest.mock import patch as _patch
+        p = self.mgr.create("old", self.target_code)
+        live_dir = Path(p.output_dir) / "scan_live"
+        live_dir.mkdir(parents=True)
+        with _patch("core.project.clean.split_live_runs",
+                    return_value=([], [live_dir])):
+            renamed = self.mgr.rename("old", "new", force=True)
+        self.assertEqual(renamed.output_dir, p.output_dir)
+        self.assertTrue(live_dir.exists())
+        with self.assertRaises(ValueError):
+            self.mgr.create("old", self.target_other)
+
+    def test_create_refuses_claimed_output_dir(self):
+        shared = str(Path(self.tmpdir.name) / "shared-out")
+        self.mgr.create("a", self.target_a, output_dir=shared)
+        with self.assertRaises(ValueError):
+            self.mgr.create("b", self.target_b, output_dir=shared)
+
     def test_delete_clears_active_symlink(self):
         self.mgr.create("myapp", self.target_code)
         active = self.mgr.projects_dir / ".active"
