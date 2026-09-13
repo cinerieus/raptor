@@ -298,3 +298,34 @@ def test_delta_json_records_applied_files(tmp_path: Path) -> None:
     data = json.loads((out / "delta.json").read_text())
     assert "requirements.txt" in data["applied"]
     assert data["summary"]["resolved"] == 1
+
+
+# ---------------------------------------------------------------------------
+# delta.md row rendering — untrusted findings fields are neutralised
+# ---------------------------------------------------------------------------
+
+def test_row_line_neutralises_hostile_findings_fields() -> None:
+    """Package name / advisory id flow from findings.json (registry /
+    manifest content) into delta.md tables and stdout — pipes must
+    not split the row, newlines must not terminate it, and ANSI
+    bytes must be defanged."""
+    row = {
+        "severity": "high",
+        "sca": {
+            "ecosystem": "npm",
+            "name": "evil|pkg\n</details>",
+            "version": "1.0.0\x1b[31m",
+            "advisory": {"id": "GHSA-x | forged | yes | 0.99"},
+            "in_kev": False,
+            "epss": 0.5,
+        },
+    }
+    line = verify._row_line(row)
+    assert "\n" not in line
+    assert "\x1b" not in line
+    assert "</details>" not in line
+    # Un-escaped pipes would forge extra table cells: exactly the
+    # four data columns plus delimiters survive (hostile pipes are
+    # backslash-escaped).
+    import re
+    assert len(re.findall(r"(?<!\\)\|", line)) == 5

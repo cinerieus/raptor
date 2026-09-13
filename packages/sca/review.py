@@ -35,8 +35,9 @@ from pathlib import Path
 
 from core.cve import EpssClient, KevClient
 from core.json import JsonCache
-from core.security.log_sanitisation import escape_nonprintable
 from core.security.prompt_output_sanitise import sanitise_string
+
+from ._md import inline_code, neutralize_inline
 
 from . import SCA_CACHE_ROOT, default_client
 from .findings import build_vuln_findings, severity_rank
@@ -424,7 +425,7 @@ def _render_review_markdown(
              _VERDICT_REVIEW: "Review",
              _VERDICT_BLOCK: "Block"}[verdict]
     buf = StringIO()
-    buf.write(f"# raptor-sca check — {dep.purl}\n\n")
+    buf.write(f"# raptor-sca check — {neutralize_inline(dep.purl)}\n\n")
     buf.write(f"**Verdict:** {label}\n\n")
 
     if vuln_findings:
@@ -455,18 +456,27 @@ def _render_review_markdown(
             # terminal — same escaping treatment as report.py.
             buf.write(
                 f"- [{' / '.join(tags)}] "
-                f"**{escape_nonprintable(primary.osv_id)}**"
+                f"**{neutralize_inline(primary.osv_id)}**"
             )
             if primary.aliases:
                 aliases = ", ".join(
-                    escape_nonprintable(a) for a in primary.aliases[:2]
+                    neutralize_inline(a) for a in primary.aliases[:2]
                 )
                 buf.write(f" ({aliases})")
             buf.write("\n")
             if primary.summary:
                 buf.write(f"  - {sanitise_string(primary.summary)}\n")
             if f.fixed_version:
-                buf.write(f"  - Fix available: **{f.fixed_version}**\n")
+                # ``fixed_version`` comes from OSV ``ranges.events.
+                # fixed`` — untrusted registry content. Rendered as a
+                # code span (with backticks neutralised) so printable
+                # markdown metacharacters (``![x](url)`` image
+                # beacons, ``[x](url)`` links) stay inert —
+                # plain non-printable escaping passes them through.
+                buf.write(
+                    "  - Fix available: "
+                    f"**{inline_code(f.fixed_version)}**\n"
+                )
             else:
                 buf.write("  - No fix published.\n")
         buf.write("\n")
@@ -478,12 +488,12 @@ def _render_review_markdown(
         for t in typo_findings or []:
             buf.write(
                 f"- Typosquat candidate: distance-{t.distance} from "
-                f"popular **{t.nearest_popular}** "
+                f"popular **{neutralize_inline(t.nearest_popular)}** "
                 f"({t.severity})\n"
             )
         for s in slop_findings or []:
-            root = s.suspected_root or "(unknown)"
-            reasons = ", ".join(s.reasons)
+            root = neutralize_inline(s.suspected_root or "(unknown)")
+            reasons = neutralize_inline(", ".join(s.reasons))
             buf.write(
                 f"- Slopsquat candidate: heuristic score "
                 f"{s.score:.2f} ({s.severity}); suspected "
@@ -500,7 +510,8 @@ def _render_review_markdown(
         buf.write("## Existence\n\n")
         buf.write(
             f"⚠ Registry could not confirm that "
-            f"**{dep.ecosystem}:{dep.name}@{dep.version}** "
+            f"**{dep.ecosystem}:{neutralize_inline(dep.name)}"
+            f"@{neutralize_inline(dep.version)}** "
             f"exists (404 / network failure). This may be a "
             f"typo, a deleted package, or a private package "
             f"the registry won't disclose. Verify the name "
@@ -526,7 +537,8 @@ def _render_review_markdown(
             if seed_metadata_unverifiable:
                 buf.write(
                     f"⚠ Registry could not confirm that "
-                    f"**{dep.ecosystem}:{dep.name}@{dep.version}** "
+                    f"**{dep.ecosystem}:{neutralize_inline(dep.name)}"
+                    f"@{neutralize_inline(dep.version)}** "
                     f"exists (404 / network failure). This may be a "
                     f"typo, a deleted package, or a private package "
                     f"the registry won't disclose. Verify the name "
@@ -571,12 +583,16 @@ def _render_review_markdown(
                         tags.append(f"CVSS {f.cvss_score:.1f}")
                     buf.write(
                         f"- [{' / '.join(tags)}] "
-                        f"**{escape_nonprintable(f.dependency.name)}"
-                        f"@{escape_nonprintable(f.dependency.version or '*')}"
-                        f"** — {escape_nonprintable(primary.osv_id)}"
+                        f"**{neutralize_inline(f.dependency.name)}"
+                        f"@{neutralize_inline(f.dependency.version or '*')}"
+                        f"** — {neutralize_inline(primary.osv_id)}"
                     )
                     if f.fixed_version:
-                        buf.write(f" (fix: {f.fixed_version})")
+                        # OSV-sourced — code span keeps link/image
+                        # markdown syntax inert (see the direct-dep
+                        # fix line above).
+                        buf.write(
+                            f" (fix: {inline_code(f.fixed_version)})")
                     buf.write("\n")
                 buf.write("\n")
             else:
@@ -587,7 +603,12 @@ def _render_review_markdown(
             # the full surface, not just the flagged subset.
             buf.write("<details>\n<summary>Full transitive list</summary>\n\n")
             for d in sorted(transitive_deps, key=lambda d: d.name):
-                buf.write(f"- `{d.name}@{d.version or '*'}`\n")
+                # Transitive names / versions come from live registry
+                # metadata: defang non-printables and neutralise
+                # backticks so a crafted name can't escape the code
+                # span (or close this <details> block early).
+                span = inline_code(f"{d.name}@{d.version or '*'}")
+                buf.write(f"- {span}\n")
             buf.write("</details>\n\n")
 
     if verdict == _VERDICT_BLOCK:

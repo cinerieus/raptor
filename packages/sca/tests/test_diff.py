@@ -539,11 +539,11 @@ def test_table_newline_in_reason_stays_one_row() -> None:
 
 def test_md_cell_caps_length_and_escapes_controls() -> None:
     long_value = "x" * 5000
-    cell = diff._md_cell(long_value)
+    cell = diff.md_cell(long_value)
     assert len(cell) <= diff._MD_CELL_LIMIT + 1  # +1 for the ellipsis
     assert cell.endswith("…")
     # ANSI escape defanged, backtick escaped.
-    cell2 = diff._md_cell("a\x1b[31mred`tick")
+    cell2 = diff.md_cell("a\x1b[31mred`tick")
     assert "\x1b" not in cell2
     assert "\\x1b" in cell2
     assert "\\`" in cell2
@@ -556,3 +556,15 @@ def test_pr_comment_neutralises_repo_label() -> None:
     )
     assert "<script>" not in md
     assert "&lt;script&gt;" in md
+
+
+def test_md_cell_neutralises_link_and_image_syntax() -> None:
+    """``![x](url)`` / ``[x](url)`` from untrusted fields must not
+    render as an active image beacon / link in PR-comment tables —
+    the bracket syntax is backslash-escaped."""
+    cell = diff.md_cell("![beacon](https://evil.example/p)")
+    assert "![" not in cell
+    assert cell.startswith("!\\[")
+    cell2 = diff.md_cell("[phish](https://evil.example)")
+    assert "[phish]" not in cell2
+    assert "\\[phish\\]" in cell2

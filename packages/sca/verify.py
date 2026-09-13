@@ -52,7 +52,7 @@ from core.json import JsonCache, load_json, save_json
 # findings-class budget.
 _MAX_FINDINGS_BYTES = 64 * 1024 * 1024
 from . import SCA_CACHE_ROOT
-from .diff import compute_delta
+from .diff import compute_delta, md_cell
 from .findings import severity_rank
 from . import default_client
 from .pipeline import RunOptions, run_sca
@@ -401,14 +401,20 @@ def _render_markdown(
 
 
 def _row_line(r: dict[str, Any]) -> str:
-    sev = (r.get("severity") or "info").title()
+    # Every interpolated cell is findings.json content that downstream
+    # carries registry / manifest bytes — the same trust boundary
+    # ``diff.md_cell`` was built for. Unescaped pipes / newlines /
+    # ``</details>`` in a crafted package name or advisory id would
+    # break the delta.md table, forge report rows, or land terminal
+    # escapes on stdout.
+    sev = md_cell((r.get("severity") or "info").title())
     sca = r.get("sca") or {}
     eco = sca.get("ecosystem") or ""
     name = sca.get("name") or ""
     version = sca.get("version") or ""
     adv = sca.get("advisory") or {}
     adv_id = (adv.get("id") or "") if isinstance(adv, dict) else ""
-    finding = f"{eco}:{name}@{version} {adv_id}".strip()
+    finding = md_cell(f"{eco}:{name}@{version} {adv_id}".strip())
     kev = "yes" if sca.get("in_kev") else ""
     epss_val = sca.get("epss")
     epss = f"{epss_val:.2f}" if isinstance(epss_val, (int, float)) else ""

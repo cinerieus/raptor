@@ -372,7 +372,7 @@ def test_advisory_with_fix_returns_review(tmp_path: Path, capsys) -> None:
     assert rc == 1
     out = capsys.readouterr().out
     assert "**Verdict:** Review" in out
-    assert "Fix available: **4.17.12**" in out
+    assert "Fix available: **`4.17.12`**" in out
 
 
 # ---------------------------------------------------------------------------
@@ -810,3 +810,84 @@ def test_review_markdown_sanitises_osv_fields() -> None:
     assert "\x07" not in md
     assert "\\x1b" in md
     assert "![exfil](https://evil.example/p.png)" not in md
+
+
+def test_review_markdown_sanitises_fixed_version_and_transitives() -> None:
+    """``fixed_version`` (OSV ranges.events.fixed) and transitive
+    names/versions (live registry metadata) render into the same
+    operator-facing markdown as the escaped osv_id beside them —
+    hostile bytes must be defanged, and a backtick in a transitive
+    name must not escape its code span."""
+    from packages.sca.models import Advisory
+    from packages.sca.review import (
+        _VERDICT_REVIEW,
+        _render_review_markdown,
+        _synthesise_dep,
+    )
+
+    adv = Advisory(
+        osv_id="GHSA-ok",
+        aliases=[],
+        summary="s",
+        details="",
+        affected=[],
+        severity=None,
+        fixed_versions=["1.2.3\x1b[2Jwiped"],
+        references=[],
+    )
+    f = _vuln(severity="high", fixed="1.2.3\x1b[2Jwiped")
+    f.advisories = [adv]
+    hostile_transitive = Dependency(
+        ecosystem="PyPI", name="evil`](https://evil.example)`",
+        version="1.0\x1b[31m",
+        declared_in=Path("/r/req.txt"), scope="main",
+        is_lockfile=False, pin_style=PinStyle.EXACT, direct=False,
+        purl="pkg:pypi/evil@1.0",
+        parser_confidence=Confidence("low", reason="t"),
+    )
+    t_finding = _vuln(severity="high", fixed="2.0\x1b[31m")
+    t_finding.advisories = [adv]
+    dep = _synthesise_dep("PyPI", "x", "1.0")
+    md = _render_review_markdown(
+        dep, [f], [], _VERDICT_REVIEW,
+        transitive_deps=[hostile_transitive],
+        transitive_findings=[t_finding],
+        transitive_walk_attempted=True,
+        transitive_walk_supported=True,
+    )
+    assert "\x1b" not in md
+    assert "evil`" not in md
+    assert "evil'](https://evil.example)'" in md
+
+
+def test_review_markdown_keeps_link_and_image_syntax_inert() -> None:
+    """``escape_nonprintable`` passes printable markdown metachars —
+    a hostile fixed_version shaped like ``![beacon](url)`` must not
+    render as an active inline image in the operator report. The fix
+    line renders the value inside a code span (backticks
+    neutralised), so the syntax is inert."""
+    from packages.sca.models import Advisory
+    from packages.sca.review import (
+        _VERDICT_REVIEW,
+        _render_review_markdown,
+        _synthesise_dep,
+    )
+
+    beacon = "![beacon](https://evil.example/p?q=x)"
+    adv = Advisory(
+        osv_id="GHSA-ok", aliases=[], summary="s", details="",
+        affected=[], severity=None,
+        fixed_versions=[beacon], references=[],
+    )
+    f = _vuln(severity="high", fixed=beacon)
+    f.advisories = [adv]
+    dep = _synthesise_dep("PyPI", "x", "1.0")
+    md = _render_review_markdown(dep, [f], [], _VERDICT_REVIEW)
+    # The beacon text appears only INSIDE a code span; a code span
+    # cannot be broken out of because backticks in the value are
+    # replaced.
+    assert f"`{beacon}`" in md
+    for line in md.splitlines():
+        if beacon in line:
+            before = line.split(beacon, 1)[0]
+            assert before.endswith("`"), line

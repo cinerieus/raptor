@@ -33,8 +33,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from core.json import dumps_artifact, load_json
-from core.security.log_sanitisation import escape_nonprintable
-
+from . import _md
 from .findings import severity_rank
 from .rows import FindingRow
 
@@ -43,16 +42,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Length cap for interpolated markdown table cells. Finding labels
-# (eco:name@version + advisory id) and suppression reasons come from
-# findings.json, which downstream carries registry / manifest /
-# suppression-file content — long enough for legitimate values,
-# short enough that an adversarial multi-kilobyte string can't
-# balloon the PR comment past GitHub's cap.
-_MD_CELL_LIMIT = 200
+_MD_CELL_LIMIT = _md.MD_INLINE_LIMIT
 
 
-def _md_cell(value: Any, *, limit: int = _MD_CELL_LIMIT) -> str:
+def md_cell(value: Any, *, limit: int = _MD_CELL_LIMIT) -> str:
     """Neutralise an untrusted value for a markdown table cell.
 
     Finding labels and suppression reasons flow from findings.json
@@ -60,24 +53,13 @@ def _md_cell(value: Any, *, limit: int = _MD_CELL_LIMIT) -> str:
     tables that ``render_pr_comment`` wraps in ``<details>`` blocks.
     Unescaped ``|`` splits the row; raw ``</details>`` + a forged
     header closes the real section and injects content that renders
-    as if raptor-sca produced it. Escape the markdown/HTML
-    structural characters, collapse newlines (row terminators), defang
-    non-printables, and length-cap so every consumer of these tables
-    (baseline-delta.md, pr-comment.md, stdout) gets inert text.
+    as if raptor-sca produced it; ``![x](url)`` / ``[text](url)``
+    render as an ACTIVE inline image (beacon) or link (phishing) in
+    the PR comment. Delegates to the package-wide inline neutraliser
+    (:func:`packages.sca._md.neutralize_inline`) so tables and prose
+    share one mechanism.
     """
-    text = str(value)
-    text = text.replace("\r", " ").replace("\n", " ")
-    text = (
-        text.replace("\\", "\\\\")
-            .replace("|", "\\|")
-            .replace("`", "\\`")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    )
-    text = escape_nonprintable(text)
-    if len(text) > limit:
-        text = text[:limit].rstrip() + "…"
-    return text
+    return _md.neutralize_inline(value, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +386,7 @@ def _render_markdown(
     # Paths are operator-supplied argv, but they land in a shared
     # report — same cell treatment keeps the header inert.
     buf.write(
-        f"# raptor-sca diff — `{_md_cell(a_path)}` → `{_md_cell(b_path)}`\n\n"
+        f"# raptor-sca diff — `{md_cell(a_path)}` → `{md_cell(b_path)}`\n\n"
     )
     buf.write(f"- New: **{len(d.new)}**\n")
     buf.write(f"- Resolved: **{len(d.resolved)}**\n")
@@ -490,7 +472,7 @@ def render_pr_comment(
     # ``--repo-label`` is operator-supplied but flows into a PR
     # comment other reviewers read — neutralise like any other
     # interpolated field.
-    label = _md_cell(repo_label or "raptor-sca")
+    label = md_cell(repo_label or "raptor-sca")
     new_count = len(delta.new)
     resolved_count = len(delta.resolved)
     kev_new = sum(1 for r in delta.new
@@ -610,19 +592,19 @@ def _table(
     buf.write("|" + "|".join(["---"] * len(cols)) + "|\n")
     for r in rows:
         # Every interpolated field is untrusted (findings.json content)
-        # — route through ``_md_cell`` so a crafted package name,
+        # — route through ``md_cell`` so a crafted package name,
         # advisory id, or suppression reason can't break the table or
         # forge markup inside the surrounding <details> block.
-        sev = _md_cell((r.get("severity") or "info").title())
+        sev = md_cell((r.get("severity") or "info").title())
         sca = r.get("sca") or {}
         eco = sca.get("ecosystem") or ""
         name = sca.get("name") or ""
         version = sca.get("version") or ""
         adv = sca.get("advisory") or {}
         adv_id = (adv.get("id") if isinstance(adv, dict) else "") or ""
-        finding_label = _md_cell(f"{eco}:{name}@{version} {adv_id}".strip())
+        finding_label = md_cell(f"{eco}:{name}@{version} {adv_id}".strip())
         if show_suppression:
-            reason = _md_cell(r.get("suppression_reason") or "—")
+            reason = md_cell(r.get("suppression_reason") or "—")
             buf.write(f"| {sev} | {finding_label} | {reason} |\n")
         else:
             kev = "yes" if sca.get("in_kev") else ""
@@ -635,4 +617,4 @@ def _table(
     buf.write("\n")
 
 
-__all__ = ["DeltaResult", "compute_delta", "main"]
+__all__ = ["DeltaResult", "compute_delta", "main", "md_cell"]

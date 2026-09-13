@@ -184,6 +184,33 @@ def test_report_includes_severity_table_and_kev_badge() -> None:
     assert "EPSS 0.97" in md
 
 
+def test_base_image_line_defangs_hostile_from_string() -> None:
+    """The Dockerfile FROM image / stage strings come from the scanned
+    repo — a backtick must not escape the code span and inject
+    markdown (autofetch class) into the report."""
+    d = _dep(name="alpine-libcrypto")
+    d.source_kind = "dockerfile_from"
+    d.source_extra = {
+        "image": "evil`![x](https://evil.example/p)`\x1b[31m",
+        "stage_name": "build`er",
+    }
+    findings = build_vuln_findings(
+        [d], [OsvResult(dep_key=d.key(), advisories=[_adv()])],
+    )
+    md = render_markdown_report(
+        target=Path("/repo"),
+        deps_analysed=1,
+        vuln_findings=findings,
+        hygiene_findings=[],
+    )
+    # Backticks neutralised (no code-span escape), non-printables
+    # defanged (no raw ESC byte in the artifact).
+    assert "evil`" not in md
+    assert "evil'![x](https://evil.example/p)'" in md
+    assert "build'er" in md
+    assert "\x1b" not in md
+
+
 def test_findings_are_sorted_by_severity_then_kev_then_epss() -> None:
     d_low = _dep(name="low-pkg")
     d_med = _dep(name="med-pkg")
