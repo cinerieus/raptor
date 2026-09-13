@@ -48,8 +48,8 @@ if [ "${1:-}" = "--self-test" ]; then
     python3 "$HERE/profiles/make_profiles.py" --out "$TMP/profiles"
     python3 - "$TMP/profiles" <<'PYEOF'
 import json, sys, pathlib
-for name in ("no-landlock", "no-mount", "no-mount-nonet", "no-userns",
-             "no-both"):
+for name in ("no-landlock", "no-mount", "restricted-userns",
+             "no-mount-nonet", "no-userns", "no-both"):
     p = json.loads((pathlib.Path(sys.argv[1]) / f"{name}.json").read_text())
     assert p["syscalls"], name
 print("profiles ok")

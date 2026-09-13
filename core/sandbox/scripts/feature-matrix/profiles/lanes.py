@@ -65,7 +65,8 @@ import argparse
 import sys
 
 LANE_ORDER = ["full", "default", "no-landlock", "no-mount",
-              "no-mount-nonet", "no-userns", "no-both"]
+              "restricted-userns", "no-mount-nonet", "no-userns",
+              "no-both"]
 
 _COMMON = [
     "--security-opt", "apparmor=unconfined",
@@ -110,15 +111,26 @@ LANES: dict[str, dict[str, object]] = {
     # Mount-capability-denied lanes, made permanent the day a GitHub
     # runner proved the population exists (userns creation worked, every
     # mount inside was denied — Ubuntu's restricted-userns AppArmor
-    # transition). Two variants because the two real populations
-    # diverge in what the capability guards see:
-    #   no-mount        mount OPERATIONS denied, all namespace creation
-    #                   (incl. netns) works — outer-container-seccomp
-    #                   shape; the userns probe stays True, so tests
-    #                   gate on the MOUNT probe or fail mid-flight.
-    #   no-mount-nonet  additionally denies netns creation — the shape
-    #                   observed on the runner itself; the userns probe
-    #                   goes False and the namespace backend is out.
+    # transition). Three variants because the real populations diverge
+    # in what the capability guards see:
+    #   no-mount           mount OPERATIONS denied, all namespace
+    #                      creation works — outer-container-seccomp
+    #                      shape; userns probe True, engagement probe
+    #                      True; tests gate on the MOUNT probe.
+    #   restricted-userns  no-mount plus the STAGED pid-ns creation
+    #                      denial — the shape live-confirmed on the
+    #                      GitHub runner (see make_profiles.py):
+    #                      userns/net probes True but the spawn
+    #                      backend's engagement probe goes False, so
+    #                      namespace-backed runs refuse loudly and
+    #                      backend-premised tests skip via
+    #                      requires_ns_backend.
+    #   no-mount-nonet     additionally denies netns creation — kept
+    #                      for lattice coverage of the
+    #                      userns-probe-False path (first modelled as
+    #                      the runner shape; superseded by
+    #                      restricted-userns when live artifacts
+    #                      arrived).
     # All features forced by the seccomp profile — static expectations,
     # no env tier.
     "no-mount": {
@@ -129,6 +141,16 @@ LANES: dict[str, dict[str, object]] = {
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
         "intent": "namespaces ok, mount operations denied (outer seccomp)",
     },
+    "restricted-userns": {
+        "docker_args": ["--security-opt",
+                        "seccomp=@PROFILES@/restricted-userns.json",
+                        *_COMMON],
+        "expect": {"landlock": "present", "userns": "ok",
+                   "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
+                   "pivot_root_in_userns": "fail", "seccomp": "ok"},
+        "intent": ("mount ops + staged pid-ns creation denied "
+                   "(GitHub-runner shape, live-confirmed)"),
+    },
     "no-mount-nonet": {
         "docker_args": ["--security-opt",
                         "seccomp=@PROFILES@/no-mount-nonet.json",
@@ -136,7 +158,7 @@ LANES: dict[str, dict[str, object]] = {
         "expect": {"landlock": "present", "userns": "ok",
                    "mount_in_userns": "fail", "proc_mount_in_userns": "fail",
                    "pivot_root_in_userns": "fail", "seccomp": "ok"},
-        "intent": "mount ops + netns creation denied (GitHub-runner shape)",
+        "intent": "mount ops + netns creation denied (userns-probe-False)",
     },
     "no-userns": {
         "docker_args": ["--security-opt", "seccomp=@PROFILES@/no-userns.json",
