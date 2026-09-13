@@ -82,8 +82,16 @@ def extract_references(text: str) -> frozenset[str]:
     refs: set[str] = set()
     for m in _IDENT_RE.finditer(text):
         name = m.group(1)
-        if name not in keywords and not name.isdigit():
-            refs.add(name)
+        if name in keywords or name.isdigit():
+            continue
+        refs.add(name)
+        # A field/method access constrains its BASE variable too:
+        # ``user_input.isalnum()`` guards ``user_input``, and guard
+        # classifiers match on the queried variable name — without the
+        # base, dotted/arrow conditions constrain nothing.
+        base = re.split(r"->|\.", name, maxsplit=1)[0]
+        if base != name and base not in keywords:
+            refs.add(base)
     return frozenset(refs)
 
 

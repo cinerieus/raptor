@@ -72,6 +72,19 @@ class TestExtractReferences:
         refs = extract_references("a > b + c")
         assert refs == frozenset({"a", "b", "c"})
 
+    def test_dot_access_includes_base_variable(self):
+        # A method/field access constrains its base: guard classifiers
+        # query by variable name, so "user_input.isalnum()" must
+        # reference "user_input" too, not only the dotted token.
+        refs = extract_references("user_input.isalnum()")
+        assert "user_input" in refs
+        assert "user_input.isalnum" in refs
+
+    def test_arrow_access_includes_base_variable(self):
+        refs = extract_references("task->mm != NULL")
+        assert "task" in refs
+        assert "task->mm" in refs
+
 
 class TestConditionEdge:
     def test_to_dict_no_condition(self):
