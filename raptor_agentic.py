@@ -172,6 +172,53 @@ def _fail_or_warn_missing_analysis(out_dir: Path, rc: int,
                    rc, stderr[:200])
 
 
+def _collect_child_pass_costs(prepass_result, postpass_result,
+                              audit_postpass) -> list[tuple[str, float]]:
+    """(label, spend_usd) per opt-in pass subprocess that recorded spend.
+
+    The headline run cost otherwise counts only the orchestration
+    phase; --understand / --validate passes settle their
+    credential-proxy ledger into ``cc-proxy-spend.json`` in their own
+    run dirs, and --gap-audit writes ``cost-breakdown.json`` with the
+    authoritative ``totals.total_spend_usd``. Best-effort join: passes
+    that recorded nothing (skipped, or non-proxy dispatch, which has
+    no spend ledger) contribute nothing.
+    """
+    def _proxy_spend(run_dir) -> float:
+        data = load_json(Path(run_dir) / "cc-proxy-spend.json")
+        if not isinstance(data, dict):
+            return 0.0
+        try:
+            return max(float(data.get("reconciled_usd") or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    costs: list[tuple[str, float]] = []
+    understand_dir = getattr(prepass_result, "understand_dir", None)
+    if getattr(prepass_result, "ran", False) and understand_dir:
+        spend = _proxy_spend(understand_dir)
+        if spend > 0:
+            costs.append(("understand pre-pass", spend))
+    audit_dir = (audit_postpass or {}).get("audit_dir")
+    if audit_dir:
+        data = load_json(Path(audit_dir) / "cost-breakdown.json")
+        totals = data.get("totals") if isinstance(data, dict) else None
+        if not isinstance(totals, dict):
+            totals = {}
+        try:
+            spend = float(totals.get("total_spend_usd") or 0.0)
+        except (TypeError, ValueError):
+            spend = 0.0
+        if spend > 0:
+            costs.append(("gap-audit", spend))
+    validate_dir = getattr(postpass_result, "validate_dir", None)
+    if getattr(postpass_result, "ran", False) and validate_dir:
+        spend = _proxy_spend(validate_dir)
+        if spend > 0:
+            costs.append(("validate post-pass", spend))
+    return costs
+
+
 def _materialise_threat_model_phase(
     *,
     target: Path,
@@ -4422,20 +4469,35 @@ Examples:
     )
     from core.reporting.formatting import format_elapsed
     print(f"   Duration: {format_elapsed(workflow_duration)}")
-    if orchestration_result:
-        cost_summary = orchestration_result.get("orchestration", {}).get("cost", {})
-        cost = cost_summary.get("total_cost", 0)
-        if cost > 0:
-            thinking = cost_summary.get("thinking_tokens", 0)
-            cost_str = f"   Cost: ${cost:.2f}"
+    # Headline cost = orchestration spend + the opt-in pass
+    # subprocesses' recorded spend (--understand / --validate /
+    # --gap-audit each spend real money in their own run dirs; the
+    # headline under-reported by their whole share when used).
+    cost_summary = (orchestration_result or {}).get(
+        "orchestration", {}).get("cost", {})
+    cost = cost_summary.get("total_cost", 0) or 0
+    child_costs = _collect_child_pass_costs(
+        prepass_result, postpass_result, audit_postpass)
+    child_total = sum(spend for _label, spend in child_costs)
+    if cost + child_total > 0:
+        thinking = cost_summary.get("thinking_tokens", 0)
+        cost_str = f"   Cost: ${cost + child_total:.2f}"
+        if thinking > 0 and not child_costs:
+            cost_str += f" ({thinking:,} thinking tokens)"
+        print(cost_str)
+        if child_costs:
+            line = f"     analysis: ${cost:.2f}"
             if thinking > 0:
-                cost_str += f" ({thinking:,} thinking tokens)"
-            print(cost_str)
-            # Per-model breakdown if multiple models used
-            by_model = cost_summary.get("cost_by_model", {})
-            if len(by_model) > 1:
-                for model, mcost in by_model.items():
-                    print(f"     {model}: ${mcost:.2f}")
+                line += f" ({thinking:,} thinking tokens)"
+            print(line)
+            for label, spend in child_costs:
+                print(f"     {label}: ${spend:.2f}")
+        # Per-model breakdown if multiple models used
+        by_model = cost_summary.get("cost_by_model", {})
+        if len(by_model) > 1:
+            for model, mcost in by_model.items():
+                print(f"     {model}: ${mcost:.2f}")
+    if orchestration_result:
         # Fast-tier scorecard savings — surface concrete behaviour
         # of the prefilter (full ANALYSE calls skipped on findings
         # the cheap tier confidently classified as FPs and the
@@ -4588,10 +4650,19 @@ Examples:
         extra_summary["Exploits generated"] = exploits_count
     if patches_count > 0:
         extra_summary["Patches generated"] = patches_count
-    cost_summary = orch_phase.get("cost", {})
-    cost = cost_summary.get("total_cost", 0)
-    if cost > 0:
-        extra_summary["Cost"] = f"${cost:.2f}"
+    # Same aggregation as the console headline: pass-subprocess spend
+    # joins the report cost, with the split stated when present.
+    report_cost = (orch_phase.get("cost", {}).get("total_cost", 0) or 0)
+    if report_cost + child_total > 0:
+        if child_costs:
+            breakdown = " + ".join(
+                [f"${report_cost:.2f} analysis"]
+                + [f"${spend:.2f} {label}"
+                   for label, spend in child_costs])
+            extra_summary["Cost"] = (
+                f"${report_cost + child_total:.2f} ({breakdown})")
+        else:
+            extra_summary["Cost"] = f"${report_cost:.2f}"
     if aggregation:
         aggregate_model = aggregation.get("analysed_by")
         extra_summary["Aggregate synthesis"] = aggregate_model or "completed"
