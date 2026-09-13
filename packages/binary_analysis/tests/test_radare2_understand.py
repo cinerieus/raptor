@@ -1158,6 +1158,37 @@ class TestMalformedR2Json(unittest.TestCase):
         self.assertEqual(ctx.interesting_functions[0].transitive_distance, 1)
 
 
+class TestFunctionInventoryCap(unittest.TestCase):
+    def test_cap_is_recorded_in_ctx_notes(self):
+        """Capping the aflj inventory must surface in ctx.notes (the
+        operator-facing report), not just a log line — otherwise the
+        map claims complete coverage while functions were dropped."""
+        understand = _make_understand_for("r2-cap-", self.addCleanup)
+        ctx = BinaryContextMap(binary_path=understand.binary)
+        n = BinaryUnderstand._MAX_FUNCTIONS + 5
+        r2 = MagicMock()
+        r2.cmd.return_value = json.dumps([
+            {"name": f"fn{i}", "addr": 0x1000 + i * 0x10, "size": 64}
+            for i in range(n)
+        ])
+        understand._extract_functions(r2, ctx)
+        self.assertEqual(
+            len(ctx.interesting_functions), BinaryUnderstand._MAX_FUNCTIONS)
+        cap_notes = [x for x in ctx.notes if "Function inventory capped" in x]
+        self.assertEqual(len(cap_notes), 1)
+        self.assertIn(str(BinaryUnderstand._MAX_FUNCTIONS), cap_notes[0])
+
+    def test_no_note_below_cap(self):
+        understand = _make_understand_for("r2-cap2-", self.addCleanup)
+        ctx = BinaryContextMap(binary_path=understand.binary)
+        r2 = MagicMock()
+        r2.cmd.return_value = json.dumps([
+            {"name": "fn0", "addr": 0x1000, "size": 64},
+        ])
+        understand._extract_functions(r2, ctx)
+        self.assertEqual(ctx.notes, [])
+
+
 class TestExportedMembership(unittest.TestCase):
     def test_is_exported_flag_still_set(self):
         """Membership moved from a per-function list scan to a set; the

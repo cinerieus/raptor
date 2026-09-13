@@ -910,6 +910,17 @@ class BinaryUnderstand:
                 "function list capped: %d -> %d",
                 len(fns), self._MAX_FUNCTIONS,
             )
+            # Mirror the class-cap pattern: the cap must reach the
+            # operator-facing map/report via ctx.notes — a log line
+            # alone lets the output claim complete function coverage
+            # while dropped functions are invisible to the sink map
+            # and transitive reachability.
+            ctx.notes.append(
+                f"Function inventory capped at {self._MAX_FUNCTIONS} "
+                f"of {len(fns)} recovered functions; sinks and "
+                "reachability cover only the retained set — inspect "
+                "radare2 aflj output directly for the remainder."
+            )
             fns = fns[:self._MAX_FUNCTIONS]
 
         # Exports are a list for consumers that keep order; membership
