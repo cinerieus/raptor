@@ -1781,9 +1781,20 @@ def _get_output_summary(run_dir, meta):
     if result and status in ("completed", "failed"):
         meta_path = run_dir / RUN_METADATA_FILE
         if meta_path.exists() and meta:
-            meta["output_summary"] = result
-            meta["output_summary_v"] = summary_version
-            save_json(meta_path, meta)
+            # Same cross-process lock every other RMW on this file
+            # takes (start_run, _update_status, write_run_pin) — an
+            # unlocked save of the pre-computed snapshot raced
+            # concurrent marker writers (a pin rewrite, another status
+            # invocation) and clobbered their update. Re-load inside
+            # the lock and add ONLY the cache keys.
+            from core.json import load_json
+            from core.run.metadata import _metadata_lock
+            with _metadata_lock(meta_path):
+                fresh = load_json(meta_path)
+                if isinstance(fresh, dict):
+                    fresh["output_summary"] = result
+                    fresh["output_summary_v"] = summary_version
+                    save_json(meta_path, fresh)
 
     return result
 

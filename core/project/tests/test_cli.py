@@ -92,6 +92,49 @@ class TestRunSummarySca(unittest.TestCase):
             self.assertEqual(
                 _get_output_summary(run_dir, fresh_meta), "99 findings")
 
+    def test_cache_write_back_holds_metadata_lock(self):
+        """The cache write-back is an RMW on .raptor-run.json and must
+        take the same cross-process lock as every other marker writer."""
+        from core.run import metadata as run_metadata
+        with TemporaryDirectory() as d:
+            run_dir = Path(d)
+            _write_sca(run_dir, [_sca_finding("lodash-pro")])
+            meta = {"status": "completed"}
+            meta_path = run_dir / run_metadata.RUN_METADATA_FILE
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+            locked = []
+            real_lock = run_metadata._metadata_lock
+
+            @contextlib.contextmanager
+            def spy_lock(path):
+                locked.append(Path(path))
+                with real_lock(path):
+                    yield
+
+            with patch.object(run_metadata, "_metadata_lock", spy_lock):
+                _get_output_summary(run_dir, meta)
+            self.assertEqual(locked, [meta_path])
+
+    def test_cache_write_back_preserves_concurrent_update(self):
+        """A marker rewrite that landed between our load and the cache
+        write-back (e.g. write_run_pin) must survive: the write-back
+        re-loads under the lock and adds only the cache keys."""
+        from core.run.metadata import RUN_METADATA_FILE
+        with TemporaryDirectory() as d:
+            run_dir = Path(d)
+            _write_sca(run_dir, [_sca_finding("lodash-pro")])
+            meta_path = run_dir / RUN_METADATA_FILE
+            # Our (stale) snapshot, loaded before the concurrent writer.
+            stale = {"status": "completed"}
+            # The concurrent writer's version, already on disk.
+            meta_path.write_text(json.dumps({
+                "status": "completed", "project": "just-pinned",
+            }), encoding="utf-8")
+            _get_output_summary(run_dir, stale)
+            on_disk = json.loads(meta_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk.get("project"), "just-pinned")
+            self.assertEqual(on_disk.get("output_summary"), "1 findings")
+
 
 class TestPrintFindingsSca(unittest.TestCase):
 
