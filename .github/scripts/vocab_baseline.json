@@ -881,22 +881,6 @@
     "count": 22,
     "kind": "literal"
   },
-  "core/audit/taint_specs.py::_SANITISER_PATTERNS": {
-    "count": 14,
-    "kind": "literal"
-  },
-  "core/audit/taint_specs.py::_SINK_PATTERNS": {
-    "count": 24,
-    "kind": "literal"
-  },
-  "core/audit/taint_specs.py::_SOURCE_PATTERNS": {
-    "count": 21,
-    "kind": "literal"
-  },
-  "core/audit/taint_specs.py::_THREAT_CLASSES": {
-    "count": 12,
-    "kind": "literal"
-  },
   "core/audit/transform_sequence.py::_DOUBLE_ENCODE_CLASSES": {
     "count": 11,
     "kind": "alternation"
