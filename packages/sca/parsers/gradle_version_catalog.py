@@ -427,15 +427,15 @@ def _parse_bundles(raw: dict) -> dict[str, list[str]]:
     return out
 
 
-def _reset_cache_for_tests() -> None:
-    _PARSE_CACHE.clear()
-
-
 def reset_cache() -> None:
     """Drop the per-process parse cache. See the matching helper in
     ``parsers/directory_packages_props.py`` — same scan-boundary
     reasoning."""
     _PARSE_CACHE.clear()
+
+
+# Test-suite alias — was a byte-identical second implementation.
+_reset_cache_for_tests = reset_cache
 
 
 __all__ = [

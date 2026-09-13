@@ -81,8 +81,8 @@ def parse(path: Path) -> list[Dependency]:
         # stays a warning: there it usually means real deps are
         # silently missing from the scan.
         from .._test_paths import is_test_resident
-        from ._safe_read import _SCAN_ROOT
-        root = _SCAN_ROOT.get() or path
+        from ._safe_read import active_scan_root
+        root = active_scan_root() or path
         level = (
             logging.DEBUG if is_test_resident(path, root)
             else logging.WARNING
