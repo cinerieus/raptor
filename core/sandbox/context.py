@@ -6059,11 +6059,25 @@ def sandbox(block_network=_UNSET, target: str | None = None, output: str | None 
                         from .probes import ENGAGE_FAIL_INSTRUCTIONS
                         _demote_net_why = (_fallback_floor_detail
                                            or "spawn backend unavailable")
+                        # Name the ACTUAL unmet condition: on an
+                        # ABI-v4+ host the deny-all lane was excluded
+                        # because allowed_tcp_ports is the policy —
+                        # claiming the ABI is missing there sent
+                        # operators chasing a Landlock upgrade they
+                        # already have.
+                        _no_deny_why = (
+                            "the Landlock deny-all fallback does not "
+                            "apply when allowed_tcp_ports is the "
+                            "network policy"
+                            if (landlock_available
+                                and _get_landlock_abi() >= 4
+                                and allowed_tcp_ports)
+                            else "Landlock ABI v4+ is missing")
                         raise SandboxSetupError(
                             "Sandbox: block_network=True was requested "
                             "but this call was demoted from the "
                             f"namespace backend ({_demote_net_why}) "
-                            "and Landlock ABI v4+ is missing — no "
+                            f"and {_no_deny_why} — no "
                             "layer can enforce the requested network "
                             "block for this call.",
                             ENGAGE_FAIL_INSTRUCTIONS + " Alternatively "

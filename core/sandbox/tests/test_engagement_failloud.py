@@ -464,6 +464,30 @@ class TestExecStatusPipe:
             os.close(w)
 
 
+def test_demotion_refusal_names_the_actual_unmet_condition_source_pin():
+    """The per-call demotion refusal must not claim "Landlock ABI v4+
+    is missing" on ABI-v4+ hosts where the deny-all lane was excluded
+    by allowed_tcp_ports — that wording sent an operator chasing a
+    Landlock upgrade the host already had (live case: a GitHub runner
+    probing ABI 7 refused every block_network+allowlist call with the
+    ABI message). Source pin, same style as the cgroup pin below: the
+    arm computes the condition instead of hardcoding the ABI claim."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "context.py").read_text(
+        encoding="utf-8")
+    start = src.index("_demoted_net_deny = False")
+    block = src[start:src.index("ENGAGE_FAIL_INSTRUCTIONS + \" Alternatively \"",
+                                start)]
+    assert "_no_deny_why" in block, (
+        "the per-call demotion refusal no longer computes the actual "
+        "unmet network-deny condition")
+    assert "allowed_tcp_ports is the" in block, (
+        "the allowlist-excluded branch of the refusal wording is gone")
+    assert "{_no_deny_why}" in block, (
+        "the refusal message no longer interpolates the computed "
+        "condition")
+
+
 def test_engage_probe_covers_the_cgroup_flag_source_pin():
     """The real unshare command appends --cgroup when the CLI supports
     it — the engagement gate must probe the SAME flag-set, or a kernel
