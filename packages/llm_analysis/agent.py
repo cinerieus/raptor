@@ -40,7 +40,8 @@ from core.llm.detection import detect_llm_availability
 from core.llm.providers import ClaudeCodeProvider
 from core.llm.task_types import TaskType
 from core.logging import get_logger
-from core.paths import strip_file_uri
+from core.paths import confine, strip_file_uri
+from core.source import read_text_capped
 from core.progress import HackerProgress
 from core.run.output import unique_run_suffix
 from core.sandbox import SANDBOX_ENGAGE_EXIT_CODE, SandboxSetupError
@@ -389,10 +390,8 @@ class VulnerabilityContext:
         # strip_file_uri drops only a LEADING file:// scheme — the old
         # substring-replace corrupted paths containing file:// mid-string.
         clean_path = strip_file_uri(self.file_path)
-        resolved = (self.repo_path / clean_path).resolve()
-        try:
-            resolved.relative_to(self.repo_path.resolve())
-        except ValueError:
+        resolved = confine(self.repo_path, clean_path)
+        if resolved is None:
             logger.warning("Path traversal blocked: %s", self.file_path)
             return None
         return resolved
@@ -404,25 +403,22 @@ class VulnerabilityContext:
             logger.warning("Cannot read file: %s", file_path)
             return False
 
-        # Cap source-file read at 10 MB. Pre-fix `f.readlines()`
-        # loaded the whole file into memory before any size check —
+        # Capped read (shared core.source helper, 10 MB default):
         # a generated source file (single-line concatenated bundle,
         # vendored data file misclassified as code, hostile target
         # repo with a giant binary mislabeled as `.c`) would
-        # OOM-kill the analyser. Real C/C++/Java/Python source files
-        # are well under 1 MB; 10 MB leaves headroom for unusually
-        # large generated parsers / lexers while bounding
-        # pathological input. Truncated reads still return True so
-        # the agent can analyse the visible portion.
-        _MAX_SOURCE_BYTES = 10 * 1024 * 1024
+        # otherwise OOM-kill the analyser. Truncated reads still
+        # return True so the agent can analyse the visible portion.
         try:
-            with open(file_path, encoding="utf-8", errors="replace") as f:
-                content = f.read(_MAX_SOURCE_BYTES + 1)
-            if len(content) > _MAX_SOURCE_BYTES:
+            got = read_text_capped(file_path)
+            if got is None:
+                logger.warning("Cannot read file: %s", file_path)
+                return False
+            content, truncated = got
+            if truncated:
                 logger.warning(
-                    "Source file %s exceeded %s-byte cap; analysis sees truncated content", file_path, _MAX_SOURCE_BYTES
+                    "Source file %s exceeded the capped read; analysis sees truncated content", file_path
                 )
-                content = content[:_MAX_SOURCE_BYTES]
             lines = content.splitlines(keepends=True)
 
             # Get the specific vulnerable lines. endLine is optional
@@ -470,25 +466,20 @@ class VulnerabilityContext:
             # replace corrupted mid-string file://) and validate the
             # path stays within the repo.
             clean_path = strip_file_uri(file_uri)
-            file_path = (self.repo_path / clean_path).resolve()
-
-            try:
-                file_path.relative_to(self.repo_path.resolve())
-            except ValueError:
+            file_path = confine(self.repo_path, clean_path)
+            if file_path is None:
                 return f"[Path traversal blocked: {file_uri}]"
 
             if not file_path.exists():
                 return f"[File not found: {file_uri}]"
 
-            # Same byte cap as read_vulnerable_code above. Same
+            # Same capped read as read_vulnerable_code above. Same
             # rationale: bound the in-flight memory regardless of
             # source-file size.
-            _MAX_SOURCE_BYTES = 10 * 1024 * 1024
-            with open(file_path, encoding="utf-8", errors="replace") as f:
-                content = f.read(_MAX_SOURCE_BYTES + 1)
-            if len(content) > _MAX_SOURCE_BYTES:
-                content = content[:_MAX_SOURCE_BYTES]
-            lines = content.splitlines(keepends=True)
+            got = read_text_capped(file_path)
+            if got is None:
+                return f"[Error reading code: {file_uri}]"
+            lines = got[0].splitlines(keepends=True)
 
             # Get context around the line
             start = max(0, line - context_lines - 1)
