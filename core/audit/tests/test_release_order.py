@@ -90,6 +90,36 @@ int cms_text_alias(BIO *out, BIO *cms, unsigned char *buf, int n,
 }
 """
 
+# One dominated escaping write PLUS one undecidable alias write: the
+# dominance receipt on `out` must not let the tmpout question vanish
+# into a refutation.
+TMPOUT_ALIAS_WITH_DOMINATED = """\
+int cms_text_mixed(BIO *out, BIO *cms, unsigned char *buf, int n,
+                   int clear)
+{
+    BIO *tmpout = clear ? out : BIO_new(BIO_s_mem());
+    BIO_write(tmpout, buf, n);
+    if (BIO_get_cipher_status(cms) <= 0)
+        return -1;
+    BIO_write(out, buf, n);
+    return 1;
+}
+"""
+
+TMPOUT_TWO_ALIASES = """\
+int cms_text_two_aliases(BIO *out, BIO *cms, unsigned char *buf, int n,
+                         int clear)
+{
+    BIO *tmpa = clear ? out : BIO_new(BIO_s_mem());
+    BIO *tmpb = clear ? out : BIO_new(BIO_s_mem());
+    BIO_write(tmpa, buf, n);
+    BIO_write(tmpb, buf, n);
+    if (BIO_get_cipher_status(cms) <= 0)
+        return -1;
+    return 1;
+}
+"""
+
 # Plain-CBC pipeline without a MAC — not this channel's claim.
 PLAIN_CBC = """\
 int cbc_stream(BIO *out, BIO *cms, unsigned char *buf)
@@ -263,6 +293,38 @@ class TestAnchorPairs:
         )
         assert res.outcome == "inconclusive"
         assert REASON_SINK_ALIAS_UNRESOLVED in res.reason
+
+    def test_dominated_site_does_not_suppress_unresolved_alias(
+        self, tmp_path,
+    ):
+        # The unresolved-alias write is excluded from the dominance
+        # test, so a dominated escaping sibling must not earn "every
+        # release site is dominated" — the undecidable write stays on
+        # the table as sink-alias-unresolved. The zero-unresolved
+        # all-dominated twin still refutes
+        # (test_buffered_twin_refuted_with_dominator).
+        _write(tmp_path, "src/cms_smime.c", TMPOUT_ALIAS_WITH_DOMINATED)
+        res = run_release_order_check(
+            tmp_path, "src/cms_smime.c", "cms_text_mixed", HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert REASON_SINK_ALIAS_UNRESOLVED in res.reason
+        dests = {r["destination"] for r in res.releases}
+        assert "tmpout" in dests  # the undecidable write is named
+        assert "out" in dests     # the dominated receipt stays attached
+
+    def test_all_unresolved_sites_in_receipt(self, tmp_path):
+        _write(tmp_path, "src/cms_smime.c", TMPOUT_TWO_ALIASES)
+        res = run_release_order_check(
+            tmp_path, "src/cms_smime.c", "cms_text_two_aliases", HYP,
+        )
+        assert res.outcome == "inconclusive"
+        assert REASON_SINK_ALIAS_UNRESOLVED in res.reason
+        unresolved = [
+            r for r in res.releases
+            if r["destination_class"] == "unresolved"
+        ]
+        assert {r["destination"] for r in unresolved} == {"tmpa", "tmpb"}
 
     def test_plain_cbc_is_finalizer_unresolved(self, tmp_path):
         # Proves the channel does not claim unauthenticated pipelines.

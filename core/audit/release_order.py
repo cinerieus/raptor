@@ -201,6 +201,37 @@ def _inconclusive(reason: str, detail: str = "") -> OrderEvidence:
     )
 
 
+def _alias_unresolved_evidence(
+    unresolved_sites: list[dict[str, Any]],
+    fin_receipt: dict[str, Any],
+    file_path: str,
+    dominated_releases: list[dict[str, Any]] | None = None,
+) -> OrderEvidence:
+    """``sink-alias-unresolved`` inconclusive naming EVERY undecidable
+    write site. An unresolved alias is excluded from the dominance
+    test, so a refutation ("every release site is dominated") cannot
+    be claimed while one exists — undecidable evidence degrades to
+    inconclusive, never to refuted."""
+    first = unresolved_sites[0]
+    more = (
+        f" (+{len(unresolved_sites) - 1} more unresolved site(s))"
+        if len(unresolved_sites) > 1 else ""
+    )
+    return OrderEvidence(
+        outcome="inconclusive",
+        reason=(
+            f"{REASON_SINK_ALIAS_UNRESOLVED}: destination "
+            f"`{first['destination']}` of "
+            f"{first['callee']} at "
+            f"{file_path}:{first['line']} mixes "
+            "internal and escaping provenance — buffering vs "
+            f"release undecidable{more}"
+        ),
+        finalizer=fin_receipt,
+        releases=list(dominated_releases or []) + unresolved_sites,
+    )
+
+
 # ── vocabulary (seeds < learned) ────────────────────────────────────
 
 
@@ -521,7 +552,7 @@ def _adjudicate_function(
 
     release_sites: list[dict[str, Any]] = []
     internal_sites: list[dict[str, Any]] = []
-    alias_unresolved: dict[str, Any] | None = None
+    unresolved_sites: list[dict[str, Any]] = []
     for idx, code in enumerate(view_lines):
         m = rel_re.search(code)
         if not m:
@@ -542,7 +573,7 @@ def _adjudicate_function(
         if dest_class == "escaping":
             release_sites.append(site)
         elif dest_class == "unresolved":
-            alias_unresolved = site
+            unresolved_sites.append(site)
         else:
             internal_sites.append(site)
 
@@ -557,19 +588,9 @@ def _adjudicate_function(
     }
 
     if not release_sites:
-        if alias_unresolved is not None:
-            return OrderEvidence(
-                outcome="inconclusive",
-                reason=(
-                    f"{REASON_SINK_ALIAS_UNRESOLVED}: destination "
-                    f"`{alias_unresolved['destination']}` of "
-                    f"{alias_unresolved['callee']} at "
-                    f"{file_path}:{alias_unresolved['line']} mixes "
-                    "internal and escaping provenance — buffering vs "
-                    "release undecidable"
-                ),
-                finalizer=fin_receipt,
-                releases=[alias_unresolved],
+        if unresolved_sites:
+            return _alias_unresolved_evidence(
+                unresolved_sites, fin_receipt, file_path,
             )
         if internal_sites:
             # Buffered-then-flush architecture: every write targets an
@@ -646,6 +667,15 @@ def _adjudicate_function(
             undominated.append(entry)
 
     if not undominated:
+        if unresolved_sites:
+            # A write whose alias provenance is undecidable was
+            # excluded from the dominance test above — "every release
+            # site is dominated" would be claimed over evidence that
+            # never covered it. The dominated receipts stay attached.
+            return _alias_unresolved_evidence(
+                unresolved_sites, fin_receipt, file_path,
+                dominated_releases=releases,
+            )
         return OrderEvidence(
             outcome="refuted",
             reason=(
