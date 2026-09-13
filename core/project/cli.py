@@ -17,7 +17,29 @@ from core.json import dumps_display
 from core.run.output import unique_run_suffix
 
 from .oplock import OpLockContention, project_op_lock
-from .project import DEFAULT_OUTPUT_BASE, ProjectManager
+from .project import DEFAULT_OUTPUT_BASE, ProjectManager, _URL_SCHEME_RE
+
+
+def _caller_relative(path: str | None) -> str | None:
+    """Resolve a relative operator path against ``RAPTOR_CALLER_DIR``.
+
+    The launcher's project route (and the in-session dispatch) run
+    with cwd moved to the RAPTOR repo dir, so a bare ``Path.resolve``
+    on a relative ``--target``/``--binary`` silently persisted a
+    repo-relative path (``--target ./code`` became ``<raptor>/code``,
+    or worse, an existing repo subdir). A relative path given by the
+    operator means "relative to MY shell", which the launcher records
+    in RAPTOR_CALLER_DIR. Absolute paths, URLs, ``~``-paths, and None
+    pass through; without the env var the historical cwd resolution
+    holds.
+    """
+    if (not path or os.path.isabs(path) or path.startswith("~")
+            or _URL_SCHEME_RE.match(path)):
+        return path
+    caller = os.environ.get("RAPTOR_CALLER_DIR")
+    if caller and os.path.isdir(caller):
+        return str((Path(caller) / path).resolve())
+    return path
 
 # Help text for the shared --wait flag on mutating subcommands.
 _WAIT_HELP = ("Block until a concurrent project operation releases the "
@@ -662,6 +684,9 @@ def main() -> None:
                 parser.print_help()
 
         elif args.subcommand == "create":
+            args.target = _caller_relative(args.target)
+            if getattr(args, "binary", None):
+                args.binary = [_caller_relative(b) for b in args.binary]
             # Target-type catalog detection — runs BEFORE
             # ProjectManager.create so a --require-target-type
             # mismatch refuses without leaving a half-created
@@ -765,7 +790,8 @@ def main() -> None:
                 if not args.path:
                     print(_red("add requires a <path> argument"))
                     return
-                resolved_path = Path(args.path).expanduser().resolve()
+                resolved_path = Path(
+                    _caller_relative(args.path)).expanduser().resolve()
                 if not resolved_path.is_file():
                     # Reject at add-time so the operator sees the typo
                     # NOW, not silently weeks later when the scan
@@ -1369,7 +1395,9 @@ def main() -> None:
                     print(f"Project '{args.name}' not found.")
 
         elif args.subcommand == "add":
-            added = mgr.add_directory(args.name, args.directory, target=args.target,
+            added = mgr.add_directory(args.name,
+                                       _caller_relative(args.directory),
+                                       target=_caller_relative(args.target),
                                        output_dir=args.output_dir)
             if added:
                 print(f"Added {added} run(s) to project '{args.name}' "
@@ -1379,7 +1407,7 @@ def main() -> None:
                       f"or none found in {args.directory})")
 
         elif args.subcommand == "adopt":
-            target = args.target
+            target = _caller_relative(args.target)
             if not target and not mgr.load(args.name):
                 for candidate in args.runs:
                     target = mgr.adopt_target_for(candidate)

@@ -308,12 +308,35 @@ USAGE
     exit 0
 fi
 
+# Export static env vars. RAPTOR_CALLER_DIR = operator's PWD at
+# launch (resolves targets/projects downstream — the direct routes
+# below cd into RAPTOR_DIR, so a relative operator path is dead
+# without it). Reject control bytes so a crafted pwd can't smuggle
+# line-injection payloads.
+# [[:cntrl:]] under the C locale is exactly the C0 range + DEL; the
+# subshell scopes the locale pin so the operator's LC_* survive. (A
+# literal $'\x00...' byte list is not usable here: bash strings
+# cannot hold NUL, which silently empties the bracket expression.
+# NUL itself needs no pattern entry for the same reason - $(pwd)
+# can never carry one into the variable.)
+_caller_dir="$(pwd)"
+if ! (LC_ALL=C; case "$_caller_dir" in (*[[:cntrl:]]*) false;; esac); then
+    echo "raptor: RAPTOR_CALLER_DIR contains control bytes - refusing" >&2
+    echo "  (\$PWD has chars in the C0 control range; this is suspicious - bailing safely)" >&2
+    exit 1
+fi
+export RAPTOR_CALLER_DIR="$_caller_dir"
+unset _caller_dir
+
 # Route project subcommands directly (no Claude needed). Export the
 # trust marker + RAPTOR_DIR like the doctor/frida routes do — pre-fix
 # this route exported NOTHING, so every bare-shell `raptor project
 # <sub>` tripped the libexec trust preamble and exited 2 (the
 # bare-shell /project UX was unreachable through its documented entry
-# point).
+# point). RAPTOR_CALLER_DIR (exported above) lets the project CLI
+# resolve a relative --target/--binary against the operator's shell
+# cwd — the cd below otherwise silently persisted repo-relative
+# paths (e.g. `--target ./code` became <raptor>/code).
 if [[ "${1:-}" == "project" ]]; then
     shift
     cd "$RAPTOR_DIR" || exit 1
@@ -362,23 +385,7 @@ if ! command -v claude >/dev/null 2>&1; then
     exit 1
 fi
 
-# Export static env vars. RAPTOR_CALLER_DIR = operator's PWD at
-# launch (resolves targets/projects downstream). Reject control
-# bytes so a crafted pwd can't smuggle line-injection payloads.
-# [[:cntrl:]] under the C locale is exactly the C0 range + DEL; the
-# subshell scopes the locale pin so the operator's LC_* survive. (A
-# literal $'\x00...' byte list is not usable here: bash strings
-# cannot hold NUL, which silently empties the bracket expression.
-# NUL itself needs no pattern entry for the same reason - $(pwd)
-# can never carry one into the variable.)
-_caller_dir="$(pwd)"
-if ! (LC_ALL=C; case "$_caller_dir" in (*[[:cntrl:]]*) false;; esac); then
-    echo "raptor: RAPTOR_CALLER_DIR contains control bytes - refusing" >&2
-    echo "  (\$PWD has chars in the C0 control range; this is suspicious - bailing safely)" >&2
-    exit 1
-fi
-export RAPTOR_CALLER_DIR="$_caller_dir"
-unset _caller_dir
+# RAPTOR_CALLER_DIR was exported before the direct routes above.
 export RAPTOR_DIR
 # Trust marker - libexec scripts refuse to run without one of
 # CLAUDECODE or _RAPTOR_TRUSTED. We've just stripped the env, so
