@@ -531,7 +531,7 @@ class TestTimeoutDegradation(unittest.TestCase):
     def _make_understand(self):
         return _make_understand_for("r2-deg-", self.addCleanup)
 
-    def _analyse_with(self, fake_cmd_t, spawn_counter=None):
+    def _analyse_with(self, fake_cmd_t, spawn_counter=None, quick=False):
         understand = self._make_understand()
         fake_r2pipe = MagicMock()
 
@@ -546,7 +546,9 @@ class TestTimeoutDegradation(unittest.TestCase):
         with patch.object(
             BinaryUnderstand, "_cmd_t", new=staticmethod(fake_cmd_t),
         ), patch.dict("sys.modules", {"r2pipe": fake_r2pipe}):
-            return understand.analyse(max_decompile=0, max_strings=0)
+            return understand.analyse(
+                max_decompile=0, max_strings=0, quick=quick,
+            )
 
     def test_single_timeout_recorded_and_analysis_continues(self):
         """One pathological function must cost exactly its own result:
@@ -606,6 +608,26 @@ class TestTimeoutDegradation(unittest.TestCase):
             [f.name for f in ctx.interesting_functions],
             ["parse_a", "parse_b", "parse_c"],
         )
+
+    def test_quick_mode_session_loss_keeps_metadata_only(self):
+        """Quick mode is stamped metadata_only up front; a session
+        loss must not RELABEL it 'partial' — that overstated the
+        depth and bypassed consumers' metadata_only special-casing.
+        The loud WARNING note still rides."""
+        def fake_cmd_t(r2, command, timeout_s):
+            # Every quick-path query times out so the restart budget
+            # is exhausted and R2SessionLost reaches analyse().
+            if command.startswith(("ij", "iij", "iEj")):
+                raise R2CommandTimeout(
+                    f"r2 command {command!r} exceeded {timeout_s}s")
+            return _timeout_base_response(command)
+
+        ctx = self._analyse_with(fake_cmd_t, quick=True)
+
+        self.assertEqual(ctx.analysis_depth, "metadata_only")
+        warnings = [n for n in ctx.notes if n.startswith("WARNING:")]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("session lost", warnings[0])
 
     def test_aaa_timeout_still_aborts_analysis(self):
         """The initial full auto-analysis timing out means there is no

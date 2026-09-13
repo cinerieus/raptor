@@ -765,7 +765,12 @@ class BinaryUnderstand:
                 # but stamp the map partial and say so LOUDLY —
                 # downstream consumers must be able to distinguish
                 # "binary has no sinks" from "r2 died at function 37".
-                ctx.analysis_depth = "partial"
+                # Only a FULL analysis demotes to "partial": quick mode
+                # is already stamped "metadata_only", and relabeling it
+                # "partial" overstated the depth and bypassed the
+                # consumers' metadata_only special-casing.
+                if ctx.analysis_depth == "full":
+                    ctx.analysis_depth = "partial"
                 note = (
                     f"WARNING: radare2 session lost mid-analysis ({e}); "
                     "remaining extraction steps were skipped — empty "
