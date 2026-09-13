@@ -84,12 +84,16 @@ class TestStudyLoopConvergence:
 class TestReadingListDrain:
     """Test reading-list integration in the loop."""
 
-    def test_reading_list_items_extracted(self):
+    def test_reading_list_items_extracted(self, monkeypatch):
         """Verify the helper that extracts identifiers from reading list."""
         import importlib.util
-        import os
-        os.environ["_RAPTOR_TRUSTED"] = "1"
-        sys.path.insert(0, str(RAPTOR_DIR))
+
+        # Scoped mutation only: a bare os.environ write leaked
+        # _RAPTOR_TRUSTED=1 into every later test in the process,
+        # masking trust-gated refusal assertions (order dependence);
+        # the bare sys.path.insert accumulated per run.
+        monkeypatch.setenv("_RAPTOR_TRUSTED", "1")
+        monkeypatch.syspath_prepend(str(RAPTOR_DIR))
 
         spec = importlib.util.spec_from_file_location(
             "study_loop", STUDY_LOOP,
