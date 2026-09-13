@@ -128,13 +128,18 @@ def _load_pick_from_osv_file(summary_dir: Path, cve_id: str) -> tuple[str, str]:
 
 
 def _verify_one(cve_id: str, picked_slug: str, picked_sha: str) -> OracleVerdict:
-    """Ask OSV; if ORPHAN, fall back to NVD."""
+    """Ask OSV; if ORPHAN or UNKNOWN (lookup failed), fall back to NVD."""
     v = _osv_verify(cve_id, picked_slug, picked_sha, client=_osv_client())
-    if v.verdict != Verdict.ORPHAN:
+    if v.verdict not in (Verdict.ORPHAN, Verdict.UNKNOWN):
         return v
     nv = _nvd_verify(cve_id, picked_slug, picked_sha, client=_nvd_client())
     if nv.verdict != Verdict.ORPHAN:
         return nv
+    if v.verdict == Verdict.UNKNOWN:
+        # The OSV lookup failed outright — NVD's orphan doesn't make
+        # the combined answer definitive, so surface the degraded
+        # oracle coverage instead of a don't-penalize ORPHAN.
+        return v
     # Both orphans — return the first with combined note.
     return OracleVerdict(
         cve_id=cve_id, picked_slug=picked_slug, picked_sha=picked_sha,
@@ -261,10 +266,11 @@ def main() -> int:
     mirror = sum(1 for v in pass_results if v.verdict == Verdict.MIRROR_DIFFERENT_SLUG)
     disp = sum(1 for v in pass_results if v.verdict == Verdict.DISPUTE)
     orph = sum(1 for v in pass_results if v.verdict == Verdict.ORPHAN)
+    unk = sum(1 for v in pass_results if v.verdict == Verdict.UNKNOWN)
     hall = sum(1 for v in pass_results if v.verdict == Verdict.LIKELY_HALLUCINATION)
     print(
         f"\nPASS breakdown: exact={ver} range={rng} mirror={mirror} "
-        f"dispute={disp} orphan={orph} hallucination={hall}",
+        f"dispute={disp} orphan={orph} unknown={unk} hallucination={hall}",
         file=sys.stderr,
     )
     return 0

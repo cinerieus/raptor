@@ -311,3 +311,56 @@ def test_query_batch_offline_returns_none_per_slot() -> None:
     queries = [{"package": {"name": "x", "ecosystem": "npm"}, "version": "1"}] * 2
     assert client.query_batch(queries) == [None, None]
     assert http.post_calls == []
+
+
+# --- transient-vs-definitive split ---------------------------------------
+
+def test_get_vuln_raise_on_transient_500() -> None:
+    import pytest
+
+    from packages.osv import OsvLookupError
+
+    http = _FakeHttp()
+    http.get_responses[f"{OSV_BASE_URL}/vulns/CVE-X"] = HttpError(
+        "server error", status=500,
+    )
+    client = OsvClient(http=http)  # type: ignore[arg-type]
+    with pytest.raises(OsvLookupError):
+        client.get_vuln("CVE-X", raise_on_transient=True)
+
+
+def test_get_vuln_raise_on_transient_404_still_none() -> None:
+    """404 is OSV's authoritative 'no such record' — definitive, so it
+    stays None even for callers opting into transient raises."""
+    http = _FakeHttp()
+    client = OsvClient(http=http)  # type: ignore[arg-type]
+    assert client.get_vuln("CVE-9999-0000", raise_on_transient=True) is None
+
+
+def test_get_vuln_raise_on_transient_offline_miss(tmp_path) -> None:
+    import pytest
+
+    from packages.osv import OsvLookupError
+
+    http = _FakeHttp()
+    client = OsvClient(
+        http=http, cache=JsonCache(tmp_path / "cache"),  # type: ignore[arg-type]
+        offline=True,
+    )
+    with pytest.raises(OsvLookupError):
+        client.get_vuln("CVE-X", raise_on_transient=True)
+    assert http.get_calls == []
+
+
+def test_get_vuln_transient_failure_not_cached(tmp_path) -> None:
+    """A transient failure must never enter the cache: after the host
+    recovers, the next call fetches the real record."""
+    url = f"{OSV_BASE_URL}/vulns/CVE-R"
+    http = _FakeHttp()
+    http.get_responses[url] = HttpError("server error", status=503)
+    cache = JsonCache(tmp_path / "cache")
+    client = OsvClient(http=http, cache=cache)  # type: ignore[arg-type]
+    assert client.get_vuln("CVE-R") is None  # swallowed by default
+    http.get_responses[url] = {"id": "CVE-R", "summary": "recovered"}
+    rec = client.get_vuln("CVE-R")
+    assert rec is not None and rec.id == "CVE-R"

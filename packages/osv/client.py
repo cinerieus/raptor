@@ -46,6 +46,20 @@ DEFAULT_TTL_SECONDS = 24 * 3600
 _MAX_QUERY_PAGES = 20
 
 
+class OsvLookupError(Exception):
+    """A per-vuln lookup failed for a NON-definitive reason.
+
+    Raised (opt-in, see :meth:`OsvClient.get_vuln`) for network
+    failures, non-404 HTTP errors, malformed response bodies, and
+    offline cache misses — everything where "OSV has no record" would
+    be the wrong conclusion. A definitive 404 stays ``None``: that IS
+    OSV's authoritative "no such record".
+
+    Never cached: only successful record fetches enter the cache, so a
+    transient outage can't be replayed as an authoritative answer.
+    """
+
+
 class OsvClient:
     """Thin client over the OSV.dev v1 API. Construct one per run."""
 
@@ -62,9 +76,24 @@ class OsvClient:
         self._offline = offline
         self._ttl = ttl_seconds
 
-    def get_vuln(self, vuln_id: str) -> OsvRecord | None:
-        """Return a parsed :class:`OsvRecord` or ``None`` on 404 / error / parse failure."""
-        record = self._cached_get_vuln(vuln_id)
+    def get_vuln(
+        self, vuln_id: str, *, raise_on_transient: bool = False,
+    ) -> OsvRecord | None:
+        """Return a parsed :class:`OsvRecord` or ``None`` on 404 / error / parse failure.
+
+        With ``raise_on_transient=True``, non-definitive failures
+        (network error, non-404 HTTP status, malformed body, offline
+        cache miss) raise :class:`OsvLookupError` instead of degrading
+        to ``None`` — callers minting verdicts must not read a
+        transient outage as "OSV has no record". The default keeps the
+        historical swallow-to-``None`` shape for aggregating callers.
+        """
+        try:
+            record = self._cached_get_vuln(vuln_id)
+        except OsvLookupError:
+            if raise_on_transient:
+                raise
+            return None
         if record is None:
             return None
         try:
@@ -192,13 +221,16 @@ class OsvClient:
     # ------------------------------------------------------------------
 
     def _cached_get_vuln(self, vuln_id: str) -> dict[str, Any] | None:
+        """Raw record dict, ``None`` for a definitive 404, or
+        :class:`OsvLookupError` for any non-definitive failure."""
         cache_key = f"osv/vulns/{_safe_id(vuln_id)}"
         if self._cache is not None:
             cached = self._cache.get(cache_key, ttl_seconds=self._ttl)
             if isinstance(cached, dict):
                 return cached
         if self._offline:
-            return None
+            msg = f"osv: offline and no cached record for {vuln_id}"
+            raise OsvLookupError(msg)
         # Percent-encode `vuln_id` before interpolating into the
         # URL. Pre-fix the raw `vuln_id` flowed straight into the
         # path segment — for IDs containing `/` (rare but real
@@ -216,11 +248,16 @@ class OsvClient:
             data = self._http.get_json(f"{OSV_BASE_URL}/vulns/{encoded_id}")
         except HttpError as exc:
             if exc.status == 404:
+                # Definitive: OSV authoritatively has no such record.
                 return None
             log.warning("osv: get_vuln(%s) failed: %s", vuln_id, exc)
-            return None
+            msg = f"osv: get_vuln({vuln_id}) failed: {exc}"
+            raise OsvLookupError(msg) from exc
         if not isinstance(data, dict):
-            return None
+            # A 200 whose body isn't a record object (proxy/CDN error
+            # page shaped as JSON) — not OSV saying "no record".
+            msg = f"osv: get_vuln({vuln_id}) returned a non-object body"
+            raise OsvLookupError(msg)
         if self._cache is not None:
             self._cache.put(cache_key, data, ttl_seconds=self._ttl)
         return data
