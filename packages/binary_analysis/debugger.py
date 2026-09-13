@@ -83,8 +83,8 @@ class GDBDebugger:
         # inherits the binary's directory permissions, which
         # we control.
         # binary_dir resolves to the analyser's binary working
-        # area — same dir we already pass to landlock as a
-        # writable path (line 81 below).
+        # area — the same dir this module already passes to the
+        # sandbox as a writable path when running the debugger.
         binary_dir = self.binary.parent
         try:
             binary_dir.mkdir(parents=True, exist_ok=True)

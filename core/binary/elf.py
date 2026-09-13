@@ -311,14 +311,12 @@ def _read_section_headers(
         buf = f.read(record_size)
         if len(buf) < record_size:
             return None
-        if bits == 64:
-            (sh_name, sh_type, _sh_flags, _sh_addr, sh_offset,
-             sh_size, sh_link, _sh_info, _sh_align,
-             sh_entsize) = struct.unpack(fmt, buf)
-        else:
-            (sh_name, sh_type, _sh_flags, _sh_addr, sh_offset,
-             sh_size, sh_link, _sh_info, _sh_align,
-             sh_entsize) = struct.unpack(fmt, buf)
+        # Field ORDER is identical for ELF32/ELF64 section headers;
+        # only the fmt widths (chosen above) differ — one unpack
+        # serves both.
+        (sh_name, sh_type, _sh_flags, _sh_addr, sh_offset,
+         sh_size, sh_link, _sh_info, _sh_align,
+         sh_entsize) = struct.unpack(fmt, buf)
         out.append(_SectionHeader(
             sh_name=sh_name, sh_type=sh_type,
             sh_offset=sh_offset, sh_size=sh_size,
