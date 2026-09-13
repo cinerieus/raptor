@@ -667,6 +667,22 @@ def cmd_notes(args):
         print("  No operator notes found.")
 
 
+def _write_base(args) -> str | None:
+    """Annotation base for WRITES, derived from the resolved out dir
+    (and through it the run's project pin) exactly like the read side
+    (_annotations_dir) — never from the ambient active project. The
+    delegate's own default is the ACTIVE project's annotations dir,
+    so without an explicit --base a note filed against project B's
+    run landed under project A: B's audit never consumed it and
+    `show` never displayed it."""
+    out_dir = _resolve_out_dir(args)
+    if out_dir is None:
+        return None
+    if (out_dir / ".raptor-run.json").is_file():
+        return str(out_dir.parent / "annotations")
+    return str(out_dir / "annotations")
+
+
 def cmd_note(args):
     """Add an operator note (delegates to raptor-annotate)."""
     import subprocess
@@ -679,8 +695,9 @@ def cmd_note(args):
         cmd.extend(["-m", args.body])
     if getattr(args, "status", None):
         cmd.extend(["--status", args.status])
-    if getattr(args, "base", None):
-        cmd.extend(["--base", args.base])
+    base = getattr(args, "base", None) or _write_base(args)
+    if base:
+        cmd.extend(["--base", base])
     env = os.environ.copy()
     env["_RAPTOR_TRUSTED"] = "1"
     # No --source: the delegate stamps the inherited fds' TTY context
@@ -697,8 +714,9 @@ def cmd_edit(args):
         sys.executable, str(libexec / "raptor-annotate"),
         "edit", args.file, args.function,
     ]
-    if getattr(args, "base", None):
-        cmd.extend(["--base", args.base])
+    base = getattr(args, "base", None) or _write_base(args)
+    if base:
+        cmd.extend(["--base", base])
     env = os.environ.copy()
     env["_RAPTOR_TRUSTED"] = "1"
     sys.exit(subprocess.call(cmd, env=env))

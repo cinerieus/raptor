@@ -45,3 +45,83 @@ class TestDefaultSubcommandSniffer:
     def test_no_positional(self):
         mod = _load_review_module()
         assert mod._first_positional(["--project", "/x"]) is None
+
+
+class TestNoteEditWriteBase:
+    """note/edit writes must land in the SAME annotations dir the
+    read side resolves (run's project via --out / --project), never
+    in the ambient active project — the write-path equivalent of the
+    read side's cross-project-bleed fix."""
+
+    @staticmethod
+    def _run_dir(tmp_path):
+        import json
+        project = tmp_path / "proj"
+        run = project / "run_001"
+        run.mkdir(parents=True)
+        (run / ".raptor-run.json").write_text(
+            json.dumps({"command": "audit"}), encoding="utf-8")
+        return run
+
+    def _capture_delegate(self, mod, monkeypatch):
+        import subprocess
+        calls = []
+
+        def fake_call(cmd, env=None):
+            calls.append(cmd)
+            return 0
+
+        monkeypatch.setattr(subprocess, "call", fake_call)
+        return calls
+
+    def test_note_derives_base_from_out(self, tmp_path, monkeypatch):
+        import argparse
+
+        import pytest
+        mod = _load_review_module()
+        calls = self._capture_delegate(mod, monkeypatch)
+        run = self._run_dir(tmp_path)
+        args = argparse.Namespace(
+            file="src/a.c", function="f", body="note", status=None,
+            base=None, out=str(run), project=None,
+        )
+        with pytest.raises(SystemExit):
+            mod.cmd_note(args)
+        cmd = calls[0]
+        assert "--base" in cmd
+        base = cmd[cmd.index("--base") + 1]
+        assert base == str(run.parent / "annotations")
+
+    def test_edit_derives_base_from_out(self, tmp_path, monkeypatch):
+        import argparse
+
+        import pytest
+        mod = _load_review_module()
+        calls = self._capture_delegate(mod, monkeypatch)
+        run = self._run_dir(tmp_path)
+        args = argparse.Namespace(
+            file="src/a.c", function="f",
+            base=None, out=str(run), project=None,
+        )
+        with pytest.raises(SystemExit):
+            mod.cmd_edit(args)
+        cmd = calls[0]
+        assert "--base" in cmd
+        assert cmd[cmd.index("--base") + 1] == str(
+            run.parent / "annotations")
+
+    def test_explicit_base_wins(self, tmp_path, monkeypatch):
+        import argparse
+
+        import pytest
+        mod = _load_review_module()
+        calls = self._capture_delegate(mod, monkeypatch)
+        run = self._run_dir(tmp_path)
+        args = argparse.Namespace(
+            file="src/a.c", function="f", body=None, status=None,
+            base="/explicit/base", out=str(run), project=None,
+        )
+        with pytest.raises(SystemExit):
+            mod.cmd_note(args)
+        cmd = calls[0]
+        assert cmd[cmd.index("--base") + 1] == "/explicit/base"
