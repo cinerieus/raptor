@@ -173,6 +173,15 @@ scanner  →  dedup  →  prep  →  analysis (A-D)  →  validation (0, A-F, 1)
 At each stage a finding can be ruled out.  The pipeline is deliberately
 reductive: start with many candidates, end with the ones that matter.
 
+**Known limitation — finding identity is location-anchored.**  A finding's
+stable id derives from its producer, rule id, and source/sink file:line
+locations, and cross-run views key findings by file, function, and line.
+Renaming or moving a file — or any edit that shifts line numbers — therefore
+gives the same defect a new identity, which weakens cross-run correlation
+(`/project correlate`, `/project findings`) across such changes.  A
+content-anchored redesign is deliberately deferred; treat cross-run identity
+as reliable only while the surrounding code has not moved.
+
 
 ## Sandbox
 
