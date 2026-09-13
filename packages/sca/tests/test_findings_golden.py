@@ -191,19 +191,37 @@ def _build_rows(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
         # dep_requests deliberately absent → default not_evaluated.
     }
 
-    vulns = build_vuln_findings(
-        deps=[dep_lodash, dep_requests],
-        osv_results=[
-            OsvResult(dep_key=dep_lodash.key(),
-                      advisories=[adv_ghsa, adv_alias]),
-            OsvResult(dep_key=dep_requests.key(),
-                      advisories=[adv_requests]),
-        ],
-        kev=cast("KevClient", _FixedKev({"CVE-2021-23337"})),
-        epss=cast("EpssClient", _FixedEpss({"CVE-2021-23337": 0.97,
-                                            "CVE-2018-18074": 0.12})),
-        reachability=reachability,
-    )
+    # Pin the calibration-status axis. risk_components carries
+    # calibration_status, which compute_risk_estimate reads from the
+    # newest in-tree data/calibration/validation/<date>.json and then
+    # caches per process — an environment-coupled input on two axes:
+    # the weekly calibration refresh commits a new verdict (breaking
+    # any golden that embedded the old one), and under pytest-xdist
+    # the per-process cache can carry whatever an earlier test in the
+    # same worker loaded. Pin the loader to the documented cold-start
+    # value and flush the cache on BOTH sides so the goldens neither
+    # inherit worker state nor leak any.
+    from packages.sca import risk
+    risk._reset_calibration_cache_for_tests()
+    real_loader = risk._load_latest_validation_verdict
+    risk._load_latest_validation_verdict = lambda: "unverified"
+    try:
+        vulns = build_vuln_findings(
+            deps=[dep_lodash, dep_requests],
+            osv_results=[
+                OsvResult(dep_key=dep_lodash.key(),
+                          advisories=[adv_ghsa, adv_alias]),
+                OsvResult(dep_key=dep_requests.key(),
+                          advisories=[adv_requests]),
+            ],
+            kev=cast("KevClient", _FixedKev({"CVE-2021-23337"})),
+            epss=cast("EpssClient", _FixedEpss({"CVE-2021-23337": 0.97,
+                                                "CVE-2018-18074": 0.12})),
+            reachability=reachability,
+        )
+    finally:
+        risk._load_latest_validation_verdict = real_loader
+        risk._reset_calibration_cache_for_tests()
     assert len(vulns) == 2
     by_name = {f.dependency.name: f for f in vulns}
     by_name["lodash"].exploit_evidence = ExploitEvidence(

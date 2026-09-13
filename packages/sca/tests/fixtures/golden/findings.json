@@ -135,7 +135,7 @@
         "parser_confidence": 0.95,
         "version_match_confidence": 0.95,
         "final": 68.05093727603116,
-        "calibration_status": "needs_retune"
+        "calibration_status": "unverified"
       },
       "exploit_evidence": {
         "kev_listed": true,
@@ -261,7 +261,7 @@
         "parser_confidence": 0.95,
         "version_match_confidence": 0.95,
         "final": 6.158131572712499,
-        "calibration_status": "needs_retune"
+        "calibration_status": "unverified"
       },
       "exploit_evidence": null,
       "related_findings": []
