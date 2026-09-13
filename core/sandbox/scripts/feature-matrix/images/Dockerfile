@@ -17,6 +17,16 @@
 # Dockerfiles to the same newer tag, silently collapsing the u24/u26
 # image axis into one substrate.
 FROM ubuntu:24.04
+
+# OCI labels, mirroring .github/docker/ci-deps.Dockerfile: `source` is
+# the linked-repo label that ties the GHCR package to this repository
+# (sandbox-matrix-image.yml publishes the u24 build), and `description`
+# is the only per-package text GHCR renders — use it to make clear this
+# image is internal CI plumbing, not a RAPTOR distributable.
+LABEL org.opencontainers.image.source="https://github.com/gadievron/raptor" \
+      org.opencontainers.image.title="raptor-sandbox-matrix" \
+      org.opencontainers.image.description="RAPTOR INTERNAL CI image (sandbox feature-matrix lanes, ubuntu-24.04 runner shape). NOT a RAPTOR distributable or end-user artifact — do not pull or depend on this image."
+
 ARG http_proxy
 ARG https_proxy
 ARG APT_MIRROR=

@@ -17,6 +17,15 @@
 # Dockerfiles to the same newer tag, silently collapsing the u24/u26
 # image axis into one substrate.
 FROM ubuntu:26.04
+
+# OCI labels, mirroring .github/docker/ci-deps.Dockerfile (see the u24
+# Dockerfile for the rationale). The u26 image is weekly-build-only
+# today (not published), but the labels keep both images honest if that
+# ever changes.
+LABEL org.opencontainers.image.source="https://github.com/gadievron/raptor" \
+      org.opencontainers.image.title="raptor-sandbox-matrix" \
+      org.opencontainers.image.description="RAPTOR INTERNAL CI image (sandbox feature-matrix lanes, ubuntu-26.04 runner shape). NOT a RAPTOR distributable or end-user artifact — do not pull or depend on this image."
+
 ARG http_proxy
 ARG https_proxy
 ARG APT_MIRROR=
