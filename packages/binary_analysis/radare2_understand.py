@@ -1523,13 +1523,14 @@ class BinaryUnderstand:
         score = (direct sinks × 10)
               + (transitive sinks × (max_depth + 1 - distance))
 
-        So a function that directly calls 1 sink scores 10; a
-        function 2 hops from 4 sinks scores 4 × (3 + 1 - 2) = 8 —
-        comparable but still ranked below direct callers. A "hub"
-        function 1 hop from 5 sinks scores 5 × (4 - 1) = 15, edging
-        out a single-direct-call routine. That weighting matches
-        operator intuition: many-hop-reachable hubs > single direct
-        call > deep-but-narrow reachability.
+        Worked examples at _TRANSITIVE_MAX_DEPTH = 5: a function that
+        directly calls 1 sink scores 10; a function 2 hops from 4
+        sinks scores 4 × (5 + 1 - 2) = 16 and a "hub" function 1 hop
+        from 5 sinks scores 5 × (5 + 1 - 1) = 25 — sink-rich hubs
+        edge out a single-direct-call routine, while a function 5
+        hops from one sink scores 1 × (5 + 1 - 5) = 1. That weighting
+        matches operator intuition: many-hop-reachable hubs > single
+        direct call > deep-but-narrow reachability.
         """
         def _score(fn) -> int:
             direct = len(fn.calls_dangerous) * 10
