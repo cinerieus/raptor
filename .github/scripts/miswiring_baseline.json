@@ -46,9 +46,6 @@
     "artifacts:orphan_reader::checkpoint-*-groups.json": {
       "note": "glob-reader/concrete-writer false positive: run_corpus._clear_resume_state sweeps finished-run resume sidecars via glob(\"checkpoint-*-groups.json\"); the writers spell the concrete names (literal checkpoint-sec-groups.json / checkpoint-bf-groups.json paths and f\"checkpoint-{mode}-groups.json\", all written through _checkpoint_write), which the artifact indexer keys separately from the glob pattern, so the reader looks orphaned; twin of the baselined *.osv.json entry"
     },
-    "artifacts:orphan_reader::codeql-database.yml": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
     "artifacts:orphan_reader::codeql-pack.lock.yml": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
@@ -355,15 +352,6 @@
     "artifacts:write_only_artifact::merged.sarif": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
-    "artifacts:write_only_artifact::nuclei-headers.txt": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
-    "artifacts:write_only_artifact::nuclei-results.jsonl": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
-    "artifacts:write_only_artifact::nuclei-targets.txt": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
     "artifacts:write_only_artifact::observation-status.json": {
       "note": "operator-facing layer-resolution audit trail; surfaced when the atomic-write idiom became visible to the writer classifier"
     },
@@ -448,9 +436,6 @@
     "artifacts:write_only_artifact::stderr.log": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
-    "artifacts:write_only_artifact::stdout.log": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
     "artifacts:write_only_artifact::study-report.md": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
@@ -476,9 +461,6 @@
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
     "artifacts:write_only_artifact::threats.json": {
-      "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
-    },
-    "artifacts:write_only_artifact::tier-diagnostics.json": {
       "note": "artifact triaged at baseline cut: operator/LLM-facing output, externally produced input, or wiring pending"
     },
     "artifacts:write_only_artifact::tool-matrix.txt": {
@@ -617,9 +599,6 @@
       "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
     },
     "dead:dead_function:packages/exploit_feasibility/errors.py:reset_error_collector": {
-      "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
-    },
-    "dead:dead_function:packages/exploit_feasibility/schema.py:validate_context_file": {
       "note": "kept: public API surface (operator decision 2026-08-16); zero in-repo consumers \u2014 revisit"
     },
     "dead:dead_method:core/audit/tests/test_return_census.py:TestCpgUsage._fake_server_rows": {
@@ -771,12 +750,6 @@
     },
     "plumbing:orphan_config_field:packages/autonomous/planner.py:FuzzingState.last_coverage_increase": {
       "note": "kept: autonomous fuzzing loop feature seed (operator decision 2026-08-16; re-affirmed 2026-08-17 config-orphan pass \u2014 goal_progress and strategies_tried deleted as shadowed by Goal.progress / successful_strategies). This is the natural input the wired loop derives coverage_plateau_duration from."
-    },
-    "plumbing:orphan_env_var::SEMGREP_ENABLE_VERSION_CHECK": {
-      "note": "external consumer by design: the variable is semgrep's own phone-home suppression switch, exported into every child env so any invocation shape (including subcommands without the argv flags) stays offline"
-    },
-    "plumbing:orphan_env_var::SEMGREP_SEND_METRICS": {
-      "note": "external consumer by design: the variable is semgrep's own phone-home suppression switch, exported into every child env so any invocation shape (including subcommands without the argv flags) stays offline"
     }
   },
   "version": 1
