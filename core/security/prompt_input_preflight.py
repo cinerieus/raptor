@@ -66,11 +66,21 @@ class PreflightResult:
 _REDOS_SHAPES = (
     re.compile(r'[+*]\)[+*]'),       # (...+)+ , (...*)* , (...+)* , (...*)+
     re.compile(r'\)\?\)\?\)'),        # deeply nested optional groups
-    re.compile(r'\([^()]*\|[^()]*\)\+'),  # (a|aa)+ alternation overlap
+    # (a|aa)+ AND (a|aa)* alternation overlap — the starred twin
+    # backtracks just as exponentially as the plus form.
+    re.compile(r'\([^()]*\|[^()]*\)[+*]'),
 )
 
 
-def _looks_redos(pattern: str) -> bool:
+def looks_redos(pattern: str) -> bool:
+    """Whether *pattern* carries a catastrophic-backtracking shape.
+
+    Heuristic (see ``_REDOS_SHAPES``) — it catches the classic nested
+    unbounded quantifiers, not every super-linear pattern, so callers
+    compiling less-trusted patterns should pair it with a length cap
+    and keep a non-regex fallback. Shared with consumers that compile
+    LLM-derived patterns (e.g. domain-model grep hints).
+    """
     return any(s.search(pattern) for s in _REDOS_SHAPES)
 
 
@@ -95,7 +105,7 @@ def _load_patterns() -> dict[str, tuple[re.Pattern[str], ...]]:
             # super-linear matcher into a hot path. Drop the
             # offender with a clear log line so the pattern author
             # sees it on first run.
-            if _looks_redos(stripped):
+            if looks_redos(stripped):
                 # No `logger` import in this module — use stdlib
                 # logging at module scope to avoid the import.
                 import logging

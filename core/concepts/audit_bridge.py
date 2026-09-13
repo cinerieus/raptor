@@ -306,6 +306,37 @@ def domain_security_context(out_dir: Path) -> str | None:
     return "\n".join(lines)
 
 
+# Complexity cap for LLM-derived grep hints compiled as regexes.
+# Both directions matter: too low and legitimate multi-alternative
+# hints ("memcpy|memmove|strcpy...(dozens of sinks)") silently lose
+# regex semantics and stop selecting their pattern; too high and a
+# pathological hint (steerable by hostile repo content through the
+# study LLM) gets more room for slow constructs before the substring
+# fallback catches it. 256 covers every hint shape study emits today
+# with headroom, while keeping worst-case scan cost per function
+# bounded.
+_MAX_GREP_HINT_CHARS = 256
+
+
+def _grep_hint_compilable(grep_hint: str) -> bool:
+    """Whether an LLM-derived grep hint may be compiled as a regex.
+
+    ``what_to_grep`` is LLM output derived from the untrusted target,
+    and it runs per-function over source text — a catastrophic-
+    backtracking pattern can pin a review worker for hours, and only
+    ``re.error`` was caught. Refused hints fall back to the plain
+    substring match (the same degradation already used for
+    non-compiling hints): fail toward less selection power, never
+    toward unbounded matching cost.
+    """
+    from core.security.prompt_input_preflight import looks_redos
+
+    return (
+        len(grep_hint) <= _MAX_GREP_HINT_CHARS
+        and not looks_redos(grep_hint)
+    )
+
+
 def domain_bug_patterns(
     out_dir: Path,
     file_path: str,
@@ -334,10 +365,15 @@ def domain_bug_patterns(
         hit = False
         grep_hint = (bp.get("what_to_grep") or "").strip()
         if source and grep_hint:
-            try:
-                hit = re.search(grep_hint, source, re.IGNORECASE) is not None
-            except re.error:
+            if not _grep_hint_compilable(grep_hint):
                 hit = grep_hint.lower() in source.lower()
+            else:
+                try:
+                    hit = re.search(
+                        grep_hint, source, re.IGNORECASE,
+                    ) is not None
+                except re.error:
+                    hit = grep_hint.lower() in source.lower()
         if not hit and source:
             hit = _relevance_score(bp, file_path, function_name, source) > 1.0
         if hit or not source:

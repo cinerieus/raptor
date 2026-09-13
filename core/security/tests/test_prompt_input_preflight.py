@@ -246,3 +246,25 @@ def test_redos_pattern_still_dropped_with_warning(
         loaded = mod._load_patterns()
     assert "custom" not in loaded
     assert any("catastrophic" in r.getMessage() for r in caplog.records)
+
+
+def test_looks_redos_catches_classic_and_starred_shapes():
+    """Overlap alternation under `*` backtracks exactly like the `+`
+    twin — both must be rejected (the `)*` form previously sailed
+    through and pinned a worker on an 88-char input)."""
+    from core.security.prompt_input_preflight import looks_redos
+
+    for shape in (
+        "(a+)+", "(.*)*", r"(\w+)+", "(x+x+)+",
+        "(a|aa)+", "(a|aa)*b", r"(\w|\w\w)*x",
+    ):
+        assert looks_redos(shape), shape
+
+
+def test_looks_redos_passes_benign_patterns():
+    from core.security.prompt_input_preflight import looks_redos
+
+    for shape in (
+        "kfree|kzalloc", "foo.*bar", r"memcpy\(", "(abc)+", "a+b*",
+    ):
+        assert not looks_redos(shape), shape

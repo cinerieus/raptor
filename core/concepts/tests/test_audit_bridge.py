@@ -853,6 +853,58 @@ class TestDomainBugPatterns:
         assert block is not None
         assert "unbalanced paren hint" in block
 
+    @staticmethod
+    def _write_hint_model(tmp_path, hint):
+        (tmp_path / "domain-model.json").write_text(json.dumps({
+            "bug_patterns": [
+                {"id": "p", "description": "hinted pattern",
+                 "what_to_grep": hint},
+            ],
+        }), encoding="utf-8")
+
+    def test_redos_shaped_hint_not_compiled(self, tmp_path):
+        """A nested-quantifier hint (LLM output, steerable by hostile
+        repo content) must degrade to substring matching instead of
+        compiling into a super-linear matcher that runs per-function."""
+        self._write_hint_model(tmp_path, r"(a+)+$")
+        # Would take effectively forever under backtracking; the
+        # substring fallback returns instantly (no literal match).
+        src = "a" * 40 + "b"
+        block = domain_bug_patterns(tmp_path, "a.c", "f", src)
+        assert block is None
+
+    def test_starred_overlap_alternation_hint_not_compiled(self, tmp_path):
+        """`(a|aa)*b` is the `)*` twin of overlap alternation — it
+        backtracks exponentially just like `(a|aa)+` and must hit the
+        same substring fallback."""
+        self._write_hint_model(tmp_path, r"(a|aa)*b$")
+        src = "a" * 40 + "c"
+        block = domain_bug_patterns(tmp_path, "a.c", "f", src)
+        assert block is None
+
+    def test_overlong_hint_falls_back_to_substring(self, tmp_path):
+        from core.concepts.audit_bridge import _MAX_GREP_HINT_CHARS
+        hint = "kfree_" + "x" * _MAX_GREP_HINT_CHARS
+        self._write_hint_model(tmp_path, hint)
+        # Substring semantics: the literal hint text present in source
+        # still selects the pattern.
+        block = domain_bug_patterns(tmp_path, "a.c", "f",
+                                    f"call {hint} done")
+        assert block is not None
+        assert "hinted pattern" in block
+
+    def test_hint_under_cap_keeps_regex_semantics(self, tmp_path):
+        from core.concepts.audit_bridge import _MAX_GREP_HINT_CHARS
+        # Other direction of the cap: a legitimate alternation hint
+        # under the limit must still match as a REGEX (no literal
+        # "kfree|kzalloc" appears in the source).
+        hint = "kfree|kzalloc"
+        assert len(hint) <= _MAX_GREP_HINT_CHARS
+        self._write_hint_model(tmp_path, hint)
+        block = domain_bug_patterns(tmp_path, "a.c", "f", "kzalloc(8);")
+        assert block is not None
+        assert "hinted pattern" in block
+
 
 class TestDomainKeyFiles:
     def test_returns_paths_from_dicts_and_strings(self, extras_out_dir):
