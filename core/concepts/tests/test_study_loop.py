@@ -469,3 +469,52 @@ class TestOverviewSymlinkExclusion:
         # Only a symlink in the tree → nothing inventoried, no LLM
         # call attempted.
         assert (idents, concepts, summary, title) == ([], [], "", "")
+
+
+class TestRunEnvCuration:
+    """_run hands children the curated LLM env, not a full environ copy."""
+
+    def test_env_scrubbed_keys_forwarded_marker_set(self, monkeypatch):
+        mod = _loop
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        monkeypatch.setenv("EDITOR", "evil-editor")
+        monkeypatch.setenv("SOME_RANDOM_SHELL_VAR", "leak-me")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-123")
+        monkeypatch.setenv("RAPTOR_STUDY_MAX_OUTPUT_TOKENS", "9000")
+        rc = mod._run([sys.executable, "-c", "pass"])
+        assert rc == 0
+        env = captured["env"]
+        # Ambient shell state no longer flows to children...
+        assert "EDITOR" not in env
+        assert "SOME_RANDOM_SHELL_VAR" not in env
+        # ...but what the LLM children consume does.
+        assert env.get("ANTHROPIC_API_KEY") == "test-key-123"
+        assert env.get("RAPTOR_STUDY_MAX_OUTPUT_TOKENS") == "9000"
+        assert env.get("_RAPTOR_TRUSTED") == "1"
+
+    def test_study_knob_absent_stays_absent(self, monkeypatch):
+        mod = _loop
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+
+            class R:
+                returncode = 0
+
+            return R()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        monkeypatch.delenv("RAPTOR_STUDY_MAX_OUTPUT_TOKENS", raising=False)
+        mod._run([sys.executable, "-c", "pass"])
+        assert "RAPTOR_STUDY_MAX_OUTPUT_TOKENS" not in captured["env"]
