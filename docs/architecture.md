@@ -53,7 +53,9 @@ raptor/
 ├── engine/            # Detection rules: Semgrep rules, Coccinelle patches,
 │                      #   CodeQL suites, negative controls, schemas
 ├── tiers/             # Expert personas and recovery protocols (loaded on demand)
-├── .claude/           # Slash commands, skills, and agents (the decision layer)
+├── .claude/           # Canonical commands, shared skills, and Claude adapters
+├── .agents/           # Thin Codex skill adapters for canonical commands
+├── .opencode/         # Thin OpenCode command adapters and host configuration
 ├── test/              # Integration and end-to-end tests
 ├── docs/              # Documentation
 ├── out/               # All outputs (scans, logs, reports)
@@ -95,7 +97,7 @@ Two distinct entry points:
 RAPTOR is split into a Python **execution layer** (scanning,
 subprocess management, SARIF parsing, LLM dispatch, cost tracking --
 no judgement calls) and an agent **decision layer** (`AGENTS.md`, `CLAUDE.md`,
-`.claude/`, `tiers/`) that prioritises findings, interprets results,
+`.claude/`, `.agents/`, `.opencode/`, `tiers/`) that prioritises findings, interprets results,
 and decides what to do next. The split means the Python layer runs
 standalone in CI pipelines while the decision layer drives it
 interactively. [Core concepts](concepts.md#two-layers) covers this in

@@ -9,7 +9,7 @@
 ║             ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝        ╚═╝    ╚═════╝ ╚═╝  ╚═╝            ║
 ║                                                                           ║
 ║             Autonomous Offensive/Defensive Research Framework             ║
-║             Based on Claude Code (v3.1.0)                                 ║
+║             Agent-Agnostic Edition: Claude Code, Codex, OpenCode           ║
 ║                                                                           ║
 ║             Gadi Evron, Daniel Cuthbert, Thomas Dullien (Halvar Flake)    ║
 ║             Michael Bargury, John Cartwright                              ║
@@ -27,14 +27,23 @@
 
 ```
 
-<a href="https://github.com/gadievron/raptor/actions/workflows/github-code-scanning/codeql"><img src="https://github.com/gadievron/raptor/actions/workflows/github-code-scanning/codeql/badge.svg"></a>
+<a href="https://github.com/cinerieus/raptor/actions/workflows/codeql.yml"><img src="https://github.com/cinerieus/raptor/actions/workflows/codeql.yml/badge.svg?branch=feature%2Fagent-agnostic-raptor"></a>
+
+> **Agent-agnostic fork:** This fork's default branch adds supported Claude
+> Code, Codex, and OpenCode orchestration and subscription-backed analysis.
+> API-key providers, local models, multi-model roles, and the original
+> Claude-first default remain supported. The upstream project is
+> [gadievron/raptor](https://github.com/gadievron/raptor); fork-specific work
+> is kept on `feature/agent-agnostic-raptor` so `main` can track upstream.
 
 **Authors:** Gadi Evron, Daniel Cuthbert, Thomas Dullien (Halvar Flake), Michael Bargury, John Cartwright
 ([@gadievron](https://github.com/gadievron), [@danielcuthbert](https://github.com/danielcuthbert), [@thomasdullien](https://github.com/thomasdullien), [@mbrg](https://github.com/mbrg), [@grokjc](https://github.com/grokjc))
 
 **Licence:** MIT, see LICENSE. Note that CodeQL has its own licence and does not permit commercial use.
 
-**Repository:** https://github.com/gadievron/raptor
+**Fork:** https://github.com/cinerieus/raptor
+
+**Upstream:** https://github.com/gadievron/raptor
 
 ---
 
@@ -70,14 +79,16 @@ For the analysis dispatch layer, a session launched with `--agent` reuses that a
 
 ```bash
 # Clone the repo
-git clone https://github.com/gadievron/raptor.git
+git clone https://github.com/cinerieus/raptor.git
 cd raptor
 
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install at least one supported agent (example)
+# Install and authenticate at least one supported agent
 npm install -g @anthropic-ai/claude-code
+# npm install -g @openai/codex
+# See https://opencode.ai/docs/ for OpenCode installation
 
 # Install Semgrep (required for scanning)
 pip install semgrep

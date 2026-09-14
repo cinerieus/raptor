@@ -1,5 +1,10 @@
 # RAPTOR Documentation
 
+This fork's default `feature/agent-agnostic-raptor` branch supports Claude
+Code, Codex, and OpenCode as orchestration hosts and subscription-backed
+analysis transports. Fork `main` tracks the upstream
+[gadievron/raptor](https://github.com/gadievron/raptor) project.
+
 RAPTOR is an autonomous offensive and defensive security research framework. It
 combines static analysis, dataflow validation, binary fuzzing, dynamic
 instrumentation, and LLM-powered reasoning to find, validate, and exploit
